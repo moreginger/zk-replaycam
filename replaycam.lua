@@ -25,9 +25,11 @@ local ScrollPanel
 local Label
 local screen0
 
-local updateIntervalFrames = 30 * 5
-local eventFrameHorizon = 30 * 30
-local eventTransitionTime = 30
+local framesPerSecond = 30
+local updateIntervalFrames = framesPerSecond * 5
+local eventFrameHorizon = framesPerSecond * 30
+-- Fraction of importance lost per frame.
+local importanceDecayFactor = 0.001
 
 -- GUI components
 local window_cpl, scroll_cpl, comment_label
@@ -59,8 +61,10 @@ local function selectNextEventToShow()
 	local mostImportantEvent = nil
 	local mostImportance = 0
 	for _, event in pairs(events) do
-		if (event.importance > mostImportance) then
+		local adjImportance = event.importance - (currentFrame - event.started) * event.importance * importanceDecayFactor
+		if (adjImportance > mostImportance) then
 			mostImportantEvent = event
+			mostImportance = adjImportance
 		end
 	end
 	return mostImportantEvent
@@ -161,6 +165,8 @@ function widget:UnitDecloaked(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
+	local x, y, z = spGetUnitPosition(unitID)
+	addEvent(computeImportance(UnitDefs[unitDefID].cost), { x, y, z }, 'unitDestroyed', { unitID })
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
