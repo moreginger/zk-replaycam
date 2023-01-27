@@ -70,11 +70,11 @@ local function setupPanels()
 	window_cpl = Window:New {
 		parent = screen0,
 		dockable = true,
-		name = "Player List", -- NB: needs to be this exact name for HUD preset playerlist handling
+		name = "replaycam",
 		color = { 0, 0, 0, 0 },
-		x = 10,
-		y = 10,
-		width = 200,
+		x = 100,
+		y = 200,
+		width = 300,
 		height = 100,
 		padding = { 0, 0, 0, 0 };
 		draggable = false,
