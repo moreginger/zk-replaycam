@@ -11,13 +11,14 @@ function widget:GetInfo()
 end
 
 local spEcho = Spring.Echo
+local spGetCameraState = Spring.GetCameraState
 local spGetGameFrame = Spring.GetGameFrame
-local spIsReplay = Spring.IsReplay
+local spGetHumanName = Spring.Utilities.GetHumanName
 local spGetSpectatingState = Spring.GetSpectatingState
 local spGetUnitPosition = Spring.GetUnitPosition
-local spGetCameraState = Spring.GetCameraState
-local spSetCameraTarget = Spring.SetCameraTarget
+local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
+local spSetCameraTarget = Spring.SetCameraTarget
 
 local Chili
 local Window
@@ -34,17 +35,24 @@ local importanceDecayFactor = 0.001
 -- GUI components
 local window_cpl, scroll_cpl, comment_label
 
+local unitFinishedEventType = "unitFinished"
+local unitDestroyedEventType = "unitDestroyed"
+
 local events = {}
-local currentEvent = nil
+local currentEvent = {
+	display = {
+		shownAt = -100
+	}
+}
 local timeSinceUpdate = 0
 
 local function computeImportance(metal)
 	return metal
 end
 
-local function addEvent(importance, location, type, unitIds)
+local function addEvent(importance, location, type, unitDefs, units)
 	local event = { importance = importance, location = location, started = spGetGameFrame(), type = type,
-		unitIds = unitIds }
+		unitDefs = unitDefs, units = units }
 	events[#events + 1] = event
 end
 
@@ -68,6 +76,30 @@ local function selectNextEventToShow()
 		end
 	end
 	return mostImportantEvent
+end
+
+local function getHumanName(unitDef, unit)
+	return spGetHumanName(UnitDefs[unitDef], unit)
+end
+
+local function toDisplayInfo(event, frame)
+	local commentary = nil
+	spEcho(event.type == unitFinishedEventType)
+	if (event.type == unitFinishedEventType) then
+		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " built"
+	elseif (event.type == unitDestroyedEventType) then
+		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " destroyed"
+	end
+	return { commentary = commentary, location = event.location, shownAt = frame }
+end
+
+local function updateCamera(displayInfo, frame)
+	local x, y, z = unpack(displayInfo.location)
+	spSetCameraTarget(x, y, z)
+	local cameraState = spGetCameraState()
+	cameraState.height = 2000
+	spSetCameraState(cameraState)
+	currentEvent.shownAtFrame = frame
 end
 
 local function setupPanels()
@@ -129,19 +161,15 @@ end
 function widget:GameFrame(frame)
 	-- TODO: More dynamic consideration of shown vs importance
 	local showForFrames = 30 * 5
-	if (frame % updateIntervalFrames == 0) then
-		if (currentEvent == nil or frame - currentEvent.shownAtFrame > showForFrames) then
-			local newEvent = selectNextEventToShow()
-			if (newEvent ~= nil) then
-				currentEvent = newEvent
-				comment_label:SetCaption(currentEvent.type)
-				local x, y, z = unpack(currentEvent.location)
-				spSetCameraTarget(x, y, z)
-				local cameraState = spGetCameraState()
-				cameraState.height = 2000
-				spSetCameraState(cameraState)
-				currentEvent.shownAtFrame = frame
-			end
+	local doIt = frame % updateIntervalFrames == 0
+	if (doIt and (frame - currentEvent.display.shownAt > showForFrames)) then
+		local newEvent = selectNextEventToShow()
+		if (newEvent ~= nil) then
+			currentEvent = newEvent
+			local display = toDisplayInfo(currentEvent, frame)
+			currentEvent.display = display
+			comment_label:SetCaption(display.commentary)
+			updateCamera(display, frame)
 		end
 	end
 end
@@ -165,13 +193,17 @@ function widget:UnitDecloaked(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(computeImportance(UnitDefs[unitDefID].cost), { x, y, z }, 'unitDestroyed', { unitID })
+	local unitDef = UnitDefs[unitDefID]
+	-- dontcount e.g. terraunit
+	if (not unitDef.customParams.dontcount) then
+		local x, y, z = spGetUnitPosition(unitID)
+		addEvent(computeImportance(UnitDefs[unitDefID].cost * 1.5), { x, y, z }, unitDestroyedEventType, { unitDefID }, { unitID })
+	end
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(computeImportance(UnitDefs[unitDefID].cost), { x, y, z }, 'unitFinished', { unitID })
+	addEvent(computeImportance(UnitDefs[unitDefID].cost), { x, y, z }, unitFinishedEventType, { unitDefID }, { unitID })
 end
 
 function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
