@@ -30,8 +30,6 @@ local screen0
 local framesPerSecond = 30
 local updateIntervalFrames = framesPerSecond * 5
 local eventFrameHorizon = framesPerSecond * 30
--- Fraction of importance lost per frame.
-local importanceDecayFactor = 0.001
 
 -- GUI components
 local window_cpl, scroll_cpl, comment_label
@@ -49,8 +47,11 @@ local function computeImportance(metal)
 end
 
 local function addEvent(importance, location, type, unitDefs, units)
-	local event = { importance = importance, location = location, started = spGetGameFrame(), type = type,
-		unitDefs = unitDefs, units = units }
+	local importanceDecayFactor = 0.1
+	if (type == unitDestroyedEventType) then
+		importanceDecayFactor = importanceDecayFactor * 2
+	end
+	local event = { importance = importance, importanceDecayFactor = importanceDecayFactor, location = location, started = spGetGameFrame(), type = type, unitDefs = unitDefs, units = units }
 	events[#events + 1] = event
 end
 
@@ -67,7 +68,8 @@ local function selectNextEventToShow()
 	local mostImportantEvent = nil
 	local mostImportance = 0
 	for _, event in pairs(events) do
-		local adjImportance = event.importance - (currentFrame - event.started) * event.importance * importanceDecayFactor
+		local eventDecay = math.pow(2, event.importanceDecayFactor * (currentFrame - event.started) / framesPerSecond)
+		local adjImportance = event.importance / eventDecay
 		if (adjImportance > mostImportance) then
 			mostImportantEvent = event
 			mostImportance = adjImportance
@@ -82,12 +84,14 @@ end
 
 local function toDisplayInfo(event, frame)
 	local commentary = nil
+	local tracking = nil
 	if (event.type == unitFinishedEventType) then
 		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " built"
+		tracking = event.units[1]
 	elseif (event.type == unitDestroyedEventType) then
 		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " destroyed"
 	end
-	return { commentary = commentary, height = 1600, heightMin = 1200, heightChange = -20, location = event.location, tracking = event.units[1] }
+	return { commentary = commentary, height = 1600, heightMin = 1200, heightChange = -20, location = event.location, tracking = tracking }
 end
 
 local function updateCamera(displayInfo, dt)
@@ -98,6 +102,7 @@ local function updateCamera(displayInfo, dt)
 				displayInfo.location = { x, y, z }
 			else
 				displayInfo.tracking = nil
+				-- TODO: Adjust importance decay factor of event?
 			end
 		end
 		local x, y, z = unpack(displayInfo.location)
@@ -171,7 +176,7 @@ function widget:GameFrame(frame)
 	local doIt = frame % updateIntervalFrames == 0
 	if (doIt) then
 		local newEvent = selectNextEventToShow()
-		if (newEvent ~= nil) then
+		if (newEvent ~= nil and newEvent ~= currentEvent) then
 			currentEvent = newEvent
 			local display = toDisplayInfo(currentEvent, frame)
 			currentEvent.display = display
