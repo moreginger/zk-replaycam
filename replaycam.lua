@@ -51,7 +51,8 @@ local function addEvent(importance, location, type, unitDefs, units)
 	if (type == unitDestroyedEventType) then
 		importanceDecayFactor = importanceDecayFactor * 2
 	end
-	local event = { importance = importance, importanceDecayFactor = importanceDecayFactor, location = location, started = spGetGameFrame(), type = type, unitDefs = unitDefs, units = units }
+	local event = { importance = importance, importanceDecayFactor = importanceDecayFactor, location = location,
+		started = spGetGameFrame(), type = type, unitDefs = unitDefs, units = units }
 	events[#events + 1] = event
 end
 
@@ -91,7 +92,8 @@ local function toDisplayInfo(event, frame)
 	elseif (event.type == unitDestroyedEventType) then
 		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " destroyed"
 	end
-	return { commentary = commentary, height = 1600, heightMin = 1200, heightChange = -20, location = event.location, tracking = tracking }
+	return { commentary = commentary, height = 1600, heightMin = 1200, heightChange = -20, location = event.location,
+		tracking = tracking }
 end
 
 local function updateCamera(displayInfo, dt)
@@ -186,13 +188,14 @@ function widget:GameFrame(frame)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-	-- TODO: Exclude cancelled units.
-	-- TODO: Exclude commander upgrades.
 	local unitDef = UnitDefs[unitDefID]
-	-- dontcount e.g. terraunit
-	if (not unitDef.customParams.dontcount) then
+	-- Attempt to ignore cancelled builds and other similar things like comm upgrade
+	local skipEvent = attackerTeam == nil
+	-- Ignore dontcount units e.g. terraunit
+	skipEvent = skipEvent or unitDef.customParams.dontcount
+	if (not skipEvent) then
 		local x, y, z = spGetUnitPosition(unitID)
-		addEvent(computeImportance(UnitDefs[unitDefID].cost * 1.5), { x, y, z }, unitDestroyedEventType, { unitDefID },
+		addEvent(computeImportance(UnitDefs[unitDefID].cost * 3), { x, y, z }, unitDestroyedEventType, { unitDefID },
 			{ unitID })
 	end
 end
