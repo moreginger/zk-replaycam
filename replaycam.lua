@@ -15,6 +15,7 @@ local spGetCameraState = Spring.GetCameraState
 local spGetGameFrame = Spring.GetGameFrame
 local spGetHumanName = Spring.Utilities.GetHumanName
 local spGetSpectatingState = Spring.GetSpectatingState
+local spGetUnitIsDead = Spring.GetUnitIsDead
 local spGetUnitPosition = Spring.GetUnitPosition
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
@@ -40,9 +41,6 @@ local unitDestroyedEventType = "unitDestroyed"
 
 local events = {}
 local currentEvent = {
-	display = {
-		shownAt = -100
-	}
 }
 local timeSinceUpdate = 0
 
@@ -84,22 +82,33 @@ end
 
 local function toDisplayInfo(event, frame)
 	local commentary = nil
-	spEcho(event.type == unitFinishedEventType)
 	if (event.type == unitFinishedEventType) then
 		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " built"
 	elseif (event.type == unitDestroyedEventType) then
 		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " destroyed"
 	end
-	return { commentary = commentary, location = event.location, shownAt = frame }
+	return { commentary = commentary, height = 1600, heightMin = 1200, heightChange = -20, location = event.location, tracking = event.units[1] }
 end
 
-local function updateCamera(displayInfo, frame)
-	local x, y, z = unpack(displayInfo.location)
-	spSetCameraTarget(x, y, z)
-	local cameraState = spGetCameraState()
-	cameraState.height = 2000
-	spSetCameraState(cameraState)
-	currentEvent.shownAtFrame = frame
+local function updateCamera(displayInfo, dt)
+	if (displayInfo ~= nil) then
+		if (displayInfo.tracking ~= nil) then
+			local x, y, z = spGetUnitPosition(displayInfo.tracking)
+			if (x ~= nil and y ~= nil and z ~= nil) then
+				displayInfo.location = { x, y, z }
+			else
+				displayInfo.tracking = nil
+			end
+		end
+		local x, y, z = unpack(displayInfo.location)
+		spSetCameraTarget(x, y, z, 1)
+		local height = displayInfo.height + dt * displayInfo.heightChange
+		height = math.max(height, displayInfo.heightMin)
+		displayInfo.height = height
+		local cameraState = spGetCameraState()
+		cameraState.height = height
+		spSetCameraState(cameraState)
+	end
 end
 
 local function setupPanels()
@@ -167,7 +176,6 @@ function widget:GameFrame(frame)
 			local display = toDisplayInfo(currentEvent, frame)
 			currentEvent.display = display
 			comment_label:SetCaption(display.commentary)
-			updateCamera(display, frame)
 		end
 	end
 end
@@ -197,7 +205,8 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	-- dontcount e.g. terraunit
 	if (not unitDef.customParams.dontcount) then
 		local x, y, z = spGetUnitPosition(unitID)
-		addEvent(computeImportance(UnitDefs[unitDefID].cost * 1.5), { x, y, z }, unitDestroyedEventType, { unitDefID }, { unitID })
+		addEvent(computeImportance(UnitDefs[unitDefID].cost * 1.5), { x, y, z }, unitDestroyedEventType, { unitDefID },
+			{ unitID })
 	end
 end
 
@@ -215,10 +224,6 @@ end
 function widget:UnitReverseBuilt(unitID, unitDefID, unitTeam)
 end
 
--- function widget:Update(dt)
--- 	timeSinceUpdate = timeSinceUpdate + dt
--- 	if timeSinceUpdate > (updateIntervalFrames / 30) then
--- 		timeSinceUpdate = 0
--- 		-- TODO: Draw something
--- 	end
--- end
+function widget:Update(dt)
+	updateCamera(currentEvent.display, dt)
+end
