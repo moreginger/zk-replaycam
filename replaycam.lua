@@ -14,7 +14,9 @@ local spEcho = Spring.Echo
 local spGetCameraState = Spring.GetCameraState
 local spGetGameFrame = Spring.GetGameFrame
 local spGetHumanName = Spring.Utilities.GetHumanName
+local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetSpectatingState = Spring.GetSpectatingState
+local spGetTeamInfo = Spring.GetTeamInfo
 local spGetUnitIsDead = Spring.GetUnitIsDead
 local spGetUnitPosition = Spring.GetUnitPosition
 local spIsReplay = Spring.IsReplay
@@ -40,19 +42,18 @@ local unitDestroyedEventType = "unitDestroyed"
 local events = {}
 local currentEvent = {
 }
-local timeSinceUpdate = 0
 
 local function computeImportance(metal)
 	return metal
 end
 
-local function addEvent(importance, location, type, unitDefs, units)
+local function addEvent(importance, location, type, unitDefs, unitIDs, unitTeams)
 	local importanceDecayFactor = 0.1
 	if (type == unitDestroyedEventType) then
 		importanceDecayFactor = importanceDecayFactor * 2
 	end
 	local event = { importance = importance, importanceDecayFactor = importanceDecayFactor, location = location,
-		started = spGetGameFrame(), type = type, unitDefs = unitDefs, units = units }
+		started = spGetGameFrame(), type = type, unitDefs = unitDefs, unitIDs = unitIDs, unitTeams = unitTeams }
 	events[#events + 1] = event
 end
 
@@ -87,10 +88,18 @@ local function toDisplayInfo(event, frame)
 	local commentary = nil
 	local tracking = nil
 	if (event.type == unitFinishedEventType) then
-		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " built"
-		tracking = event.units[1]
+		commentary = getHumanName(event.unitDefs[1], event.unitIDs[1]) .. " built"
+		local _, teamLeader = spGetTeamInfo(event.unitTeams[1])
+		if (teamLeader ~= nil) then
+			commentary = commentary .. " by " .. spGetPlayerInfo(teamLeader)
+		end
+		tracking = event.unitIDs[1]
 	elseif (event.type == unitDestroyedEventType) then
-		commentary = getHumanName(event.unitDefs[1], event.units[1]) .. " destroyed"
+		commentary = getHumanName(event.unitDefs[1], event.unitIDs[1]) .. " destroyed"
+		local _, teamLeader = spGetTeamInfo(event.unitTeams[1])
+		if (teamLeader ~= nil) then
+			commentary = commentary .. " by " .. spGetPlayerInfo(teamLeader)
+		end
 	end
 	return { commentary = commentary, height = 1600, heightMin = 1200, heightChange = -20, location = event.location,
 		tracking = tracking }
@@ -148,7 +157,7 @@ local function setupPanels()
 		width = "100%",
 		x = 0,
 		y = 0,
-		fontSize = 12,
+		fontSize = 14,
 		caption = "The quiet before the storm.",
 	}
 end
@@ -196,13 +205,14 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	if (not skipEvent) then
 		local x, y, z = spGetUnitPosition(unitID)
 		addEvent(computeImportance(UnitDefs[unitDefID].cost * 3), { x, y, z }, unitDestroyedEventType, { unitDefID },
-			{ unitID })
+			{ unitID }, { attackerTeam })
 	end
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(computeImportance(UnitDefs[unitDefID].cost), { x, y, z }, unitFinishedEventType, { unitDefID }, { unitID })
+	addEvent(computeImportance(UnitDefs[unitDefID].cost), { x, y, z }, unitFinishedEventType, { unitDefID }, { unitID },
+		{ unitTeam })
 end
 
 function widget:Update(dt)
