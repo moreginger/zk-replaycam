@@ -185,24 +185,6 @@ function widget:GameFrame(frame)
 	end
 end
 
-function widget:PlayerChanged(playerID)
-end
-
-function widget:TeamChanged(teamID)
-end
-
-function widget:UnitCloaked(unitID, unitDefID, unitTeam)
-end
-
-function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions)
-end
-
-function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
-end
-
-function widget:UnitDecloaked(unitID, unitDefID, unitTeam)
-end
-
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
 	-- TODO: Exclude cancelled units.
 	-- TODO: Exclude commander upgrades.
@@ -218,15 +200,6 @@ end
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
 	addEvent(computeImportance(UnitDefs[unitDefID].cost), { x, y, z }, unitFinishedEventType, { unitDefID }, { unitID })
-end
-
-function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
-end
-
-function widget:UnitIdle(unitID, unitDefID, unitTeam)
-end
-
-function widget:UnitReverseBuilt(unitID, unitDefID, unitTeam)
 end
 
 function widget:Update(dt)
