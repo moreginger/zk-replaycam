@@ -123,7 +123,7 @@ local function setupPanels()
 		parent = window_cpl,
 		width = "100%",
 		height = "100%",
-		padding = { 0, 0, 0, 0 },
+		padding = { 4, 4, 4, 4 },
 		scrollbarSize = 6,
 		horizontalScrollbar = false,
 	}
@@ -159,10 +159,8 @@ function widget:Initialize()
 end
 
 function widget:GameFrame(frame)
-	-- TODO: More dynamic consideration of shown vs importance
-	local showForFrames = 30 * 5
 	local doIt = frame % updateIntervalFrames == 0
-	if (doIt and (frame - currentEvent.display.shownAt > showForFrames)) then
+	if (doIt) then
 		local newEvent = selectNextEventToShow()
 		if (newEvent ~= nil) then
 			currentEvent = newEvent
@@ -193,6 +191,8 @@ function widget:UnitDecloaked(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
+	-- TODO: Exclude cancelled units.
+	-- TODO: Exclude commander upgrades.
 	local unitDef = UnitDefs[unitDefID]
 	-- dontcount e.g. terraunit
 	if (not unitDef.customParams.dontcount) then
