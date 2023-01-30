@@ -36,12 +36,45 @@ local eventFrameHorizon = framesPerSecond * 30
 -- GUI components
 local window_cpl, scroll_cpl, comment_label
 
-local unitFinishedEventType = "unitFinished"
+local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
+local unitBuiltEventType = "unitBuilt"
+
+-- Normalize a table of numeric values to total 1.
+local function normalizeTable(t)
+	local total = 0
+	for _, v in pairs(t) do
+		total = total + v
+	end
+	local result = {}
+	for k, v in pairs(t) do
+		result[k] = v / total
+	end
+	return result
+end
+
+local eventTargetRatios = normalizeTable({
+	unitBuilt = 1,
+	unitDamaged = 4,
+	unitDestroyed = 2
+})
+
+-- These values are dynamically adjusted as we process events.
+-- Note that importance is a different quantity for different events, which is also accounted for here.
+local eventImportanceAdj = normalizeTable({
+	unitBuilt = 2,
+	unitDamaged = 1,
+	unitDestroyed = 4
+})
+
+local eventCounts = {
+	unitBuilt = 1,
+	unitDamaged = 1,
+	unitDestroyed = 1
+}
 
 local events = {}
-local currentEvent = {
-}
+local currentEvent = {}
 
 local function addEvent(importance, location, type, unitDefs, unitIDs, unitTeams)
 	local importanceDecayFactor = 0.1
@@ -55,6 +88,8 @@ end
 
 local function selectNextEventToShow()
 	local currentFrame = spGetGameFrame()
+
+	-- Purge old events.
 	local newEvents = {}
 	for _, event in pairs(events) do
 		if (currentFrame - event.started < eventFrameHorizon) then
@@ -63,15 +98,33 @@ local function selectNextEventToShow()
 	end
 	events = newEvents
 
+	-- Work out modifiers to show more events.
+	local eventRatios = normalizeTable(eventCounts)
+	for k, v in pairs(eventRatios) do
+		local deviation = eventTargetRatios[k] - v
+		-- TODO: Better adjustment / bounding.
+		eventImportanceAdj[k] = math.max(0.01, eventImportanceAdj[k] + deviation * 0.1)
+	end
+	eventImportanceAdj = normalizeTable(eventImportanceAdj)
+
+	for k, v in pairs(eventImportanceAdj) do
+		spEcho(k .. v)
+	end
+
+	-- Find next event to show
 	local mostImportantEvent = nil
 	local mostImportance = 0
 	for _, event in pairs(events) do
 		local eventDecay = math.pow(2, event.importanceDecayFactor * (currentFrame - event.started) / framesPerSecond)
-		local adjImportance = event.importance / eventDecay
+		local adjImportance = event.importance * eventImportanceAdj[event.type] / eventDecay
 		if (adjImportance > mostImportance) then
 			mostImportantEvent = event
 			mostImportance = adjImportance
 		end
+	end
+
+	if (mostImportantEvent ~= nil) then
+		eventCounts[mostImportantEvent.type] = eventCounts[mostImportantEvent.type] + 1
 	end
 	return mostImportantEvent
 end
@@ -83,19 +136,25 @@ end
 local function toDisplayInfo(event, frame)
 	local commentary = nil
 	local tracking = nil
-	if (event.type == unitFinishedEventType) then
-		commentary = getHumanName(event.unitDefs[1], event.unitIDs[1]) .. " built"
-		local _, teamLeader = spGetTeamInfo(event.unitTeams[1])
-		if (teamLeader ~= nil) then
-			commentary = commentary .. " by " .. spGetPlayerInfo(teamLeader)
-		end
+	local unitName = getHumanName(event.unitDefs[1], event.unitIDs[1])
+
+	local teamLeader = nil
+	if (event.unitTeams[1] ~= nil) then
+		_, teamLeader = spGetTeamInfo(event.unitTeams[1])
+	end
+	local actorName = "unknown"
+	if (teamLeader ~= nil) then
+		actorName = spGetPlayerInfo(teamLeader)
+	end
+
+	if (event.type == unitDamagedEventType) then
+		commentary = unitName .. " attacked by " .. actorName
 		tracking = event.unitIDs[1]
 	elseif (event.type == unitDestroyedEventType) then
-		commentary = getHumanName(event.unitDefs[1], event.unitIDs[1]) .. " destroyed"
-		local _, teamLeader = spGetTeamInfo(event.unitTeams[1])
-		if (teamLeader ~= nil) then
-			commentary = commentary .. " by " .. spGetPlayerInfo(teamLeader)
-		end
+		commentary = unitName .. " destroyed by " .. actorName
+	elseif (event.type == unitBuiltEventType) then
+		commentary = unitName .. " built by " .. actorName
+		tracking = event.unitIDs[1]
 	end
 	return { commentary = commentary, height = 1600, heightMin = 1200, heightChange = -20, location = event.location,
 		tracking = tracking }
@@ -162,8 +221,6 @@ function widget:Initialize()
 	-- TODO: Force overhead camera
 	local loadText = "LOADED "
 	if (WG.Chili and (spIsReplay() or spGetSpectatingState())) then
-		spEcho(loadText .. widget:GetInfo().name)
-
 		Chili = WG.Chili
 		Window = Chili.Window
 		ScrollPanel = Chili.ScrollPanel
@@ -184,12 +241,20 @@ function widget:GameFrame(frame)
 	if (doIt) then
 		local newEvent = selectNextEventToShow()
 		if (newEvent ~= nil and newEvent ~= currentEvent) then
-			currentEvent = newEvent
-			local display = toDisplayInfo(currentEvent, frame)
-			currentEvent.display = display
+			local display = toDisplayInfo(newEvent, frame)
+
+			newEvent.display = display
 			comment_label:SetCaption(display.commentary)
+
+			currentEvent = newEvent
 		end
 	end
+end
+
+function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID,
+                            attackerDefID, attackerTeam)
+	local x, y, z = spGetUnitPosition(unitID)
+	addEvent(damage, { x, y, z }, unitDamagedEventType, { unitDefID }, { unitID }, { attackerTeam })
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
@@ -200,14 +265,14 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	skipEvent = skipEvent or unitDef.customParams.dontcount
 	if (not skipEvent) then
 		local x, y, z = spGetUnitPosition(unitID)
-		addEvent(UnitDefs[unitDefID].cost * 3, { x, y, z }, unitDestroyedEventType, { unitDefID },
+		addEvent(UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, { unitDefID },
 			{ unitID }, { attackerTeam })
 	end
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(UnitDefs[unitDefID].cost, { x, y, z }, unitFinishedEventType, { unitDefID }, { unitID },
+	addEvent(UnitDefs[unitDefID].cost, { x, y, z }, unitBuiltEventType, { unitDefID }, { unitID },
 		{ unitTeam })
 end
 
