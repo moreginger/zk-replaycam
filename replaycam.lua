@@ -55,23 +55,19 @@ end
 
 local eventTargetRatios = normalizeTable({
 	unitBuilt = 1,
-	unitDamaged = 4,
-	unitDestroyed = 2
+	unitDamaged = 3,
+	unitDestroyed = 1
 })
 
 -- These values are dynamically adjusted as we process events.
 -- Note that importance is a different quantity for different events, which is also accounted for here.
 local eventImportanceAdj = normalizeTable({
-	unitBuilt = 2,
+	unitBuilt = 4,
 	unitDamaged = 1,
-	unitDestroyed = 4
+	unitDestroyed = 8
 })
 
-local eventCounts = {
-	unitBuilt = 1,
-	unitDamaged = 1,
-	unitDestroyed = 1
-}
+local shownEventTypes = {}
 
 local events = {}
 local currentEvent = {}
@@ -90,6 +86,7 @@ local function selectNextEventToShow()
 	local currentFrame = spGetGameFrame()
 
 	-- Purge old events.
+	-- TODO: Use linked list.
 	local newEvents = {}
 	for _, event in pairs(events) do
 		if (currentFrame - event.started < eventFrameHorizon) then
@@ -99,11 +96,20 @@ local function selectNextEventToShow()
 	events = newEvents
 
 	-- Work out modifiers to show more events.
+	local eventCounts = {
+		unitBuilt = 0,
+		unitDamaged = 0,
+		unitDestroyed = 0
+	}
+	for _, v in pairs(shownEventTypes) do
+		eventCounts[v] = eventCounts[v] + 1
+	end
+	eventCounts = normalizeTable(eventCounts)
+
 	local eventRatios = normalizeTable(eventCounts)
 	for k, v in pairs(eventRatios) do
 		local deviation = eventTargetRatios[k] - v
-		-- TODO: Better adjustment / bounding.
-		eventImportanceAdj[k] = math.max(0.01, eventImportanceAdj[k] + deviation * 0.1)
+		eventImportanceAdj[k] = math.max(0.001, eventImportanceAdj[k] + deviation * 0.1)
 	end
 	eventImportanceAdj = normalizeTable(eventImportanceAdj)
 
@@ -124,7 +130,11 @@ local function selectNextEventToShow()
 	end
 
 	if (mostImportantEvent ~= nil) then
-		eventCounts[mostImportantEvent.type] = eventCounts[mostImportantEvent.type] + 1
+		-- TODO: Use linked list
+		shownEventTypes[#shownEventTypes+1] = mostImportantEvent.type
+    if (#shownEventTypes == 17) then
+			table.remove(shownEventTypes, 1)
+		end
 	end
 	return mostImportantEvent
 end
