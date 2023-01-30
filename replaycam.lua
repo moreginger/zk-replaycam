@@ -43,10 +43,6 @@ local events = {}
 local currentEvent = {
 }
 
-local function computeImportance(metal)
-	return metal
-end
-
 local function addEvent(importance, location, type, unitDefs, unitIDs, unitTeams)
 	local importanceDecayFactor = 0.1
 	if (type == unitDestroyedEventType) then
@@ -204,14 +200,14 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	skipEvent = skipEvent or unitDef.customParams.dontcount
 	if (not skipEvent) then
 		local x, y, z = spGetUnitPosition(unitID)
-		addEvent(computeImportance(UnitDefs[unitDefID].cost * 3), { x, y, z }, unitDestroyedEventType, { unitDefID },
+		addEvent(UnitDefs[unitDefID].cost * 3, { x, y, z }, unitDestroyedEventType, { unitDefID },
 			{ unitID }, { attackerTeam })
 	end
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(computeImportance(UnitDefs[unitDefID].cost), { x, y, z }, unitFinishedEventType, { unitDefID }, { unitID },
+	addEvent(UnitDefs[unitDefID].cost, { x, y, z }, unitFinishedEventType, { unitDefID }, { unitID },
 		{ unitTeam })
 end
 
