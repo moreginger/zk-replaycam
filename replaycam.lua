@@ -11,13 +11,13 @@ function widget:GetInfo()
 end
 
 local spEcho = Spring.Echo
+local spGetCameraPosition = Spring.GetCameraPosition
 local spGetCameraState = Spring.GetCameraState
 local spGetGameFrame = Spring.GetGameFrame
 local spGetHumanName = Spring.Utilities.GetHumanName
 local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetSpectatingState = Spring.GetSpectatingState
 local spGetTeamInfo = Spring.GetTeamInfo
-local spGetUnitIsDead = Spring.GetUnitIsDead
 local spGetUnitPosition = Spring.GetUnitPosition
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
@@ -71,6 +71,16 @@ local shownEventTypes = {}
 
 local events = {}
 local currentEvent = {}
+
+local camHeightMax = 1600
+local camHeightMin = 1000
+local camera = {
+	x = 0,
+	z = 0,
+	h = camHeightMax,
+	xv = 0,
+	zv = 0
+}
 
 local function addEvent(importance, location, type, unitDefs, unitIDs, unitTeams)
 	local importanceDecayFactor = 0.1
@@ -131,11 +141,12 @@ local function selectNextEventToShow()
 
 	if (mostImportantEvent ~= nil) then
 		-- TODO: Use linked list
-		shownEventTypes[#shownEventTypes+1] = mostImportantEvent.type
-    if (#shownEventTypes == 17) then
+		shownEventTypes[#shownEventTypes + 1] = mostImportantEvent.type
+		if (#shownEventTypes == 17) then
 			table.remove(shownEventTypes, 1)
 		end
 	end
+
 	return mostImportantEvent
 end
 
@@ -166,8 +177,7 @@ local function toDisplayInfo(event, frame)
 		commentary = unitName .. " built by " .. actorName
 		tracking = event.unitIDs[1]
 	end
-	return { commentary = commentary, height = 1600, heightMin = 1200, heightChange = -20, location = event.location,
-		tracking = tracking }
+	return { commentary = commentary, location = event.location, tracking = tracking }
 end
 
 local function updateCamera(displayInfo, dt)
@@ -181,13 +191,53 @@ local function updateCamera(displayInfo, dt)
 				-- TODO: Adjust importance decay factor of event?
 			end
 		end
-		local x, y, z = unpack(displayInfo.location)
-		spSetCameraTarget(x, y, z, 1)
-		local height = displayInfo.height + dt * displayInfo.heightChange
-		height = math.max(height, displayInfo.heightMin)
-		displayInfo.height = height
+		local cameraAccel = 1000
+
+		-- Event location
+		local ex, _, ez = unpack(displayInfo.location)
+		-- Camera position and vector
+		local cx, cz, ch, cxv, czv = camera.x, camera.z, camera.h, camera.xv, camera.zv
+		-- Project out current vector
+		local cv = math.sqrt(cxv * cxv + czv * czv)
+		local px, pz = cx, cz
+		if (cv > 0) then
+			local time = cv / cameraAccel
+			px = px + cxv * time / 2
+			pz = pz + czv * time / 2
+		end
+		-- Offset vector
+		local ox, oz = ex - px, ez - pz
+		local od     = math.sqrt(ox * ox + oz * oz)
+		-- Correction vector
+		local dx, dz = -cxv, -czv
+		if (od > 0) then
+			-- Not 2 x d as we want to accelerate until half way then decelerate.
+			local ov = math.sqrt(od * cameraAccel)
+			dx = dx + ov * ox / od
+			dz = dz + ov * oz / od
+		end
+		local dv = math.sqrt(dx * dx + dz * dz)
+		if (dv > 0) then
+			cxv = cxv + dt * cameraAccel * dx / dv
+			czv = czv + dt * cameraAccel * dz / dv
+		end
+		-- TODO: Bound camera velocity.
+		cx = cx + dt * cxv
+		cz = cz + dt * czv
+
+		camera = {
+			x = cx,
+			z = cz,
+			h = ch,
+			xv = cxv,
+			zv = czv
+		}
+
+		spSetCameraTarget(camera.x, 0, camera.z, 1)
+
+		-- TODO: Dynamic height adjustment.
 		local cameraState = spGetCameraState()
-		cameraState.height = height
+		cameraState.height = camera.h
 		spSetCameraState(cameraState)
 	end
 end
@@ -242,6 +292,16 @@ function widget:Initialize()
 		spEcho(loadText .. "AND REMOVED " .. widget:GetInfo().name)
 		widgetHandler:RemoveWidget()
 	end
+
+	-- TODO: Improve on this, doesn't seem to work well.
+	local cx, _, cz = spGetCameraPosition()
+	camera = {
+		x = cx,
+		z = cz,
+		h = camHeightMax,
+		xv = 0,
+		zv = 0
+	}
 
 	-- TODO: Team / player names
 end
