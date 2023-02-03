@@ -36,7 +36,7 @@ local screen0
 
 local framesPerSecond = 30
 local updateIntervalFrames = framesPerSecond * 5
-local eventFrameHorizon = framesPerSecond * 30
+local eventFrameHorizon = framesPerSecond * 15
 
 local teamInfo = {}
 
@@ -139,10 +139,21 @@ local function selectNextEventToShow()
 
 	-- Purge old events.
 	-- TODO: Use linked list.
-	local newEvents = {}
+	-- TODO: Consider all unit ids in last event.
+	local newEvents, lastEvent, lastEventUnitID = {}, nil, nil
 	for _, event in pairs(events) do
 		if (currentFrame - event.started < eventFrameHorizon) then
-			newEvents[#newEvents + 1] = event
+			if (lastEvent and event.type == lastEvent.type and event.units[lastEventUnitID]) then
+				lastEvent.importance = lastEvent.importance + event.importance
+				lastEvent.started = event.started
+				for actor, _ in pairs(event.actors) do
+					lastEvent.actors[actor] = true
+				end
+			else
+				newEvents[#newEvents + 1] = event
+				lastEvent = event
+				lastEventUnitID, _ = pairs(event.units)(event.units)
+			end
 		end
 	end
 	events = newEvents
@@ -178,14 +189,14 @@ local function selectNextEventToShow()
 		end
 	end
 
-	if (mostImportantEvent ~= nil) then
+	if (mostImportantEvent) then
 		-- TODO: Use linked list
 		shownEventTypes[#shownEventTypes + 1] = mostImportantEvent.type
 		if (#shownEventTypes == 17) then
 			table.remove(shownEventTypes, 1)
 		end
 
-		mostImportantEvent.importance = mostImportantEvent.importance * 0.9
+		mostImportantEvent.importance = mostImportantEvent.importance * 0.8
 	end
 
 	return mostImportantEvent
@@ -227,10 +238,10 @@ local function updateCamera(displayInfo, dt)
 	local cameraAccel = 1000
 	local maxPanDistance = 1000
 
-	if (displayInfo ~= nil) then
-		if (displayInfo.tracking ~= nil) then
+	if (displayInfo) then
+		if (displayInfo.tracking) then
 			local x, y, z = spGetUnitPosition(displayInfo.tracking)
-			if (x ~= nil and y ~= nil and z ~= nil) then
+			if (x and y and z) then
 				displayInfo.location = { x, y, z }
 			else
 				displayInfo.tracking = nil
@@ -361,7 +372,7 @@ function widget:GameFrame(frame)
 	local doIt = frame % updateIntervalFrames == 0
 	if (doIt) then
 		local newEvent = selectNextEventToShow()
-		if (newEvent ~= nil and newEvent ~= currentEvent) then
+		if (newEvent and newEvent ~= currentEvent) then
 			local display = toDisplayInfo(newEvent, frame)
 
 			newEvent.display = display
