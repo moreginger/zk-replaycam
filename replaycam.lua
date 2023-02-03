@@ -11,13 +11,18 @@ function widget:GetInfo()
 end
 
 local spEcho = Spring.Echo
+local spGetAllyTeamList = Spring.GetAllyTeamList
 local spGetCameraPosition = Spring.GetCameraPosition
 local spGetCameraState = Spring.GetCameraState
 local spGetGameFrame = Spring.GetGameFrame
+local spGetGameRulesParam = Spring.GetGameRulesParam
+local spGetGaiaTeamID = Spring.GetGaiaTeamID
 local spGetHumanName = Spring.Utilities.GetHumanName
 local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetSpectatingState = Spring.GetSpectatingState
+local spGetTeamColor = Spring.GetTeamColor
 local spGetTeamInfo = Spring.GetTeamInfo
+local spGetTeamList = Spring.GetTeamList
 local spGetUnitPosition = Spring.GetUnitPosition
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
@@ -32,6 +37,8 @@ local screen0
 local framesPerSecond = 30
 local updateIntervalFrames = framesPerSecond * 5
 local eventFrameHorizon = framesPerSecond * 30
+
+local teamInfo = {}
 
 -- GUI components
 local window_cpl, scroll_cpl, comment_label
@@ -84,6 +91,32 @@ local camera = {
 	zv = 0
 }
 
+local function initTeams()
+	local allyTeamList = spGetAllyTeamList()
+	for _, allyTeamID in pairs(allyTeamList) do
+		local teamList = spGetTeamList(allyTeamID)
+
+		local allyTeam = spGetGameRulesParam("allyteam_long_name_" .. allyTeamID)
+		if string.len(allyTeam) > 10 then
+			allyTeam = spGetGameRulesParam("allyteam_short_name_" .. allyTeamID)
+		end
+
+		for _, teamID in pairs(teamList) do
+			local teamLeader = nil
+			_, teamLeader = spGetTeamInfo(teamID)
+			local teamName = "unknown"
+			if (teamLeader) then
+				teamName = spGetPlayerInfo(teamLeader)
+			end
+			teamInfo[teamID] = {
+				allyTeam = allyTeam, -- TODO: Is there any need for separate ally team name or can just concat here?
+				color = {spGetTeamColor(teamID)} or {1,1,1,1},
+				name = teamName
+			}
+		end
+	end
+end
+
 local function addEvent(importance, location, type, unitDefs, unitIDs, unitTeams)
 	local importanceDecayFactor = 0.1
 	if (type == unitDestroyedEventType) then
@@ -125,10 +158,6 @@ local function selectNextEventToShow()
 	end
 	eventImportanceAdj = normalizeTable(eventImportanceAdj)
 
-	for k, v in pairs(eventImportanceAdj) do
-		spEcho(k .. v)
-	end
-
 	-- Find next event to show
 	local mostImportantEvent = nil
 	local mostImportance = 0
@@ -163,13 +192,10 @@ local function toDisplayInfo(event, frame)
 	local tracking = nil
 	local unitName = getHumanName(event.unitDefs[1], event.unitIDs[1])
 
-	local teamLeader = nil
-	if (event.unitTeams[1] ~= nil) then
-		_, teamLeader = spGetTeamInfo(event.unitTeams[1])
-	end
+	local teamID = event.unitTeams[1]
 	local actorName = "unknown"
-	if (teamLeader ~= nil) then
-		actorName = spGetPlayerInfo(teamLeader)
+	if (teamID) then
+		actorName = teamInfo[teamID].name .. " (" .. teamInfo[teamID].allyTeam .. ")"
 	end
 
 	if (event.type == unitDamagedEventType) then
@@ -267,7 +293,7 @@ local function setupPanels()
 		color = { 0, 0, 0, 0 },
 		x = 100,
 		y = 200,
-		width = 300,
+		width = 500,
 		height = 100,
 		padding = { 0, 0, 0, 0 };
 		draggable = false,
@@ -289,7 +315,7 @@ local function setupPanels()
 		width = "100%",
 		x = 0,
 		y = 0,
-		fontSize = 14,
+		fontSize = 16,
 		caption = "The quiet before the storm.",
 	}
 end
@@ -304,6 +330,7 @@ function widget:Initialize()
 		Label = Chili.Label
 		screen0 = Chili.Screen0
 
+		initTeams()
 		setupPanels()
 	else
 		spEcho(loadText .. "AND REMOVED " .. widget:GetInfo().name)
@@ -319,8 +346,6 @@ function widget:Initialize()
 		xv = 0,
 		zv = 0
 	}
-
-	-- TODO: Team / player names
 end
 
 function widget:GameFrame(frame)
