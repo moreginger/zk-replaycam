@@ -147,6 +147,8 @@ local function selectNextEventToShow()
 		if (#shownEventTypes == 17) then
 			table.remove(shownEventTypes, 1)
 		end
+
+		mostImportantEvent.importance = mostImportantEvent.importance * 0.9
 	end
 
 	return mostImportantEvent
@@ -331,6 +333,8 @@ function widget:GameFrame(frame)
 			newEvent.display = display
 			comment_label:SetCaption(display.commentary)
 
+			-- Don't bounce between events e.g. comm spawn.
+			currentEvent.importance = 0
 			currentEvent = newEvent
 		end
 	end
