@@ -110,20 +110,27 @@ local function initTeams()
 			end
 			teamInfo[teamID] = {
 				allyTeam = allyTeam, -- TODO: Is there any need for separate ally team name or can just concat here?
-				color = {spGetTeamColor(teamID)} or {1,1,1,1},
+				color = { spGetTeamColor(teamID) } or { 1, 1, 1, 1 },
 				name = teamName
 			}
 		end
 	end
 end
 
-local function addEvent(importance, location, type, unitDefs, unitIDs, unitTeams)
+local function addEvent(actor, importance, location, type, unit, unitDef)
 	local importanceDecayFactor = 0.1
 	if (type == unitDestroyedEventType) then
 		importanceDecayFactor = importanceDecayFactor * 2
 	end
-	local event = { importance = importance, importanceDecayFactor = importanceDecayFactor, location = location,
-		started = spGetGameFrame(), type = type, unitDefs = unitDefs, unitIDs = unitIDs, unitTeams = unitTeams }
+	local actors = {}
+	if (actor) then
+		actors[actor] = true
+	end
+	local units = {}
+	units[unit] = { unitDef }
+	local event = { actors = actors, importance = importance, importanceDecayFactor = importanceDecayFactor,
+		location = location,
+		started = spGetGameFrame(), type = type, units = units }
 	events[#events + 1] = event
 end
 
@@ -158,6 +165,7 @@ local function selectNextEventToShow()
 	end
 	eventImportanceAdj = normalizeTable(eventImportanceAdj)
 
+	-- TODO: Write decayed importance.
 	-- Find next event to show
 	local mostImportantEvent = nil
 	local mostImportance = 0
@@ -190,22 +198,23 @@ end
 local function toDisplayInfo(event, frame)
 	local commentary = nil
 	local tracking = nil
-	local unitName = getHumanName(event.unitDefs[1], event.unitIDs[1])
+	local unitID, unitInfo = pairs(event.units)(event.units)
+	local actorID = pairs(event.actors)(event.actors)
+	local unitName = getHumanName(unitInfo[1], unitID)
 
-	local teamID = event.unitTeams[1]
 	local actorName = "unknown"
-	if (teamID) then
-		actorName = teamInfo[teamID].name .. " (" .. teamInfo[teamID].allyTeam .. ")"
+	if (actorID) then
+		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeam .. ")"
 	end
 
 	if (event.type == unitDamagedEventType) then
 		commentary = unitName .. " attacked by " .. actorName
-		tracking = event.unitIDs[1]
+		tracking = unitID
 	elseif (event.type == unitDestroyedEventType) then
 		commentary = unitName .. " destroyed by " .. actorName
 	elseif (event.type == unitBuiltEventType) then
 		commentary = unitName .. " built by " .. actorName
-		tracking = event.unitIDs[1]
+		tracking = unitID
 	end
 	return { commentary = commentary, location = event.location, tracking = tracking }
 end
@@ -233,7 +242,7 @@ local function updateCamera(displayInfo, dt)
 		local ex, _, ez = unpack(displayInfo.location)
 		-- Camera position and vector
 		local cx, cz, ch, cxv, czv = camera.x, camera.z, camera.h, camera.xv, camera.zv
-		if (distance(ex-cx, ez-cz) > maxPanDistance) then
+		if (distance(ex - cx, ez - cz) > maxPanDistance) then
 			cx = ex
 			cz = ez
 			cxv = 0
@@ -368,7 +377,8 @@ end
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID,
                             attackerDefID, attackerTeam)
 	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(damage, { x, y, z }, unitDamagedEventType, { unitDefID }, { unitID }, { attackerTeam })
+
+	addEvent(attackerTeam, damage, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
@@ -379,15 +389,13 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	skipEvent = skipEvent or unitDef.customParams.dontcount
 	if (not skipEvent) then
 		local x, y, z = spGetUnitPosition(unitID)
-		addEvent(UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, { unitDefID },
-			{ unitID }, { attackerTeam })
+		addEvent(attackerTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
 	end
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(UnitDefs[unitDefID].cost, { x, y, z }, unitBuiltEventType, { unitDefID }, { unitID },
-		{ unitTeam })
+	addEvent(unitTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
 end
 
 function widget:Update(dt)
