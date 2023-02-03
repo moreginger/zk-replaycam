@@ -70,7 +70,9 @@ local eventImportanceAdj = normalizeTable({
 local shownEventTypes = {}
 
 local events = {}
-local currentEvent = {}
+local currentEvent = {
+	importance = 0
+}
 
 local camHeightMax = 1600
 local camHeightMin = 1000
@@ -180,7 +182,14 @@ local function toDisplayInfo(event, frame)
 	return { commentary = commentary, location = event.location, tracking = tracking }
 end
 
+local function distance(dx, dy)
+	return math.sqrt(dx * dx + dy * dy)
+end
+
 local function updateCamera(displayInfo, dt)
+	local cameraAccel = 1000
+	local maxPanDistance = 1000
+
 	if (displayInfo ~= nil) then
 		if (displayInfo.tracking ~= nil) then
 			local x, y, z = spGetUnitPosition(displayInfo.tracking)
@@ -191,39 +200,45 @@ local function updateCamera(displayInfo, dt)
 				-- TODO: Adjust importance decay factor of event?
 			end
 		end
-		local cameraAccel = 1000
 
 		-- Event location
 		local ex, _, ez = unpack(displayInfo.location)
 		-- Camera position and vector
 		local cx, cz, ch, cxv, czv = camera.x, camera.z, camera.h, camera.xv, camera.zv
-		-- Project out current vector
-		local cv = math.sqrt(cxv * cxv + czv * czv)
-		local px, pz = cx, cz
-		if (cv > 0) then
-			local time = cv / cameraAccel
-			px = px + cxv * time / 2
-			pz = pz + czv * time / 2
+		if (distance(ex-cx, ez-cz) > maxPanDistance) then
+			cx = ex
+			cz = ez
+			cxv = 0
+			czv = 0
+		else
+			-- Project out current vector
+			local cv = distance(cxv, czv)
+			local px, pz = cx, cz
+			if (cv > 0) then
+				local time = cv / cameraAccel
+				px = px + cxv * time / 2
+				pz = pz + czv * time / 2
+			end
+			-- Offset vector
+			local ox, oz = ex - px, ez - pz
+			local od     = distance(ox, oz)
+			-- Correction vector
+			local dx, dz = -cxv, -czv
+			if (od > 0) then
+				-- Not 2 x d as we want to accelerate until half way then decelerate.
+				local ov = math.sqrt(od * cameraAccel)
+				dx = dx + ov * ox / od
+				dz = dz + ov * oz / od
+			end
+			local dv = distance(dx, dz)
+			if (dv > 0) then
+				cxv = cxv + dt * cameraAccel * dx / dv
+				czv = czv + dt * cameraAccel * dz / dv
+			end
+			-- TODO: Bound camera velocity.
+			cx = cx + dt * cxv
+			cz = cz + dt * czv
 		end
-		-- Offset vector
-		local ox, oz = ex - px, ez - pz
-		local od     = math.sqrt(ox * ox + oz * oz)
-		-- Correction vector
-		local dx, dz = -cxv, -czv
-		if (od > 0) then
-			-- Not 2 x d as we want to accelerate until half way then decelerate.
-			local ov = math.sqrt(od * cameraAccel)
-			dx = dx + ov * ox / od
-			dz = dz + ov * oz / od
-		end
-		local dv = math.sqrt(dx * dx + dz * dz)
-		if (dv > 0) then
-			cxv = cxv + dt * cameraAccel * dx / dv
-			czv = czv + dt * cameraAccel * dz / dv
-		end
-		-- TODO: Bound camera velocity.
-		cx = cx + dt * cxv
-		cz = cz + dt * czv
 
 		camera = {
 			x = cx,
