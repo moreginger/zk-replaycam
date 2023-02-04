@@ -10,13 +10,50 @@ function widget:GetInfo()
 	}
 end
 
+-- UTILITY FUNCTIONS
+
+-- Initialize a table.
+local function initTable(key, value)
+	local map = {}
+	if (key) then
+		map[key] = value
+	end
+	return map
+end
+
+-- Normalize a table of numeric values to total 1.
+local function normalizeTable(t)
+	local total = 0
+	for _, v in pairs(t) do
+		total = total + v
+	end
+	local result = {}
+	for k, v in pairs(t) do
+		result[k] = v / total
+	end
+	return result
+end
+
+-- Calculate length of a vector
+local function length(x, y)
+	return math.sqrt(x * x + y * y)
+end
+
+-- Calculate x, z distance between two { x, y, z } points.
+local function distance(p1, p2)
+	local p1x, _, p1z = unpack(p1)
+	local p2x, _, p2z = unpack(p2)
+	return length(p1x - p2x, p1z - p2z)
+end
+
+-- END UTILITY FUNCTIONS
+
 local spEcho = Spring.Echo
 local spGetAllyTeamList = Spring.GetAllyTeamList
 local spGetCameraPosition = Spring.GetCameraPosition
 local spGetCameraState = Spring.GetCameraState
 local spGetGameFrame = Spring.GetGameFrame
 local spGetGameRulesParam = Spring.GetGameRulesParam
-local spGetGaiaTeamID = Spring.GetGaiaTeamID
 local spGetHumanName = Spring.Utilities.GetHumanName
 local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetSpectatingState = Spring.GetSpectatingState
@@ -47,23 +84,10 @@ local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
 local unitBuiltEventType = "unitBuilt"
 
--- Normalize a table of numeric values to total 1.
-local function normalizeTable(t)
-	local total = 0
-	for _, v in pairs(t) do
-		total = total + v
-	end
-	local result = {}
-	for k, v in pairs(t) do
-		result[k] = v / total
-	end
-	return result
-end
-
 local eventTargetRatios = normalizeTable({
 	unitBuilt = 1,
 	unitDamaged = 3,
-	unitDestroyed = 1
+	unitDestroyed = 2
 })
 
 -- These values are dynamically adjusted as we process events.
@@ -118,41 +142,43 @@ local function initTeams()
 end
 
 local function addEvent(actor, importance, location, type, unit, unitDef)
-	local importanceDecayFactor = 0.1
-	if (type == unitDestroyedEventType) then
-		importanceDecayFactor = importanceDecayFactor * 2
-	end
-	local actors = {}
-	if (actor) then
-		actors[actor] = true
-	end
-	local units = {}
-	units[unit] = { unitDef }
-	local event = { actors = actors, importance = importance, importanceDecayFactor = importanceDecayFactor,
+	local event = {
+		actors = initTable(actor, true),
+		importance = importance,
 		location = location,
-		started = spGetGameFrame(), type = type, units = units }
+		object = spGetHumanName(UnitDefs[unitDef], unit),
+		started = spGetGameFrame(),
+		type = type,
+		units = initTable(unit, true)
+	}
 	events[#events + 1] = event
+	return event
 end
 
 local function selectNextEventToShow()
+	local eventMergeRange = 256
+
 	local currentFrame = spGetGameFrame()
 
 	-- Purge old events.
 	-- TODO: Use linked list.
-	-- TODO: Consider all unit ids in last event.
-	local newEvents, lastEvent, lastEventUnitID = {}, nil, nil
+	local newEvents, lastEvent = {}, nil
 	for _, event in pairs(events) do
 		if (currentFrame - event.started < eventFrameHorizon) then
-			if (lastEvent and event.type == lastEvent.type and event.units[lastEventUnitID]) then
+			if (
+					lastEvent and event.type == lastEvent.type and event.object == lastEvent.object and
+							distance(event.location, lastEvent.location) < 256) then
 				lastEvent.importance = lastEvent.importance + event.importance
 				lastEvent.started = event.started
 				for actor, _ in pairs(event.actors) do
 					lastEvent.actors[actor] = true
 				end
+				for unit, _ in pairs(event.units) do
+					lastEvent.units[unit] = true
+				end
 			else
 				newEvents[#newEvents + 1] = event
 				lastEvent = event
-				lastEventUnitID, _ = pairs(event.units)(event.units)
 			end
 		end
 	end
@@ -181,7 +207,7 @@ local function selectNextEventToShow()
 	local mostImportantEvent = nil
 	local mostImportance = 0
 	for _, event in pairs(events) do
-		local eventDecay = math.pow(2, event.importanceDecayFactor * (currentFrame - event.started) / framesPerSecond)
+		local eventDecay = math.pow(2, (currentFrame - event.started) / framesPerSecond)
 		local adjImportance = event.importance * eventImportanceAdj[event.type] / eventDecay
 		if (adjImportance > mostImportance) then
 			mostImportantEvent = event
@@ -202,107 +228,116 @@ local function selectNextEventToShow()
 	return mostImportantEvent
 end
 
-local function getHumanName(unitDef, unit)
-	return spGetHumanName(UnitDefs[unitDef], unit)
-end
-
 local function toDisplayInfo(event, frame)
 	local commentary = nil
-	local tracking = nil
-	local unitID, unitInfo = pairs(event.units)(event.units)
 	local actorID = pairs(event.actors)(event.actors)
-	local unitName = getHumanName(unitInfo[1], unitID)
 
+	-- TODO: Tailor message if multiple actors
 	local actorName = "unknown"
 	if (actorID) then
 		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeam .. ")"
 	end
 
 	if (event.type == unitDamagedEventType) then
-		commentary = unitName .. " attacked by " .. actorName
-		tracking = unitID
+		-- TODO: Add actor when Spring allows it: https://github.com/beyond-all-reason/spring/issues/391
+		commentary = event.object .. " under attack"
 	elseif (event.type == unitDestroyedEventType) then
-		commentary = unitName .. " destroyed by " .. actorName
+		commentary = event.object .. " destroyed by " .. actorName
 	elseif (event.type == unitBuiltEventType) then
-		commentary = unitName .. " built by " .. actorName
-		tracking = unitID
+		commentary = event.object .. " built by " .. actorName
 	end
-	return { commentary = commentary, location = event.location, tracking = tracking }
-end
-
-local function distance(dx, dy)
-	return math.sqrt(dx * dx + dy * dy)
+	return { commentary = commentary, location = event.location, tracking = event.units }
 end
 
 local function updateCamera(displayInfo, dt)
-	local cameraAccel = 1000
-	local maxPanDistance = 1000
+	local cameraAccel = 1024
+	local maxPanDistance = 1024
 
-	if (displayInfo) then
-		if (displayInfo.tracking) then
-			local x, y, z = spGetUnitPosition(displayInfo.tracking)
-			if (x and y and z) then
-				displayInfo.location = { x, y, z }
-			else
-				displayInfo.tracking = nil
-				-- TODO: Adjust importance decay factor of event?
-			end
-		end
-
-		-- Event location
-		local ex, _, ez = unpack(displayInfo.location)
-		-- Camera position and vector
-		local cx, cz, ch, cxv, czv = camera.x, camera.z, camera.h, camera.xv, camera.zv
-		if (distance(ex - cx, ez - cz) > maxPanDistance) then
-			cx = ex
-			cz = ez
-			cxv = 0
-			czv = 0
-		else
-			-- Project out current vector
-			local cv = distance(cxv, czv)
-			local px, pz = cx, cz
-			if (cv > 0) then
-				local time = cv / cameraAccel
-				px = px + cxv * time / 2
-				pz = pz + czv * time / 2
-			end
-			-- Offset vector
-			local ox, oz = ex - px, ez - pz
-			local od     = distance(ox, oz)
-			-- Correction vector
-			local dx, dz = -cxv, -czv
-			if (od > 0) then
-				-- Not 2 x d as we want to accelerate until half way then decelerate.
-				local ov = math.sqrt(od * cameraAccel)
-				dx = dx + ov * ox / od
-				dz = dz + ov * oz / od
-			end
-			local dv = distance(dx, dz)
-			if (dv > 0) then
-				cxv = cxv + dt * cameraAccel * dx / dv
-				czv = czv + dt * cameraAccel * dz / dv
-			end
-			-- TODO: Bound camera velocity.
-			cx = cx + dt * cxv
-			cz = cz + dt * czv
-		end
-
-		camera = {
-			x = cx,
-			z = cz,
-			h = ch,
-			xv = cxv,
-			zv = czv
-		}
-
-		spSetCameraTarget(camera.x, 0, camera.z, 1)
-
-		-- TODO: Dynamic height adjustment.
-		local cameraState = spGetCameraState()
-		cameraState.height = camera.h
-		spSetCameraState(cameraState)
+	if (not displayInfo) then
+		return
 	end
+
+	if (displayInfo.tracking) then
+		-- TODO: What if units are a long way apart e.g. Bertha kill?
+		-- TODO: Use last location in lieu of positioning info?
+		local xSum, ySum, zSum, count = 0, 0, 0, 0
+		for unit, _ in pairs(displayInfo.tracking) do
+			local x, y, z = spGetUnitPosition(unit)
+			if (x and y and z) then
+				xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
+				count = count + 1
+			else
+				table.remove(displayInfo.tracking, unit)
+			end
+		end
+		if (count > 0) then
+			spEcho("count", count)
+			displayInfo.location = {
+				xSum / count,
+				ySum / count,
+				zSum / count,
+			}
+		else
+			displayInfo.tracking = nil
+		end
+
+		-- TODO: Adjust importance decay factor of event if no tracking?
+	end
+
+	-- Event location
+	local ex, _, ez = unpack(displayInfo.location)
+	spEcho("location", ex, ez)
+	-- Camera position and vector
+	local cx, cz, ch, cxv, czv = camera.x, camera.z, camera.h, camera.xv, camera.zv
+	if (length(ex - cx, ez - cz) > maxPanDistance) then
+		cx = ex
+		cz = ez
+		cxv = 0
+		czv = 0
+	else
+		-- Project out current vector
+		local cv = length(cxv, czv)
+		local px, pz = cx, cz
+		if (cv > 0) then
+			local time = cv / cameraAccel
+			px = px + cxv * time / 2
+			pz = pz + czv * time / 2
+		end
+		-- Offset vector
+		local ox, oz = ex - px, ez - pz
+		local od     = length(ox, oz)
+		-- Correction vector
+		local dx, dz = -cxv, -czv
+		if (od > 0) then
+			-- Not 2 x d as we want to accelerate until half way then decelerate.
+			local ov = math.sqrt(od * cameraAccel)
+			dx = dx + ov * ox / od
+			dz = dz + ov * oz / od
+		end
+		local dv = length(dx, dz)
+		if (dv > 0) then
+			cxv = cxv + dt * cameraAccel * dx / dv
+			czv = czv + dt * cameraAccel * dz / dv
+		end
+		-- TODO: Bound camera velocity.
+		cx = cx + dt * cxv
+		cz = cz + dt * czv
+	end
+
+	camera = {
+		x = cx,
+		z = cz,
+		h = ch,
+		xv = cxv,
+		zv = czv
+	}
+
+	spSetCameraTarget(camera.x, 0, camera.z, 1)
+
+	-- TODO: Dynamic height adjustment.
+	local cameraState = spGetCameraState()
+	cameraState.height = camera.h
+	spSetCameraState(cameraState)
 end
 
 local function setupPanels()
@@ -388,7 +423,6 @@ end
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID,
                             attackerDefID, attackerTeam)
 	local x, y, z = spGetUnitPosition(unitID)
-
 	addEvent(attackerTeam, damage, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
 end
 
@@ -400,12 +434,14 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	skipEvent = skipEvent or unitDef.customParams.dontcount
 	if (not skipEvent) then
 		local x, y, z = spGetUnitPosition(unitID)
-		addEvent(attackerTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
+		local event = addEvent(attackerTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
+		event.units[attackerID] = true
 	end
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
+	spEcho("UnitFinished", unitID, unitDefID, unitTeam)
 	addEvent(unitTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
 end
 
