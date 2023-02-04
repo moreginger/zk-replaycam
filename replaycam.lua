@@ -271,7 +271,6 @@ local function updateCamera(displayInfo, dt)
 			end
 		end
 		if (count > 0) then
-			spEcho("count", count)
 			displayInfo.location = {
 				xSum / count,
 				ySum / count,
@@ -441,7 +440,6 @@ end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
-	spEcho("UnitFinished", unitID, unitDefID, unitTeam)
 	addEvent(unitTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
 end
 
