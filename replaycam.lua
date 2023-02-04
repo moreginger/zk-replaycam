@@ -46,6 +46,11 @@ local function distance(p1, p2)
 	return length(p1x - p2x, p1z - p2z)
 end
 
+-- Bound a number to be >= min and <= max
+local function bound(x, min, max)
+	return math.min(math.max(x, min), max)
+end
+
 -- END UTILITY FUNCTIONS
 
 local spEcho = Spring.Echo
@@ -64,6 +69,9 @@ local spGetUnitPosition = Spring.GetUnitPosition
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
 local spSetCameraTarget = Spring.SetCameraTarget
+
+local mapSizeX = Game.mapSizeX
+local mapSizeZ = Game.mapSizeZ
 
 local Chili
 local Window
@@ -252,6 +260,7 @@ end
 local function updateCamera(displayInfo, dt)
 	local cameraAccel = 1024
 	local maxPanDistance = 1024
+	local mapEdgeBorder = 256
 
 	if (not displayInfo) then
 		return
@@ -285,7 +294,7 @@ local function updateCamera(displayInfo, dt)
 
 	-- Event location
 	local ex, _, ez = unpack(displayInfo.location)
-	spEcho("location", ex, ez)
+	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Camera position and vector
 	local cx, cz, ch, cxv, czv = camera.x, camera.z, camera.h, camera.xv, camera.zv
 	if (length(ex - cx, ez - cz) > maxPanDistance) then
