@@ -157,7 +157,7 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 		object = spGetHumanName(UnitDefs[unitDef], unit),
 		started = spGetGameFrame(),
 		type = type,
-		units = initTable(unit, true)
+		units = initTable(unit, location)
 	}
 	events[#events + 1] = event
 	return event
@@ -175,14 +175,14 @@ local function selectNextEventToShow()
 		if (currentFrame - event.started < eventFrameHorizon) then
 			if (
 					lastEvent and event.type == lastEvent.type and event.object == lastEvent.object and
-							distance(event.location, lastEvent.location) < 256) then
+							distance(event.location, lastEvent.location) < eventMergeRange) then
 				lastEvent.importance = lastEvent.importance + event.importance
 				lastEvent.started = event.started
-				for actor, _ in pairs(event.actors) do
-					lastEvent.actors[actor] = true
+				for actor, v in pairs(event.actors) do
+					lastEvent.actors[actor] = v
 				end
-				for unit, _ in pairs(event.units) do
-					lastEvent.units[unit] = true
+				for unit, v in pairs(event.units) do
+					lastEvent.units[unit] = v
 				end
 			else
 				newEvents[#newEvents + 1] = event
@@ -266,31 +266,26 @@ local function updateCamera(displayInfo, dt)
 		return
 	end
 
-	if (displayInfo.tracking) then
-		-- TODO: What if units are a long way apart e.g. Bertha kill?
-		-- TODO: Use last location in lieu of positioning info?
-		local xSum, ySum, zSum, count = 0, 0, 0, 0
-		for unit, _ in pairs(displayInfo.tracking) do
-			local x, y, z = spGetUnitPosition(unit)
-			if (x and y and z) then
-				xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
-				count = count + 1
-			else
-				table.remove(displayInfo.tracking, unit)
-			end
-		end
-		if (count > 0) then
-			displayInfo.location = {
-				xSum / count,
-				ySum / count,
-				zSum / count,
-			}
+	local tracking = displayInfo.tracking
+	-- TODO: What if units are a long way apart e.g. Bertha kill?
+	-- TODO: Use last location in lieu of positioning info?
+	local xSum, ySum, zSum, count = 0, 0, 0, 0
+	for unit, location in pairs(tracking) do
+		local x, y, z = spGetUnitPosition(unit)
+		if (x and y and z) then
+			location = { x, y, z }
+			tracking[unit] = { x, y, z }
 		else
-			displayInfo.tracking = nil
+			x, y, z = unpack(location)
 		end
-
-		-- TODO: Adjust importance decay factor of event if no tracking?
+		xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
+		count = count + 1
 	end
+	displayInfo.location = {
+		xSum / count,
+		ySum / count,
+		zSum / count,
+	}
 
 	-- Event location
 	local ex, _, ez = unpack(displayInfo.location)
@@ -443,7 +438,8 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	if (not skipEvent) then
 		local x, y, z = spGetUnitPosition(unitID)
 		local event = addEvent(attackerTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
-		event.units[attackerID] = true
+		x, y, z = spGetUnitPosition(attackerID)
+		event.units[attackerID] = { x, y, z }
 	end
 end
 
