@@ -3,6 +3,8 @@
     "UnitDefs",
     "widget",
     "Spring",
-    "widgetHandler"
+    "widgetHandler",
+    "Game",
+    "WG"
   ]
 }

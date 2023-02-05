@@ -10,15 +10,47 @@ function widget:GetInfo()
 	}
 end
 
+local spEcho = Spring.Echo
+local spGetAllyTeamList = Spring.GetAllyTeamList
+local spGetCameraPosition = Spring.GetCameraPosition
+local spGetCameraState = Spring.GetCameraState
+local spGetGameFrame = Spring.GetGameFrame
+local spGetGameRulesParam = Spring.GetGameRulesParam
+local spGetHumanName = Spring.Utilities.GetHumanName
+local spGetPlayerInfo = Spring.GetPlayerInfo
+local spGetSpectatingState = Spring.GetSpectatingState
+local spGetTeamColor = Spring.GetTeamColor
+local spGetTeamInfo = Spring.GetTeamInfo
+local spGetTeamList = Spring.GetTeamList
+local spGetUnitPosition = Spring.GetUnitPosition
+local spIsReplay = Spring.IsReplay
+local spSetCameraState = Spring.SetCameraState
+local spSetCameraTarget = Spring.SetCameraTarget
+
+local Chili
+local Window
+local ScrollPanel
+local Label
+local screen0
+
 -- UTILITY FUNCTIONS
 
 -- Initialize a table.
 local function initTable(key, value)
-	local map = {}
+	local result = {}
 	if (key) then
-		map[key] = value
+		result[key] = value
 	end
-	return map
+	return result
+end
+
+-- Initialize 1D table with value.
+local function init1DTable(size, value)
+	local result = {}
+	for i = 1, size do
+		result[i] = value
+	end
+	return result
 end
 
 -- Normalize a table of numeric values to total 1.
@@ -51,42 +83,76 @@ local function bound(x, min, max)
 	return math.min(math.max(x, min), max)
 end
 
--- END UTILITY FUNCTIONS
+-- MAP GRID CLASS
+-- Translates map coordinates into operations on a grid.
 
-local spEcho = Spring.Echo
-local spGetAllyTeamList = Spring.GetAllyTeamList
-local spGetCameraPosition = Spring.GetCameraPosition
-local spGetCameraState = Spring.GetCameraState
-local spGetGameFrame = Spring.GetGameFrame
-local spGetGameRulesParam = Spring.GetGameRulesParam
-local spGetHumanName = Spring.Utilities.GetHumanName
-local spGetPlayerInfo = Spring.GetPlayerInfo
-local spGetSpectatingState = Spring.GetSpectatingState
-local spGetTeamColor = Spring.GetTeamColor
-local spGetTeamInfo = Spring.GetTeamInfo
-local spGetTeamList = Spring.GetTeamList
-local spGetUnitPosition = Spring.GetUnitPosition
-local spIsReplay = Spring.IsReplay
-local spSetCameraState = Spring.SetCameraState
-local spSetCameraTarget = Spring.SetCameraTarget
+MapGrid = { xSize = 0, ySize = 0, mapGridSize = 0, data = nil }
 
-local mapSizeX = Game.mapSizeX
-local mapSizeZ = Game.mapSizeZ
+function MapGrid:new(o, value)
+	o = o or {}   -- create object if user does not provide one
+	setmetatable(o, self)
+	self.__index = self
 
-local Chili
-local Window
-local ScrollPanel
-local Label
-local screen0
+	o.data = o.data or {}
+	for x = 1, o.xSize do
+		o.data[x] = {}
+		for y = 1, o.ySize do
+			o.data[x][y] = value
+		end
+	end
+	return o
+end
+
+function MapGrid:__toGridCoordinates(x, y)
+	x = 1 + math.min(math.floor(x / self.mapGridSize), self.xSize - 1)
+	y = 1 + math.min(math.floor(y / self.mapGridSize), self.ySize - 1)
+	return x, y
+end
+
+function MapGrid:get(x, y)
+	x, y = self:__toGridCoordinates(x, y)
+	return self.data[x][y]
+end
+
+function MapGrid:multiply(x, y, f)
+	x, y = self:__toGridCoordinates(x, y)
+	self.data[x][y] = self.data[x][y] * f
+end
+
+-- TODO: Implement blurring of values.
+function MapGrid:normalize()
+	local total = 0
+	for x = 1, self.xSize do
+		for y = 1, self.ySize do
+			local k, v = pairs(self.data)(self.data)
+			total = total + self.data[x][y]
+		end
+	end
+  for x = 1, self.xSize do
+		for y = 1, self.ySize do
+			self.data[x][y] = self.data[x][y] / total
+		end
+	end
+end
+
+-- CONFIGURATION
 
 local framesPerSecond = 30
 local updateIntervalFrames = framesPerSecond * 5
 local eventFrameHorizon = framesPerSecond * 15
 
+-- WORLD INFO
+
+local mapSizeX, mapSizeZ = Game.mapSizeX, Game.mapSizeZ
+local mapGridSize = 512
+local mapGridX, mapGridZ = mapSizeX / mapGridSize, mapSizeZ / mapGridSize
 local teamInfo = {}
 
--- GUI components
+-- GUI COMPONENTS
+
 local window_cpl, scroll_cpl, comment_label
+
+-- EVENT TRACKING
 
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
@@ -105,13 +171,15 @@ local eventImportanceAdj = normalizeTable({
 	unitDamaged = 1,
 	unitDestroyed = 8
 })
-
 local shownEventTypes = {}
-
 local events = {}
 local currentEvent = {
 	importance = 0
 }
+
+local interestGrid = MapGrid:new({ xSize = mapGridX, ySize = mapGridZ, mapGridSize = mapGridSize }, 1)
+
+-- CAMERA TRACKING
 
 local camHeightMax = 1600
 local camHeightMin = 1000
@@ -166,13 +234,13 @@ end
 local function selectNextEventToShow()
 	local eventMergeRange = 256
 
-	local currentFrame = spGetGameFrame()
-
 	-- Purge old events.
 	-- TODO: Use linked list.
+	local currentFrame = spGetGameFrame()
 	local newEvents, lastEvent = {}, nil
 	for _, event in pairs(events) do
 		if (currentFrame - event.started < eventFrameHorizon) then
+			event.importance = event.importance * 0.6 -- Lose this much importance each cycle
 			if (
 					lastEvent and event.type == lastEvent.type and event.object == lastEvent.object and
 							distance(event.location, lastEvent.location) < eventMergeRange) then
@@ -210,13 +278,14 @@ local function selectNextEventToShow()
 	end
 	eventImportanceAdj = normalizeTable(eventImportanceAdj)
 
-	-- TODO: Write decayed importance.
 	-- Find next event to show
+	interestGrid:normalize()
 	local mostImportantEvent = nil
 	local mostImportance = 0
 	for _, event in pairs(events) do
-		local eventDecay = math.pow(2, (currentFrame - event.started) / framesPerSecond)
-		local adjImportance = event.importance * eventImportanceAdj[event.type] / eventDecay
+		local x, _, z = unpack(event.location)
+		local interestModifier = 1 + interestGrid:get(x, z)
+		local adjImportance = event.importance * interestModifier * eventImportanceAdj[event.type]
 		if (adjImportance > mostImportance) then
 			mostImportantEvent = event
 			mostImportance = adjImportance
@@ -254,6 +323,7 @@ local function toDisplayInfo(event, frame)
 	elseif (event.type == unitBuiltEventType) then
 		commentary = event.object .. " built by " .. actorName
 	end
+
 	return { commentary = commentary, location = event.location, tracking = event.units }
 end
 
@@ -410,6 +480,10 @@ function widget:GameFrame(frame)
 		local newEvent = selectNextEventToShow()
 		if (newEvent and newEvent ~= currentEvent) then
 			local display = toDisplayInfo(newEvent, frame)
+
+			-- Sticky locations.
+			local x, _, z = unpack(display.location)
+			interestGrid:multiply(x, z, 1.2)
 
 			newEvent.display = display
 			comment_label:SetCaption(display.commentary)
