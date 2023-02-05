@@ -152,22 +152,25 @@ local window_cpl, scroll_cpl, comment_label
 
 -- EVENT TRACKING
 
+local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
-local unitBuiltEventType = "unitBuilt"
+local unitMovedEventType = "unitMoved"
 
 local eventTargetRatios = normalizeTable({
 	unitBuilt = 1,
 	unitDamaged = 3,
-	unitDestroyed = 2
+	unitDestroyed = 2,
+	unitMoved = 1,
 })
 
 -- These values are dynamically adjusted as we process events.
 -- Note that importance is a different quantity for different events, which is also accounted for here.
 local eventImportanceAdj = normalizeTable({
-	unitBuilt = 4,
-	unitDamaged = 1,
-	unitDestroyed = 8
+	unitBuilt = 64, -- Initially high as many build actions at start.
+	unitDamaged = 8,
+	unitDestroyed = 64,
+	unitMoved = 4,
 })
 local shownEventTypes = {}
 local events = {}
@@ -232,7 +235,7 @@ end
 local function selectNextEventToShow()
 	local eventMergeRange = 256
 
-	-- Purge old events.
+	-- Purge old events and merge similar events.
 	-- TODO: Use linked list.
 	local currentFrame = spGetGameFrame()
 	local newEvents, lastEvent = {}, nil
@@ -259,22 +262,22 @@ local function selectNextEventToShow()
 	events = newEvents
 
 	-- Work out modifiers to show more events.
-	local eventCounts = {
-		unitBuilt = 0,
-		unitDamaged = 0,
-		unitDestroyed = 0
-	}
-	for _, v in pairs(shownEventTypes) do
-		eventCounts[v] = eventCounts[v] + 1
-	end
-	eventCounts = normalizeTable(eventCounts)
+	if (#shownEventTypes > 0) then
+		local eventCounts = {}
+		for k, _ in pairs(eventTargetRatios) do
+			eventCounts[k] = 0
+		end
+		for _, v in pairs(shownEventTypes) do
+			eventCounts[v] = eventCounts[v] + 1
+		end
 
-	local eventRatios = normalizeTable(eventCounts)
-	for k, v in pairs(eventRatios) do
-		local deviation = eventTargetRatios[k] - v
-		eventImportanceAdj[k] = math.max(0.001, eventImportanceAdj[k] + deviation * 0.1)
+		local eventRatios = normalizeTable(eventCounts)
+		for k, v in pairs(eventRatios) do
+			local deviation = eventTargetRatios[k] - v
+			eventImportanceAdj[k] = math.max(0.001, eventImportanceAdj[k] + deviation * 0.1)
+		end
+		eventImportanceAdj = normalizeTable(eventImportanceAdj)
 	end
-	eventImportanceAdj = normalizeTable(eventImportanceAdj)
 
 	-- Find next event to show
 	interestGrid:fade()
@@ -313,13 +316,15 @@ local function toDisplayInfo(event, frame)
 		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeam .. ")"
 	end
 
-	if (event.type == unitDamagedEventType) then
+	if (event.type == unitBuiltEventType) then
+		commentary = event.object .. " built by " .. actorName
+	elseif (event.type == unitDamagedEventType) then
 		-- TODO: Add actor when Spring allows it: https://github.com/beyond-all-reason/spring/issues/391
 		commentary = event.object .. " under attack"
 	elseif (event.type == unitDestroyedEventType) then
 		commentary = event.object .. " destroyed by " .. actorName
-	elseif (event.type == unitBuiltEventType) then
-		commentary = event.object .. " built by " .. actorName
+	elseif (event.type == unitMovedEventType) then
+		commentary = event.object .. " squad dispatched by " .. actorName
 	end
 
 	return { commentary = commentary, location = event.location, tracking = event.units }
@@ -494,16 +499,13 @@ function widget:GameFrame(frame)
 end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
-	spEcho("UnitCommand")
-	spEcho("unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag")
-	spEcho(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
 	if (cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE) then
-		spEcho("move")
-		spEcho("cmdParams", unpack(cmdParams))
-		spEcho("cmdOpts", unpack(cmdOpts))
-		local x, _, z = unpack(cmdParams)
-		-- TODO balance this with current view.
-		interestGrid:multiply(x, z, 1.1)
+		local mx, _, mz = unpack(cmdParams)
+		-- TODO balance this with current view WRT multiple players.
+		interestGrid:multiply(mx, mz, 1.1)
+		local x, y, z = spGetUnitPosition(unitID)
+		local unitLocation = { x, y, z }
+		addEvent(unitTeam, math.sqrt(distance(cmdParams, unitLocation)), unitLocation, unitMovedEventType, unitID, unitDefID)
 	end
 end
 
