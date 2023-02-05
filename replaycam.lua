@@ -33,6 +33,9 @@ local ScrollPanel
 local Label
 local screen0
 
+local CMD_MOVE = CMD.MOVE
+local CMD_ATTACK_MOVE = CMD.FIGHT
+
 -- UTILITY FUNCTIONS
 
 -- Initialize a table.
@@ -40,15 +43,6 @@ local function initTable(key, value)
 	local result = {}
 	if (key) then
 		result[key] = value
-	end
-	return result
-end
-
--- Initialize 1D table with value.
-local function init1DTable(size, value)
-	local result = {}
-	for i = 1, size do
-		result[i] = value
 	end
 	return result
 end
@@ -89,7 +83,7 @@ end
 MapGrid = { xSize = 0, ySize = 0, mapGridSize = 0, data = nil }
 
 function MapGrid:new(o, value)
-	o = o or {}   -- create object if user does not provide one
+	o = o or {} -- create object if user does not provide one
 	setmetatable(o, self)
 	self.__index = self
 
@@ -119,18 +113,22 @@ function MapGrid:multiply(x, y, f)
 	self.data[x][y] = self.data[x][y] * f
 end
 
--- TODO: Implement blurring of values.
-function MapGrid:normalize()
+-- Fade, blur and normalize over the grid.
+function MapGrid:fade()
+	local fadeRatio = 0.2
 	local total = 0
 	for x = 1, self.xSize do
 		for y = 1, self.ySize do
-			local k, v = pairs(self.data)(self.data)
 			total = total + self.data[x][y]
 		end
 	end
-  for x = 1, self.xSize do
+
+	local fade = fadeRatio / (self.xSize * self.ySize)
+	local scaleFactor = (1 - fadeRatio) / total
+
+	for x = 1, self.xSize do
 		for y = 1, self.ySize do
-			self.data[x][y] = self.data[x][y] / total
+			self.data[x][y] = (self.data[x][y] * scaleFactor) + fade
 		end
 	end
 end
@@ -279,7 +277,7 @@ local function selectNextEventToShow()
 	eventImportanceAdj = normalizeTable(eventImportanceAdj)
 
 	-- Find next event to show
-	interestGrid:normalize()
+	interestGrid:fade()
 	local mostImportantEvent = nil
 	local mostImportance = 0
 	for _, event in pairs(events) do
@@ -492,6 +490,20 @@ function widget:GameFrame(frame)
 			currentEvent.importance = 0
 			currentEvent = newEvent
 		end
+	end
+end
+
+function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
+	spEcho("UnitCommand")
+	spEcho("unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag")
+	spEcho(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
+	if (cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE) then
+		spEcho("move")
+		spEcho("cmdParams", unpack(cmdParams))
+		spEcho("cmdOpts", unpack(cmdOpts))
+		local x, _, z = unpack(cmdParams)
+		-- TODO balance this with current view.
+		interestGrid:multiply(x, z, 1.1)
 	end
 end
 
