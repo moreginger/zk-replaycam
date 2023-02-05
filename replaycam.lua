@@ -321,7 +321,6 @@ local function updateCamera(displayInfo, dt)
 			cxv = cxv + dt * cameraAccel * dx / dv
 			czv = czv + dt * cameraAccel * dz / dv
 		end
-		-- TODO: Bound camera velocity.
 		cx = cx + dt * cxv
 		cz = cz + dt * czv
 	end
