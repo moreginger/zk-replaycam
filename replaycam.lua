@@ -268,7 +268,6 @@ local function updateCamera(displayInfo, dt)
 
 	local tracking = displayInfo.tracking
 	-- TODO: What if units are a long way apart e.g. Bertha kill?
-	-- TODO: Use last location in lieu of positioning info?
 	local xSum, ySum, zSum, count = 0, 0, 0, 0
 	for unit, location in pairs(tracking) do
 		local x, y, z = spGetUnitPosition(unit)
