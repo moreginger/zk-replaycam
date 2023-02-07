@@ -10,6 +10,12 @@ function widget:GetInfo()
 	}
 end
 
+local floor = math.floor
+local max = math.max
+local min = math.min
+local pow = math.pow
+local sqrt = math.sqrt
+
 local spEcho = Spring.Echo
 local spGetAllyTeamList = Spring.GetAllyTeamList
 local spGetCameraPosition = Spring.GetCameraPosition
@@ -30,7 +36,6 @@ local spSetCameraTarget = Spring.SetCameraTarget
 local Chili
 local Window
 local ScrollPanel
-local Label
 local screen0
 
 local CMD_MOVE = CMD.MOVE
@@ -64,7 +69,7 @@ end
 
 -- Calculate length of a vector
 local function length(x, y)
-	return math.sqrt(x * x + y * y)
+	return sqrt(x * x + y * y)
 end
 
 -- Calculate x, z distance between two { x, y, z } points.
@@ -76,7 +81,13 @@ end
 
 -- Bound a number to be >= min and <= max
 local function bound(x, min, max)
-	return math.min(math.max(x, min), max)
+	if (x < min) then
+		return min
+	end
+	if (x > max) then
+		return max
+	end
+	return x
 end
 
 -- WORLD GRID CLASS
@@ -100,8 +111,8 @@ function WorldGrid:new(o, value)
 end
 
 function WorldGrid:__toGridCoordinates(x, y)
-	x = 1 + math.min(math.floor(x / self.gridSize), self.xSize - 1)
-	y = 1 + math.min(math.floor(y / self.gridSize), self.ySize - 1)
+	x = 1 + min(floor(x / self.gridSize), self.xSize - 1)
+	y = 1 + min(floor(y / self.gridSize), self.ySize - 1)
 	return x, y
 end
 
@@ -139,7 +150,7 @@ end
 
 local framesPerSecond = 30
 local updateIntervalFrames = framesPerSecond * 2
-local eventFrameHorizon = framesPerSecond * 15
+local eventFrameHorizon = framesPerSecond * 8
 
 -- WORLD INFO
 
@@ -261,7 +272,7 @@ local function selectNextEventToShow()
 	local newEvents, lastEvent = {}, nil
 	for _, event in pairs(events) do
 		if (currentFrame - event.started < eventFrameHorizon) then
-			local eventDecay = math.pow(0.9, (currentFrame - (event.lastChecked or event.started)) / framesPerSecond)
+			local eventDecay = pow(0.9, (currentFrame - (event.lastChecked or event.started)) / framesPerSecond)
 			event.importance = event.importance * eventDecay
 			event.lastChecked = currentFrame
 			if (
@@ -298,7 +309,7 @@ local function selectNextEventToShow()
 	interestGrid:fade()
 	local mostImportantEvent = nil
 	local mostImportance = 0
-	debugText = ""
+	debugText = "" .. #events .. " events\n"
 	for _, event in pairs(events) do
 		local x, _, z = unpack(event.location)
 		local interestModifier = 1 + interestGrid:get(x, z)
@@ -325,9 +336,9 @@ local function selectNextEventToShow()
 	local currentEventImportanceDecayPerSecond = 0.98
 	if (mostImportantEvent == currentEvent) then
 		mostImportantEvent.importance = mostImportantEvent.importance *
-				math.pow(currentEventImportanceDecayPerSecond, updateIntervalFrames / framesPerSecond)
+				pow(currentEventImportanceDecayPerSecond, updateIntervalFrames / framesPerSecond)
 	else
-		mostImportantEvent.importance = mostImportantEvent.importance / math.pow(currentEventImportanceDecayPerSecond, 2)
+		mostImportantEvent.importance = mostImportantEvent.importance / pow(currentEventImportanceDecayPerSecond, 2)
 	end
 
 	return mostImportantEvent
@@ -418,7 +429,7 @@ local function updateCamera(displayInfo, dt)
 		local dx, dz = -cxv, -czv
 		if (od > 0) then
 			-- Not 2 x d as we want to accelerate until half way then decelerate.
-			local ov = math.sqrt(od * cameraAccel)
+			local ov = sqrt(od * cameraAccel)
 			dx = dx + ov * ox / od
 			dz = dz + ov * oz / od
 		end
@@ -544,13 +555,20 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 
 	local x, y, z = spGetUnitPosition(unitID)
 	local unitLocation = { x, y, z }
-	addEvent(unitTeam, math.sqrt(distance(cmdParams, unitLocation)), unitLocation, unitMovedEventType, unitID, unitDefID)
+	addEvent(unitTeam, sqrt(distance(cmdParams, unitLocation)), unitLocation, unitMovedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID,
                             attackerDefID, attackerTeam)
+	local unitDef = UnitDefs[unitDefID]
+	-- Clamp damage to unit health.
+  local importance = min(unitDef.health, damage)
+	if (paralyzer) then
+		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage.
+		importance = importance / 2
+	end
 	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(attackerTeam, damage, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
+	addEvent(attackerTeam, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
