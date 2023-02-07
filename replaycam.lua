@@ -562,7 +562,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
                             attackerDefID, attackerTeam)
 	local unitDef = UnitDefs[unitDefID]
 	-- Clamp damage to unit health.
-  local importance = min(unitDef.health, damage)
+	local importance = min(unitDef.health, damage)
 	if (paralyzer) then
 		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage.
 		importance = importance / 2
