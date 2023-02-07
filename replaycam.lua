@@ -36,6 +36,8 @@ local screen0
 local CMD_MOVE = CMD.MOVE
 local CMD_ATTACK_MOVE = CMD.FIGHT
 
+local debugText = "DEBUG"
+
 -- UTILITY FUNCTIONS
 
 -- Initialize a table.
@@ -77,12 +79,12 @@ local function bound(x, min, max)
 	return math.min(math.max(x, min), max)
 end
 
--- MAP GRID CLASS
--- Translates map coordinates into operations on a grid.
+-- WORLD GRID CLASS
+-- Translates world coordinates into operations on a grid.
 
-MapGrid = { xSize = 0, ySize = 0, mapGridSize = 0, data = nil }
+WorldGrid = { xSize = 0, ySize = 0, gridSize = 0, data = nil }
 
-function MapGrid:new(o, value)
+function WorldGrid:new(o, value)
 	o = o or {} -- create object if user does not provide one
 	setmetatable(o, self)
 	self.__index = self
@@ -97,24 +99,24 @@ function MapGrid:new(o, value)
 	return o
 end
 
-function MapGrid:__toGridCoordinates(x, y)
-	x = 1 + math.min(math.floor(x / self.mapGridSize), self.xSize - 1)
-	y = 1 + math.min(math.floor(y / self.mapGridSize), self.ySize - 1)
+function WorldGrid:__toGridCoordinates(x, y)
+	x = 1 + math.min(math.floor(x / self.gridSize), self.xSize - 1)
+	y = 1 + math.min(math.floor(y / self.gridSize), self.ySize - 1)
 	return x, y
 end
 
-function MapGrid:get(x, y)
+function WorldGrid:get(x, y)
 	x, y = self:__toGridCoordinates(x, y)
 	return self.data[x][y]
 end
 
-function MapGrid:multiply(x, y, f)
+function WorldGrid:multiply(x, y, f)
 	x, y = self:__toGridCoordinates(x, y)
 	self.data[x][y] = self.data[x][y] * f
 end
 
 -- Fade, blur and normalize over the grid.
-function MapGrid:fade()
+function WorldGrid:fade()
 	local fadeRatio = 0.2
 	local total = 0
 	for x = 1, self.xSize do
@@ -136,19 +138,19 @@ end
 -- CONFIGURATION
 
 local framesPerSecond = 30
-local updateIntervalFrames = framesPerSecond * 5
+local updateIntervalFrames = framesPerSecond * 2
 local eventFrameHorizon = framesPerSecond * 15
 
 -- WORLD INFO
 
 local mapSizeX, mapSizeZ = Game.mapSizeX, Game.mapSizeZ
-local mapGridSize = 512
-local mapGridX, mapGridZ = mapSizeX / mapGridSize, mapSizeZ / mapGridSize
+local worldGridSize = 512
+local mapGridX, mapGridZ = mapSizeX / worldGridSize, mapSizeZ / worldGridSize
 local teamInfo = {}
 
 -- GUI COMPONENTS
 
-local window_cpl, scroll_cpl, comment_label
+local window_cpl, panel_cpl, commentary_cpl
 
 -- EVENT TRACKING
 
@@ -159,18 +161,18 @@ local unitMovedEventType = "unitMoved"
 
 local eventTargetRatios = normalizeTable({
 	unitBuilt = 1,
-	unitDamaged = 3,
-	unitDestroyed = 2,
+	unitDamaged = 5,
+	unitDestroyed = 3,
 	unitMoved = 1,
 })
 
 -- These values are dynamically adjusted as we process events.
 -- Note that importance is a different quantity for different events, which is also accounted for here.
 local eventImportanceAdj = normalizeTable({
-	unitBuilt = 64, -- Initially high as many build actions at start.
-	unitDamaged = 8,
-	unitDestroyed = 64,
-	unitMoved = 4,
+	unitBuilt = 0.05, -- Initially high as many build actions at start.
+	unitDamaged = 0.2,
+	unitDestroyed = 0.8,
+	unitMoved = 0.001,
 })
 local shownEventTypes = {}
 local events = {}
@@ -178,7 +180,7 @@ local currentEvent = {
 	importance = 0
 }
 
-local interestGrid = MapGrid:new({ xSize = mapGridX, ySize = mapGridZ, mapGridSize = mapGridSize }, 1)
+local interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize }, 1)
 
 -- CAMERA TRACKING
 
@@ -220,39 +222,52 @@ end
 
 local function addEvent(actor, importance, location, type, unit, unitDef)
 	local event = {
+		actorCount = 1,
 		actors = initTable(actor, true),
 		importance = importance,
 		location = location,
 		object = spGetHumanName(UnitDefs[unitDef], unit),
 		started = spGetGameFrame(),
 		type = type,
+		unitCount = 1,
 		units = initTable(unit, location)
 	}
 	events[#events + 1] = event
 	return event
 end
 
+local function mergeIntoOld(old, new)
+	old.importance = old.importance + new.importance
+	old.started = new.started
+	for actor, v in pairs(new.actors) do
+		if (not old.actors[actor]) then
+			old.actorCount = old.actorCount + 1
+			old.actors[actor] = v
+		end
+	end
+	for unit, v in pairs(new.units) do
+		if (not old.units[unit]) then
+			old.unitCount = old.unitCount + 1
+			old.units[unit] = v
+		end
+	end
+end
+
 local function selectNextEventToShow()
 	local eventMergeRange = 256
 
 	-- Purge old events and merge similar events.
-	-- TODO: Use linked list.
 	local currentFrame = spGetGameFrame()
 	local newEvents, lastEvent = {}, nil
 	for _, event in pairs(events) do
 		if (currentFrame - event.started < eventFrameHorizon) then
-			event.importance = event.importance * 0.6 -- Lose this much importance each cycle
+			local eventDecay = math.pow(0.9, (currentFrame - (event.lastChecked or event.started)) / framesPerSecond)
+			event.importance = event.importance * eventDecay
+			event.lastChecked = currentFrame
 			if (
 					lastEvent and event.type == lastEvent.type and event.object == lastEvent.object and
 							distance(event.location, lastEvent.location) < eventMergeRange) then
-				lastEvent.importance = lastEvent.importance + event.importance
-				lastEvent.started = event.started
-				for actor, v in pairs(event.actors) do
-					lastEvent.actors[actor] = v
-				end
-				for unit, v in pairs(event.units) do
-					lastEvent.units[unit] = v
-				end
+				mergeIntoOld(lastEvent, event)
 			else
 				newEvents[#newEvents + 1] = event
 				lastEvent = event
@@ -283,6 +298,7 @@ local function selectNextEventToShow()
 	interestGrid:fade()
 	local mostImportantEvent = nil
 	local mostImportance = 0
+	debugText = ""
 	for _, event in pairs(events) do
 		local x, _, z = unpack(event.location)
 		local interestModifier = 1 + interestGrid:get(x, z)
@@ -290,17 +306,28 @@ local function selectNextEventToShow()
 		if (adjImportance > mostImportance) then
 			mostImportantEvent = event
 			mostImportance = adjImportance
+			debugText = debugText ..
+					mostImportantEvent.type .. " " .. adjImportance .. ", "
 		end
 	end
 
-	if (mostImportantEvent) then
-		-- TODO: Use linked list
-		shownEventTypes[#shownEventTypes + 1] = mostImportantEvent.type
-		if (#shownEventTypes == 17) then
-			table.remove(shownEventTypes, 1)
-		end
+	if (not mostImportantEvent) then
+		return
+	end
 
-		mostImportantEvent.importance = mostImportantEvent.importance * 0.8
+	shownEventTypes[#shownEventTypes + 1] = mostImportantEvent.type
+	if (#shownEventTypes == 17) then
+		table.remove(shownEventTypes, 1)
+	end
+
+	-- Decay importance of showing event to encourage events of similar importance to show.
+	-- If not yet showing then add importance to make it slightly sticky.
+	local currentEventImportanceDecayPerSecond = 0.98
+	if (mostImportantEvent == currentEvent) then
+		mostImportantEvent.importance = mostImportantEvent.importance *
+				math.pow(currentEventImportanceDecayPerSecond, updateIntervalFrames / framesPerSecond)
+	else
+		mostImportantEvent.importance = mostImportantEvent.importance / math.pow(currentEventImportanceDecayPerSecond, 2)
 	end
 
 	return mostImportantEvent
@@ -324,7 +351,13 @@ local function toDisplayInfo(event, frame)
 	elseif (event.type == unitDestroyedEventType) then
 		commentary = event.object .. " destroyed by " .. actorName
 	elseif (event.type == unitMovedEventType) then
-		commentary = event.object .. " squad dispatched by " .. actorName
+		local quantityPrefix = " "
+		if (event.unitCount > 5) then
+			quantityPrefix = " batallion "
+		elseif (event.unitCount > 2) then
+			quantityPrefix = " team "
+		end
+		commentary = event.object .. quantityPrefix .. "moving"
 	end
 
 	return { commentary = commentary, location = event.location, tracking = event.units }
@@ -431,7 +464,7 @@ local function setupPanels()
 		tweakResizable = true,
 		minimizable = false,
 	}
-	scroll_cpl = ScrollPanel:New {
+	panel_cpl = ScrollPanel:New {
 		parent = window_cpl,
 		width = "100%",
 		height = "100%",
@@ -439,13 +472,13 @@ local function setupPanels()
 		scrollbarSize = 6,
 		horizontalScrollbar = false,
 	}
-	comment_label = Label:New {
-		parent = scroll_cpl,
+	commentary_cpl = Chili.TextBox:New {
+		parent = panel_cpl,
 		width = "100%",
 		x = 0,
 		y = 0,
 		fontSize = 16,
-		caption = "The quiet before the storm.",
+		text = "The quiet before the storm.",
 	}
 end
 
@@ -456,7 +489,6 @@ function widget:Initialize()
 		Chili = WG.Chili
 		Window = Chili.Window
 		ScrollPanel = Chili.ScrollPanel
-		Label = Chili.Label
 		screen0 = Chili.Screen0
 
 		initTeams()
@@ -478,35 +510,41 @@ function widget:Initialize()
 end
 
 function widget:GameFrame(frame)
-	local doIt = frame % updateIntervalFrames == 0
-	if (doIt) then
-		local newEvent = selectNextEventToShow()
-		if (newEvent and newEvent ~= currentEvent) then
-			local display = toDisplayInfo(newEvent, frame)
+	if (frame % updateIntervalFrames ~= 0) then
+		return
+	end
 
-			-- Sticky locations.
-			local x, _, z = unpack(display.location)
-			interestGrid:multiply(x, z, 1.2)
+	local newEvent = selectNextEventToShow()
+	if (newEvent and newEvent ~= currentEvent) then
+		local display = toDisplayInfo(newEvent, frame)
 
-			newEvent.display = display
-			comment_label:SetCaption(display.commentary)
+		-- Sticky locations.
+		local x, _, z = unpack(display.location)
+		interestGrid:multiply(x, z, 1.5)
 
-			-- Don't bounce between events e.g. comm spawn.
-			currentEvent.importance = 0
-			currentEvent = newEvent
-		end
+		newEvent.display = display
+		commentary_cpl:SetText(display.commentary .. "\n" .. debugText)
+
+		-- Don't bounce between events e.g. comm spawn.
+		currentEvent.importance = 0
+		currentEvent = newEvent
 	end
 end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
-	if (cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE) then
-		local mx, _, mz = unpack(cmdParams)
-		-- TODO balance this with current view WRT multiple players.
-		interestGrid:multiply(mx, mz, 1.1)
-		local x, y, z = spGetUnitPosition(unitID)
-		local unitLocation = { x, y, z }
-		addEvent(unitTeam, math.sqrt(distance(cmdParams, unitLocation)), unitLocation, unitMovedEventType, unitID, unitDefID)
+	if (cmdID ~= CMD_MOVE and cmdID ~= CMD_ATTACK_MOVE) then
+		return
 	end
+
+	local unitDef = UnitDefs[unitDefID]
+	if (unitDef.customParams.dontcount or unitDef.customParams.is_drone) then
+		-- Drones get move commands too :shrug:
+		return
+	end
+
+	local x, y, z = spGetUnitPosition(unitID)
+	local unitLocation = { x, y, z }
+	addEvent(unitTeam, math.sqrt(distance(cmdParams, unitLocation)), unitLocation, unitMovedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID,
@@ -516,17 +554,22 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-	local unitDef = UnitDefs[unitDefID]
-	-- Attempt to ignore cancelled builds and other similar things like comm upgrade
-	local skipEvent = attackerTeam == nil
-	-- Ignore dontcount units e.g. terraunit
-	skipEvent = skipEvent or unitDef.customParams.dontcount
-	if (not skipEvent) then
-		local x, y, z = spGetUnitPosition(unitID)
-		local event = addEvent(attackerTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
-		x, y, z = spGetUnitPosition(attackerID)
-		event.units[attackerID] = { x, y, z }
+	if (not attackerTeam) then
+		-- Attempt to ignore cancelled builds and other similar things like comm upgrade
+		return
 	end
+
+	local unitDef = UnitDefs[unitDefID]
+	if (unitDef.customParams.dontcount) then
+		-- Ignore dontcount units e.g. terraunit
+		return
+	end
+
+	local x, y, z = spGetUnitPosition(unitID)
+	local event = addEvent(attackerTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
+	interestGrid:multiply(x, z, 2)
+	x, y, z = spGetUnitPosition(attackerID)
+	event.units[attackerID] = { x, y, z }
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
