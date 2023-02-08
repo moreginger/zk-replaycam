@@ -305,9 +305,13 @@ local function selectNextEventToShow()
 	-- Discard old events
 	local purgeBeforeFrame = currentFrame - eventFrameHorizon
 	while (tailEvent ~= nil and tailEvent.started < purgeBeforeFrame) do
-		 -- Not strictly necessary to do this but might assist GC.
-		tailEvent.next = nil
+		local oldTailEvent = tailEvent
 		tailEvent = tailEvent.next
+		-- Not strictly necessary to do this but might assist GC.
+		oldTailEvent.next = nil
+	end
+	if (tailEvent == nil) then
+		headEvent = nil
 	end
 
 	-- Decay events that were added before the last check.
@@ -574,11 +578,11 @@ function widget:GameFrame(frame)
 		local x, _, z = unpack(display.location)
 		interestGrid:multiply(x, z, 1.5)
 
-		commentary_cpl:SetText(display.commentary .. "\n" .. debugText)
-
 		-- Don't bounce between events e.g. comm spawn.
 		showingEvent.importance = 0
 		showingEvent = newEvent
+
+		commentary_cpl:SetText(display.commentary .. "\n" .. debugText)
 	end
 end
 
