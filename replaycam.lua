@@ -186,7 +186,7 @@ local eventTargetRatios = normalizeTable({
 -- Note that importance is a different quantity for different events, which is also accounted for here.
 local eventImportanceAdj = normalizeTable({
 	unitBuilt = 0.05, -- Initially high as many build actions at start.
-	unitDamaged = 0.2,
+	unitDamaged = 0.15,
 	unitDestroyed = 0.8,
 	unitMoved = 0.001,
 })
@@ -236,19 +236,20 @@ local function initTeams()
 	end
 end
 
-local function mergeEvents(old, new)
-	old.importance = old.importance + new.importance
-	old.started = new.started
-	for actor, v in pairs(new.actors) do
-		if (not old.actors[actor]) then
-			old.actorCount = old.actorCount + 1
-			old.actors[actor] = v
+local function mergeEvents(recipient, donor)
+	recipient.importance = recipient.importance + donor.importance
+	recipient.location = donor.location
+	recipient.started = donor.started
+	for actor, v in pairs(donor.actors) do
+		if (not recipient.actors[actor]) then
+			recipient.actorCount = recipient.actorCount + 1
+			recipient.actors[actor] = v
 		end
 	end
-	for unit, v in pairs(new.units) do
-		if (not old.units[unit]) then
-			old.unitCount = old.unitCount + 1
-			old.units[unit] = v
+	for unit, v in pairs(donor.units) do
+		if (not recipient.units[unit]) then
+			recipient.unitCount = recipient.unitCount + 1
+			recipient.units[unit] = v
 		end
 	end
 end
@@ -259,7 +260,7 @@ end
 
 local function addEvent(actor, importance, location, type, unit, unitDef)
 	local frame = spGetGameFrame()
-	local event = {
+	local newEvent = {
 		actorCount = 1,
 		actors = initTable(actor, true),
 		importance = importance,
@@ -272,28 +273,48 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 	}
 
 	if (headEvent == nil) then
-		tailEvent = event
-		headEvent = event
-		return event
-	elseif (
-			event.type == headEvent.type and event.object == headEvent.object and
-					distance(event.location, headEvent.location) < eventMergeRange) then
-		headEvent.importance = decayImportance(headEvent.importance, math.min(updateIntervalFrames, headEvent.started - frame))
-		mergeEvents(headEvent, event)
-		return headEvent
-	else
-		headEvent.next = event
-		headEvent = event
-		return event
+		tailEvent = newEvent
+		headEvent = newEvent
+		return newEvent
 	end
+
+	local considerForMergeAfterFrame = frame - framesPerSecond
+	local event = headEvent
+	while (event ~= nil) do
+		if (event.started < considerForMergeAfterFrame) then
+			break
+		end
+		if (event.type == newEvent.type and event.object == newEvent.object and
+				distance(event.location, newEvent.location) < eventMergeRange) then
+			-- Merge new into old.
+			mergeEvents(event, newEvent)
+			if (event ~= headEvent) then
+				event.previous.next = event.next
+				event.next.previous = event.previous
+				event.previous = nil
+				event.next = nil
+			end
+			newEvent = event
+			break
+		end
+		event = event.previous
+	end
+
+	if (newEvent ~= headEvent) then
+		headEvent.next = newEvent
+		newEvent.previous = headEvent
+		headEvent = newEvent
+	end
+
+	return newEvent
 end
 
 -- This is slow, don't use it in anger.
 local function debugGetEventCount()
 	local event, count = tailEvent, 0
 	while (event ~= nil) do
-	  count = count + 1
-    event = event.next
+		count = count + 1
+		event = event.next
 	end
 	return count
 end
@@ -305,10 +326,9 @@ local function selectNextEventToShow()
 	-- Discard old events
 	local purgeBeforeFrame = currentFrame - eventFrameHorizon
 	while (tailEvent ~= nil and tailEvent.started < purgeBeforeFrame) do
-		local oldTailEvent = tailEvent
 		tailEvent = tailEvent.next
-		-- Not strictly necessary to do this but might assist GC.
-		oldTailEvent.next = nil
+		tailEvent.previous.next = nil
+		tailEvent.previous = nil
 	end
 	if (tailEvent == nil) then
 		headEvent = nil
