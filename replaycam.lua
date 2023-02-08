@@ -236,77 +236,79 @@ local function initTeams()
 	end
 end
 
-local function mergeEvents(recipient, donor)
-	recipient.importance = recipient.importance + donor.importance
-	recipient.location = donor.location
-	recipient.started = donor.started
-	for actor, v in pairs(donor.actors) do
-		if (not recipient.actors[actor]) then
-			recipient.actorCount = recipient.actorCount + 1
-			recipient.actors[actor] = v
-		end
-	end
-	for unit, v in pairs(donor.units) do
-		if (not recipient.units[unit]) then
-			recipient.unitCount = recipient.unitCount + 1
-			recipient.units[unit] = v
-		end
-	end
-end
-
 local function decayImportance(importance, frames)
 	return importance * pow(importanceDecayFactor, frames / framesPerSecond)
 end
 
 local function addEvent(actor, importance, location, type, unit, unitDef)
 	local frame = spGetGameFrame()
-	local newEvent = {
-		actorCount = 1,
-		actors = initTable(actor, true),
-		importance = importance,
-		location = location,
-		object = spGetHumanName(UnitDefs[unitDef], unit),
-		started = frame,
-		type = type,
-		unitCount = 1,
-		units = initTable(unit, location)
-	}
+	local object = spGetHumanName(UnitDefs[unitDef], unit)
 
-	if (headEvent == nil) then
-		tailEvent = newEvent
-		headEvent = newEvent
-		return newEvent
-	end
-
+	-- Try to merge into recent events.
 	local considerForMergeAfterFrame = frame - framesPerSecond
 	local event = headEvent
 	while (event ~= nil) do
 		if (event.started < considerForMergeAfterFrame) then
+			-- Don't want to check further back, so break.
+			event = nil
 			break
 		end
-		if (event.type == newEvent.type and event.object == newEvent.object and
-				distance(event.location, newEvent.location) < eventMergeRange) then
-			-- Merge new into old.
-			mergeEvents(event, newEvent)
+		if (event.type == type and event.object == object and
+				distance(event.location, location) < eventMergeRange) then
+
+			-- Merge new event into old
+			event.importance = event.importance + importance
+			event.location = location
+			event.started = frame
+			if (actor and not event.actors[actor]) then
+				event.actorCount = event.actorCount + 1
+				event.actors[actor] = actor
+			end
+			if (unit and not event.units[unit]) then
+				event.unitCount = event.unitCount + 1
+				event.units[unit] = location
+			end
+
+			-- Unwire event if not at the head.
 			if (event ~= headEvent) then
 				event.previous.next = event.next
 				event.next.previous = event.previous
 				event.previous = nil
 				event.next = nil
 			end
-			newEvent = event
+
+			-- We merged, so break.
 			break
 		end
+
+		-- Keep looking.
 		event = event.previous
 	end
 
-	if (newEvent ~= headEvent) then
-		headEvent.next = newEvent
-		newEvent.previous = headEvent
-		headEvent = newEvent
+	if (not event) then
+		event = {
+			actorCount = 1,
+			actors = initTable(actor, true),
+			importance = importance,
+			location = location,
+			object = object,
+			started = frame,
+			type = type,
+			unitCount = 1,
+			units = initTable(unit, location)
+		}
 	end
 
-	return newEvent
+	if (headEvent == nil) then
+		tailEvent = event
+		headEvent = event
+	elseif (event ~= headEvent) then
+		headEvent.next = event
+		event.previous = headEvent
+		headEvent = event
+	end
+
+	return event
 end
 
 -- This is slow, don't use it in anger.
@@ -619,7 +621,12 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 
 	local x, y, z = spGetUnitPosition(unitID)
 	local unitLocation = { x, y, z }
-	addEvent(unitTeam, sqrt(distance(cmdParams, unitLocation)), unitLocation, unitMovedEventType, unitID, unitDefID)
+	local moveDistance = distance(cmdParams, unitLocation)
+	if (moveDistance < 256) then
+		-- Ignore smaller moves to keep event numbers down.
+		return
+	end
+	addEvent(unitTeam, sqrt(moveDistance), unitLocation, unitMovedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID,
