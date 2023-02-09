@@ -271,7 +271,9 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 
 			-- Unwire event if not at the head.
 			if (event ~= headEvent) then
-				event.previous.next = event.next
+				if (event.previous) then
+					event.previous.next = event.next
+				end
 				event.next.previous = event.previous
 				event.previous = nil
 				event.next = nil
