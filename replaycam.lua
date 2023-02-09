@@ -29,6 +29,7 @@ local spGetTeamColor = Spring.GetTeamColor
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
 local spGetUnitPosition = Spring.GetUnitPosition
+local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
 local spSetCameraTarget = Spring.SetCameraTarget
@@ -169,6 +170,7 @@ local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
 local unitMovedEventType = "unitMoved"
+local unitTakenEventType = "unitTaken"
 
 local eventMergeRange = 256
 
@@ -180,6 +182,7 @@ local eventTargetRatios = normalizeTable({
 	unitDamaged = 5,
 	unitDestroyed = 3,
 	unitMoved = 1,
+	unitTaken = 2,
 })
 
 -- These values are dynamically adjusted as we process events.
@@ -189,6 +192,7 @@ local eventImportanceAdj = normalizeTable({
 	unitDamaged = 0.15,
 	unitDestroyed = 0.8,
 	unitMoved = 0.001,
+	unitTaken = 0.05,
 })
 local tailEvent = nil
 local headEvent = nil
@@ -438,6 +442,8 @@ local function toDisplayInfo(event, frame)
 			quantityPrefix = " team "
 		end
 		commentary = event.object .. quantityPrefix .. "moving"
+	elseif (event.type == unitTakenEventType) then
+		commentary = event.object .. " captured by " .. actorName
 	end
 
 	return { commentary = commentary, location = event.location, tracking = event.units }
@@ -666,6 +672,17 @@ end
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z = spGetUnitPosition(unitID)
 	addEvent(unitTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
+end
+
+function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
+	-- Note that UnitTaken (and UnitGiven) are both called for both capture and release.
+	local captureController = spGetUnitRulesParam(unitID, "capture_controller");
+	if not captureController or captureController == -1 then
+		return
+	end
+
+	local x, y, z = spGetUnitPosition(unitID)
+	addEvent(newTeam, UnitDefs[unitDefID].cost, { x, y, z}, unitTakenEventType, unitID, unitDefID)
 end
 
 function widget:Update(dt)
