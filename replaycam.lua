@@ -685,7 +685,9 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	end
 
 	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(newTeam, UnitDefs[unitDefID].cost, { x, y, z}, unitTakenEventType, unitID, unitDefID)
+	local event = addEvent(newTeam, UnitDefs[unitDefID].cost, { x, y, z}, unitTakenEventType, unitID, unitDefID)
+	x, y, z = spGetUnitPosition(captureController)
+	event.units[captureController] = { x, y, z }
 end
 
 function widget:Update(dt)
