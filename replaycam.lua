@@ -206,13 +206,7 @@ local interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSiz
 
 local camHeightMax = 1600
 local camHeightMin = 1000
-local camera = {
-	x = 0,
-	z = 0,
-	h = camHeightMax,
-	xv = 0,
-	zv = 0
-}
+local camera = nil
 
 local function initTeams()
 	local allyTeamList = spGetAllyTeamList()
@@ -462,8 +456,8 @@ local function updateCamera(displayInfo, dt)
 	end
 
 	local tracking = displayInfo.tracking
-	-- TODO: What if units are a long way apart e.g. Bertha kill?
 	local xSum, ySum, zSum, count = 0, 0, 0, 0
+	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	for unit, location in pairs(tracking) do
 		local x, y, z = spGetUnitPosition(unit)
 		if (x and y and z) then
@@ -472,6 +466,7 @@ local function updateCamera(displayInfo, dt)
 		else
 			x, y, z = unpack(location)
 		end
+		xMin, xMax, zMin, zMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
 		xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
 		count = count + 1
 	end
@@ -481,6 +476,8 @@ local function updateCamera(displayInfo, dt)
 		zSum / count,
 	}
 
+	-- Smoothly move to the location of the event.
+
 	-- Event location
 	local ex, _, ez = unpack(displayInfo.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
@@ -489,6 +486,7 @@ local function updateCamera(displayInfo, dt)
 	if (length(ex - cx, ez - cz) > maxPanDistance) then
 		cx = ex
 		cz = ez
+		ch = math.random(camHeightMin, camHeightMax)
 		cxv = 0
 		czv = 0
 	else
@@ -518,6 +516,15 @@ local function updateCamera(displayInfo, dt)
 		end
 		cx = cx + dt * cxv
 		cz = cz + dt * czv
+	end
+
+	-- Change height based on unit distribution.
+	local boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
+	local th = bound(camHeightMin + boundingDiagLength + length(ex - cx, ez - cz), camHeightMin, camHeightMax)
+	if th > ch then
+		ch = ch + 128 * dt
+	elseif th < ch then
+		ch = ch - 128 * dt
 	end
 
 	camera = {
@@ -592,7 +599,7 @@ function widget:Initialize()
 	camera = {
 		x = cx,
 		z = cz,
-		h = camHeightMax,
+		h = (camHeightMin + camHeightMax) / 2,
 		xv = 0,
 		zv = 0
 	}
