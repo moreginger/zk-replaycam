@@ -333,13 +333,16 @@ local function selectNextEventToShow()
 
 	-- Discard old events
 	local purgeBeforeFrame = currentFrame - eventFrameHorizon
-	while (tailEvent ~= nil and tailEvent.started < purgeBeforeFrame) do
-		tailEvent = tailEvent.next
-		tailEvent.previous.next = nil
-		tailEvent.previous = nil
-	end
-	if (tailEvent == nil) then
-		headEvent = nil
+	if tailEvent then
+		while tailEvent.started < purgeBeforeFrame do
+			tailEvent = tailEvent.next
+			if not tailEvent then
+				headEvent = nil
+				break
+			end
+			tailEvent.previous.next = nil
+			tailEvent.previous = nil
+		end
 	end
 
 	-- Decay events that were added before the last check.
