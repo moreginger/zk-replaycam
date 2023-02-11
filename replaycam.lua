@@ -700,17 +700,21 @@ function widget:GameFrame(frame)
 end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
-	if (cmdID ~= CMD_MOVE and cmdID ~= CMD_ATTACK_MOVE) then
+	if cmdID ~= CMD_MOVE and cmdID ~= CMD_ATTACK_MOVE then
 		return
 	end
 
 	local unitDef = UnitDefs[unitDefID]
-	if (unitDef.customParams.dontcount or unitDef.customParams.is_drone) then
+	if unitDef.customParams.dontcount or unitDef.customParams.is_drone then
 		-- Drones get move commands too :shrug:
 		return
 	end
 
-	local x, y, z = unitInfo:get(unitID)
+	local x, y, z, _, isStatic = unitInfo:get(unitID)
+	if isStatic then
+		return
+	end
+
 	local unitLocation = { x, y, z }
 	local moveDistance = distance(cmdParams, unitLocation)
 	if (moveDistance < 256) then
