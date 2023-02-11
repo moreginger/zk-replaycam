@@ -24,11 +24,13 @@ local spGetCameraState = Spring.GetCameraState
 local spGetGameFrame = Spring.GetGameFrame
 local spGetGameRulesParam = Spring.GetGameRulesParam
 local spGetHumanName = Spring.Utilities.GetHumanName
+local spGetMovetype = Spring.Utilities.getMovetype
 local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetSpectatingState = Spring.GetSpectatingState
 local spGetTeamColor = Spring.GetTeamColor
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
+local spGetUnitDefID = Spring.GetUnitDefID
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spIsReplay = Spring.IsReplay
@@ -42,6 +44,8 @@ local screen0
 
 local CMD_MOVE = CMD.MOVE
 local CMD_ATTACK_MOVE = CMD.FIGHT
+
+local framesPerSecond = 30
 
 local debugText = "DEBUG"
 
@@ -148,9 +152,71 @@ function WorldGrid:fade()
 	end
 end
 
+-- UNIT INFO CACHE
+
+local unitInfoCacheFrames = framesPerSecond
+
+UnitInfoCache = { cache = nil }
+
+function UnitInfoCache:new(o, value)
+	o = o or {} -- create object if user does not provide one
+	setmetatable(o, self)
+	self.__index = self
+
+	o.cache = o.cache or {}
+	return o
+end
+
+function UnitInfoCache:_updatePosition(unitID, cacheObject)
+	local x, y, z = spGetUnitPosition(unitID)
+	cacheObject[2] = x
+	cacheObject[3] = y
+	cacheObject[4] = z
+end
+
+function UnitInfoCache:watch(unitID, unitDefID)
+	local currentFrame = spGetGameFrame()
+	if not unitDefID then
+		unitDefID = spGetUnitDefID(unitID)
+	end
+	local unitDef = UnitDefs[unitDefID]
+	local importance = unitDef.cost
+	local isStatic = not spGetMovetype(unitDef)
+	local cacheObject = { currentFrame, 0, 0, 0, importance, isStatic }
+	self:_updatePosition(unitID, cacheObject)
+	self.cache[unitID] = cacheObject
+	return self:get(unitID)
+end
+
+-- Returns unit info including rough position.
+-- TODO: Override indexer?
+function UnitInfoCache:get(unitID)
+	local cacheObject = self.cache[unitID]
+	if cacheObject then
+		local _, x, y, z, importance, isStatic = unpack(cacheObject)
+		return x, y, z, importance, isStatic
+	end
+	return self:watch(unitID)
+end
+
+function UnitInfoCache:forget(unitID)
+	local x, y, z, importance, isStatic = self:get(unitID)
+  self.cache[unitID] = nil
+	return x, y, z, importance, isStatic
+end
+
+function UnitInfoCache:update(currentFrame)
+	for unitID, cacheObject in pairs(self.cache) do
+		local lastUpdated, isStatic = cacheObject[1], cacheObject[6]
+		if isStatic or (currentFrame - lastUpdated) > unitInfoCacheFrames then
+			self:_updatePosition(unitID, cacheObject)
+			cacheObject[1] = currentFrame
+		end
+	end
+end
+
 -- CONFIGURATION
 
-local framesPerSecond = 30
 local updateIntervalFrames = framesPerSecond * 2
 local eventFrameHorizon = framesPerSecond * 8
 
@@ -160,6 +226,7 @@ local mapSizeX, mapSizeZ = Game.mapSizeX, Game.mapSizeZ
 local worldGridSize = 512
 local mapGridX, mapGridZ = mapSizeX / worldGridSize, mapSizeZ / worldGridSize
 local teamInfo = {}
+local unitInfo = UnitInfoCache:new({})
 
 -- GUI COMPONENTS
 
@@ -610,6 +677,8 @@ function widget:Initialize()
 end
 
 function widget:GameFrame(frame)
+  unitInfo:update(frame)
+
 	if (frame % updateIntervalFrames ~= 0) then
 		return
 	end
@@ -641,7 +710,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		return
 	end
 
-	local x, y, z = spGetUnitPosition(unitID)
+	local x, y, z = unitInfo:get(unitID)
 	local unitLocation = { x, y, z }
 	local moveDistance = distance(cmdParams, unitLocation)
 	if (moveDistance < 256) then
@@ -660,11 +729,13 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage.
 		importance = importance / 2
 	end
-	local x, y, z = spGetUnitPosition(unitID)
+	local x, y, z = unitInfo:get(unitID)
 	addEvent(attackerTeam, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
+	local _, _, _, importance = unitInfo:forget(unitID)
+
 	if (not attackerTeam) then
 		-- Attempt to ignore cancelled builds and other similar things like comm upgrade
 		return
@@ -677,15 +748,15 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	end
 
 	local x, y, z = spGetUnitPosition(unitID)
-	local event = addEvent(attackerTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
+	local event = addEvent(attackerTeam, importance or unitDef.cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
 	interestGrid:multiply(x, z, 2)
 	x, y, z = spGetUnitPosition(attackerID)
 	event.units[attackerID] = { x, y, z }
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
-	local x, y, z = spGetUnitPosition(unitID)
-	addEvent(unitTeam, UnitDefs[unitDefID].cost, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
+	local x, y, z, importance = unitInfo:watch(unitID, unitDefID)
+	addEvent(unitTeam, importance, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
 end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
@@ -695,9 +766,9 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 		return
 	end
 
-	local x, y, z = spGetUnitPosition(unitID)
-	local event = addEvent(newTeam, UnitDefs[unitDefID].cost, { x, y, z}, unitTakenEventType, unitID, unitDefID)
-	x, y, z = spGetUnitPosition(captureController)
+	local x, y, z, importance = unitInfo:get(unitID)
+	local event = addEvent(newTeam, importance, { x, y, z}, unitTakenEventType, unitID, unitDefID)
+	x, y, z =  unitInfo:get(captureController)
 	event.units[captureController] = { x, y, z }
 end
 
