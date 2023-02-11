@@ -179,12 +179,18 @@ end
 
 function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local x, y, z = spGetUnitPosition(unitID)
-	cacheObject[2] = x
-	cacheObject[3] = y
-	cacheObject[4] = z
+  if not x or not y or not z then
+		-- DEBUG: Why is this happening?
+		spEcho("ERROR! _updatePosition failed", unitID, UnitDefs[cacheObject[1]].name)
+		return false
+	end
+	cacheObject[3] = x
+	cacheObject[4] = y
+	cacheObject[5] = z
 	if self.locationListener then
 		self.locationListener(x, y, z)
 	end
+	return true
 end
 
 function UnitInfoCache:watch(unitID, unitDefID)
@@ -195,7 +201,7 @@ function UnitInfoCache:watch(unitID, unitDefID)
 	local unitDef = UnitDefs[unitDefID]
 	local importance = unitDef.cost
 	local isStatic = not spGetMovetype(unitDef)
-	local cacheObject = { currentFrame, 0, 0, 0, importance, isStatic }
+	local cacheObject = { unitDefID, currentFrame, 0, 0, 0, importance, isStatic }
 	self:_updatePosition(unitID, cacheObject)
 	self.cache[unitID] = cacheObject
 	return self:get(unitID)
@@ -206,7 +212,7 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local _, x, y, z, importance, isStatic = unpack(cacheObject)
+		local _, _, x, y, z, importance, isStatic = unpack(cacheObject)
 		return x, y, z, importance, isStatic
 	end
 	return self:watch(unitID)
@@ -220,10 +226,13 @@ end
 
 function UnitInfoCache:update(currentFrame)
 	for unitID, cacheObject in pairs(self.cache) do
-		local lastUpdated, isStatic = cacheObject[1], cacheObject[6]
+		local lastUpdated, isStatic = cacheObject[2], cacheObject[7]
 		if not isStatic and (currentFrame - lastUpdated) > unitInfoCacheFrames then
-			self:_updatePosition(unitID, cacheObject)
-			cacheObject[1] = currentFrame
+			cacheObject[2] = currentFrame
+			if not self:_updatePosition(unitID, cacheObject) then
+				-- Something went wrong, drop from cache.
+				self.cache[unitID] = nil
+			end
 		end
 	end
 end
