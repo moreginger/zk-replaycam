@@ -546,9 +546,9 @@ local function toDisplayInfo(event, frame)
 end
 
 local function updateCamera(displayInfo, dt)
-	local cameraAccel = 1024
-	local maxPanDistance = 1024
-	local mapEdgeBorder = 256
+	local cameraAccel = worldGridSize * 2
+	local maxPanDistance = worldGridSize * 3
+	local mapEdgeBorder = worldGridSize * 0.5
 
 	if (not displayInfo) then
 		return
