@@ -33,6 +33,7 @@ local spGetTeamList = Spring.GetTeamList
 local spGetUnitDefID = Spring.GetUnitDefID
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
+local spGetUnitsInRectangle = Spring.GetUnitsInRectangle
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
 local spSetCameraTarget = Spring.SetCameraTarget
@@ -99,20 +100,22 @@ end
 -- WORLD GRID CLASS
 -- Translates world coordinates into operations on a grid.
 
-WorldGrid = { xSize = 0, ySize = 0, gridSize = 0, data = nil }
+WorldGrid = { xSize = 0, ySize = 0, gridSize = 0, baseValue = 0, data = nil }
 
-function WorldGrid:new(o, value)
+function WorldGrid:new(o)
 	o = o or {} -- create object if user does not provide one
 	setmetatable(o, self)
 	self.__index = self
 
+	o.baseValue = o.baseValue or 0
 	o.data = o.data or {}
 	for x = 1, o.xSize do
 		o.data[x] = {}
 		for y = 1, o.ySize do
-			o.data[x][y] = value
+			o.data[x][y] = o.baseValue
 		end
 	end
+
 	return o
 end
 
@@ -127,36 +130,42 @@ function WorldGrid:get(x, y)
 	return self.data[x][y]
 end
 
-function WorldGrid:multiply(x, y, f)
+-- @param f Factor of basevalue to add to this location.
+function WorldGrid:add(x, y, f)
 	x, y = self:__toGridCoordinates(x, y)
-	self.data[x][y] = self.data[x][y] * f
+	self.data[x][y] = self.data[x][y] + self.baseValue * f
 end
 
--- Fade, blur and normalize over the grid.
+-- 
 function WorldGrid:fade()
-	local fadeRatio = 0.2
-	local total = 0
+	local fadeExp = 0.5
 	for x = 1, self.xSize do
 		for y = 1, self.ySize do
-			total = total + self.data[x][y]
+			self.data[x][y] = pow(self.data[x][y] + self.baseValue, fadeExp)
 		end
 	end
+end
 
-	local fade = fadeRatio / (self.xSize * self.ySize)
-	local scaleFactor = (1 - fadeRatio) / total
-
+function WorldGrid:max()
+	local maxValue, maxX, maxY = 0, nil, nil
 	for x = 1, self.xSize do
 		for y = 1, self.ySize do
-			self.data[x][y] = (self.data[x][y] * scaleFactor) + fade
+			local value = self.data[x][y]
+			if maxValue < value then
+				maxValue = value
+				maxX = x
+				maxY = y
+			end
 		end
 	end
+	return maxValue, (maxX - 0.5) * self.gridSize, (maxY - 0.5) * self.gridSize
 end
 
 -- UNIT INFO CACHE
 
 local unitInfoCacheFrames = framesPerSecond
 
-UnitInfoCache = { cache = nil }
+UnitInfoCache = { cache = nil, locationListener = nil }
 
 function UnitInfoCache:new(o, value)
 	o = o or {} -- create object if user does not provide one
@@ -164,6 +173,7 @@ function UnitInfoCache:new(o, value)
 	self.__index = self
 
 	o.cache = o.cache or {}
+	o.locationListener = o.locationListener or nil
 	return o
 end
 
@@ -172,6 +182,9 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	cacheObject[2] = x
 	cacheObject[3] = y
 	cacheObject[4] = z
+	if self.locationListener then
+		self.locationListener(x, y, z)
+	end
 end
 
 function UnitInfoCache:watch(unitID, unitDefID)
@@ -208,7 +221,7 @@ end
 function UnitInfoCache:update(currentFrame)
 	for unitID, cacheObject in pairs(self.cache) do
 		local lastUpdated, isStatic = cacheObject[1], cacheObject[6]
-		if isStatic or (currentFrame - lastUpdated) > unitInfoCacheFrames then
+		if not isStatic and (currentFrame - lastUpdated) > unitInfoCacheFrames then
 			self:_updatePosition(unitID, cacheObject)
 			cacheObject[1] = currentFrame
 		end
@@ -226,7 +239,10 @@ local mapSizeX, mapSizeZ = Game.mapSizeX, Game.mapSizeZ
 local worldGridSize = 512
 local mapGridX, mapGridZ = mapSizeX / worldGridSize, mapSizeZ / worldGridSize
 local teamInfo = {}
-local unitInfo = UnitInfoCache:new({})
+local interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, baseValue = 1 })
+local unitInfo = UnitInfoCache:new({ locationListener = function(x, y, z)
+	interestGrid:add(x, z, 1)
+end})
 
 -- GUI COMPONENTS
 
@@ -234,6 +250,7 @@ local window_cpl, panel_cpl, commentary_cpl
 
 -- EVENT TRACKING
 
+local hotspotEventType = "hotspot"
 local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
@@ -246,6 +263,7 @@ local eventMergeRange = 256
 local importanceDecayFactor = 0.9
 
 local eventTargetRatios = normalizeTable({
+	hotspot = 3,
 	unitBuilt = 1,
 	unitDamaged = 5,
 	unitDestroyed = 3,
@@ -256,6 +274,7 @@ local eventTargetRatios = normalizeTable({
 -- These values are dynamically adjusted as we process events.
 -- Note that importance is a different quantity for different events, which is also accounted for here.
 local eventImportanceAdj = normalizeTable({
+	hotspot = 0.001,
 	unitBuilt = 0.05, -- Initially high as many build actions at start.
 	unitDamaged = 0.15,
 	unitDestroyed = 0.8,
@@ -266,9 +285,8 @@ local tailEvent = nil
 local headEvent = nil
 local shownEventTypes = {}
 local showingEvent = {}
+local minimumDisplayFrames = framesPerSecond * 3
 local display = nil
-
-local interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize }, 1)
 
 -- CAMERA TRACKING
 
@@ -308,7 +326,10 @@ end
 
 local function addEvent(actor, importance, location, type, unit, unitDef)
 	local frame = spGetGameFrame()
-	local object = spGetHumanName(UnitDefs[unitDef], unit)
+	local object = {}
+	if unit then
+		object = spGetHumanName(UnitDefs[unitDef], unit)
+	end
 
 	-- Try to merge into recent events.
 	local considerForMergeAfterFrame = frame - framesPerSecond
@@ -441,7 +462,6 @@ local function selectNextEventToShow()
 	end
 
 	-- Find next event to show
-	interestGrid:fade()
 	local mostImportantEvent = nil
 	local mostImportance = 0
 
@@ -492,7 +512,9 @@ local function toDisplayInfo(event, frame)
 		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeam .. ")"
 	end
 
-	if (event.type == unitBuiltEventType) then
+	if (event.type == hotspotEventType) then
+		commentary = "Something's going down here"
+  elseif (event.type == unitBuiltEventType) then
 		commentary = event.object .. " built by " .. actorName
 	elseif (event.type == unitDamagedEventType) then
 		-- TODO: Add actor when Spring allows it: https://github.com/beyond-all-reason/spring/issues/391
@@ -511,7 +533,7 @@ local function toDisplayInfo(event, frame)
 		commentary = event.object .. " captured by " .. actorName
 	end
 
-	return { commentary = commentary, location = event.location, tracking = event.units }
+	return { commentary = commentary, location = event.location, shownAt = frame, tracking = event.units }
 end
 
 local function updateCamera(displayInfo, dt)
@@ -524,7 +546,7 @@ local function updateCamera(displayInfo, dt)
 	end
 
 	local tracking = displayInfo.tracking
-	local xSum, ySum, zSum, count = 0, 0, 0, 0
+	local xSum, ySum, zSum, trackedLocationCount = 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	for unit, location in pairs(tracking) do
 		local x, y, z = spGetUnitPosition(unit)
@@ -536,13 +558,15 @@ local function updateCamera(displayInfo, dt)
 		end
 		xMin, xMax, zMin, zMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
 		xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
-		count = count + 1
+		trackedLocationCount = trackedLocationCount + 1
 	end
-	displayInfo.location = {
-		xSum / count,
-		ySum / count,
-		zSum / count,
-	}
+	if trackedLocationCount > 0 then
+		displayInfo.location = {
+			xSum / trackedLocationCount,
+			ySum / trackedLocationCount,
+			zSum / trackedLocationCount,
+		}	
+	end
 
 	-- Smoothly move to the location of the event.
 
@@ -683,13 +707,24 @@ function widget:GameFrame(frame)
 		return
 	end
 
+	interestGrid:fade()
+	local igMax, igX, igZ = interestGrid:max()
+	if igMax > 2 then
+		local event = addEvent(nil, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
+		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igX + worldGridSize / 2)
+		for _, unit in pairs(units) do
+			event.units[unit] = { igX, _, igZ }
+		end
+	end
+
 	local newEvent = selectNextEventToShow()
-	if (newEvent and newEvent ~= showingEvent) then
+	if newEvent and newEvent ~= showingEvent and (not display or frame - display.shownAt >= minimumDisplayFrames) then
 		display = toDisplayInfo(newEvent, frame)
 
 		-- Sticky locations.
+		-- TODO: Apply to whole screen?
 		local x, _, z = unpack(display.location)
-		interestGrid:multiply(x, z, 1.5)
+		interestGrid:add(x, z, 1)
 
 		-- Don't bounce between events e.g. comm spawn.
 		showingEvent.importance = 0
@@ -753,7 +788,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 
 	local x, y, z = spGetUnitPosition(unitID)
 	local event = addEvent(attackerTeam, importance or unitDef.cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
-	interestGrid:multiply(x, z, 2)
+	interestGrid:add(x, z, 4)
 	x, y, z = spGetUnitPosition(attackerID)
 	event.units[attackerID] = { x, y, z }
 end
