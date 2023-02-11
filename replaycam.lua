@@ -537,7 +537,6 @@ local function updateCamera(displayInfo, dt)
 
 	spSetCameraTarget(camera.x, 0, camera.z, 1)
 
-	-- TODO: Dynamic height adjustment.
 	local cameraState = spGetCameraState()
 	cameraState.height = camera.h
 	spSetCameraState(cameraState)
@@ -594,12 +593,13 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget()
 	end
 
-	-- TODO: Improve on this, doesn't seem to work well.
 	local cx, _, cz = spGetCameraPosition()
+	local height = spGetCameraState().height
+
 	camera = {
 		x = cx,
 		z = cz,
-		h = (camHeightMin + camHeightMax) / 2,
+		h = height,
 		xv = 0,
 		zv = 0
 	}
