@@ -10,6 +10,7 @@ function widget:GetInfo()
 	}
 end
 
+local abs = math.abs
 local floor = math.floor
 local max = math.max
 local min = math.min
@@ -520,11 +521,14 @@ local function updateCamera(displayInfo, dt)
 
 	-- Change height based on unit distribution.
 	local boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
-	local th = bound(camHeightMin + boundingDiagLength + length(ex - cx, ez - cz), camHeightMin, camHeightMax)
-	if th > ch then
-		ch = ch + 128 * dt
-	elseif th < ch then
-		ch = ch - 128 * dt
+	local targetHeight = bound(camHeightMin + boundingDiagLength + length(ex - cx, ez - cz), camHeightMin, camHeightMax)
+	local heightChange = 128 * dt
+	if (abs(targetHeight - ch) <= heightChange) then
+		ch = targetHeight
+	elseif (targetHeight > ch) then
+		ch = ch + heightChange
+	elseif (targetHeight < ch) then
+		ch = ch - heightChange
 	end
 
 	camera = {
