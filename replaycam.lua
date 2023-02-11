@@ -179,7 +179,7 @@ end
 
 function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local x, y, z = spGetUnitPosition(unitID)
-  if not x or not y or not z then
+	if not x or not y or not z then
 		-- DEBUG: Why is this happening?
 		spEcho("ERROR! _updatePosition failed", unitID, UnitDefs[cacheObject[1]].name)
 		return false
@@ -220,7 +220,7 @@ end
 
 function UnitInfoCache:forget(unitID)
 	local x, y, z, importance, isStatic = self:get(unitID)
-  self.cache[unitID] = nil
+	self.cache[unitID] = nil
 	return x, y, z, importance, isStatic
 end
 
@@ -523,7 +523,7 @@ local function toDisplayInfo(event, frame)
 
 	if (event.type == hotspotEventType) then
 		commentary = "Something's going down here"
-  elseif (event.type == unitBuiltEventType) then
+	elseif (event.type == unitBuiltEventType) then
 		commentary = event.object .. " built by " .. actorName
 	elseif (event.type == unitDamagedEventType) then
 		-- TODO: Add actor when Spring allows it: https://github.com/beyond-all-reason/spring/issues/391
@@ -710,7 +710,7 @@ function widget:Initialize()
 end
 
 function widget:GameFrame(frame)
-  unitInfo:update(frame)
+	unitInfo:update(frame)
 
 	if (frame % updateIntervalFrames ~= 0) then
 		return
@@ -768,8 +768,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 	addEvent(unitTeam, sqrt(moveDistance), unitLocation, unitMovedEventType, unitID, unitDefID)
 end
 
-function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID,
-                            attackerDefID, attackerTeam)
+function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
 	local unitDef = UnitDefs[unitDefID]
 	-- Clamp damage to unit health.
 	local importance = min(unitDef.health, damage)
