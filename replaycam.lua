@@ -373,6 +373,23 @@ local function decayImportance(importance, frames)
 	return importance * pow(importanceDecayFactor, frames / framesPerSecond)
 end
 
+local function removeEvent(event)
+	if event == headEvent then
+		headEvent = event.previous
+	end
+	if event == tailEvent then
+		tailEvent = event.next
+	end
+	if event.previous then
+		event.previous.next = event.next
+	end
+	if event.next then
+		event.next.previous = event.previous
+	end
+	event.previous = nil
+	event.next = nil
+end
+
 local function addEvent(actor, importance, location, type, unit, unitDef)
 	local frame = spGetGameFrame()
 	local object = {}
@@ -405,15 +422,8 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 				event.units[unit] = location
 			end
 
-			-- Unwire event if not at the head.
-			if (event ~= headEvent) then
-				if (event.previous) then
-					event.previous.next = event.next
-				end
-				event.next.previous = event.previous
-				event.previous = nil
-				event.next = nil
-			end
+			-- We put it back in later.
+			removeEvent(event)
 
 			-- We merged, so break.
 			break
@@ -447,6 +457,22 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 	end
 
 	return event
+end
+
+local function purgeEventsOfUnit(unitID)
+	local event = headEvent
+	while event ~= nil do
+		-- Keep unit if it was destroyed as we'll track its destroyed location.
+		if event.units[unitID] and event.type ~= unitDestroyedEventType then
+			event.units[unitID] = nil
+			event.unitCount = event.unitCount - 1
+			if event.unitCount == 0 then
+				event.importance = 0
+				removeEvent(event)
+			end
+		end
+		event = event.next
+	end
 end
 
 -- This is slow, don't use it in anger.
@@ -806,6 +832,7 @@ end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
 	local _, _, _, importance = unitInfo:forget(unitID)
+	purgeEventsOfUnit(unitID)
 
 	if (not attackerTeam) then
 		-- Attempt to ignore cancelled builds and other similar things like comm upgrade
