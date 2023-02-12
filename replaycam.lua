@@ -260,8 +260,6 @@ function EventStatistics:logEvent(type, importance)
 	self[type][1] = newCount
 	self[type][2] = meanImportance
 
-	spEcho(type, newCount, meanImportance, importance)
-
 	-- Assume exponential distribution.
 	local m = 1 / (meanImportance / self.eventMeanAdj[type])
 	return 1 - math.exp(-m * importance)
@@ -517,7 +515,6 @@ local function selectNextEventToShow()
 		local interestModifier = 1 + interestGrid:get(x, z)
 		local adjImportance = event.importance * interestModifier
 		local eventPercentile = eventStatistics:logEvent(event.type, adjImportance)
-		spEcho("percentile", event.type, eventPercentile)
 		if (eventPercentile > mostPercentile) then
 			mostImportantEvent = event
 			mostPercentile = eventPercentile
