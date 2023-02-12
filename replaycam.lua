@@ -61,19 +61,6 @@ local function initTable(key, value)
 	return result
 end
 
--- Normalize a table of numeric values to total 1.
-local function normalizeTable(t)
-	local total = 0
-	for _, v in pairs(t) do
-		total = total + v
-	end
-	local result = {}
-	for k, v in pairs(t) do
-		result[k] = v / total
-	end
-	return result
-end
-
 -- Calculate length of a vector
 local function length(x, y)
 	return sqrt(x * x + y * y)
