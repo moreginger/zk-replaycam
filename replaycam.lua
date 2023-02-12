@@ -261,7 +261,13 @@ end
 function EventStatistics:logEvent(type, importance)
 	local count, meanImportance = unpack(self[type])
 	local newCount = count + 1
-	meanImportance = (meanImportance * count / newCount) + (importance / newCount)
+	-- Switch to a weighted mean after a certain number of events, for faster adaptation.
+	if newCount < 32 then
+		meanImportance = (meanImportance * count / newCount) + (importance / newCount)
+	else
+		meanImportance = (meanImportance * 31/32) + (importance /32)
+	end
+	
 	self[type][1] = newCount
 	self[type][2] = meanImportance
 
