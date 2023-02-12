@@ -35,6 +35,7 @@ local spGetUnitHealth = Spring.GetUnitHealth
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spGetUnitsInRectangle = Spring.GetUnitsInRectangle
+local spGetUnitVelocity = Spring.GetUnitVelocity
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
 local spSetCameraTarget = Spring.SetCameraTarget
@@ -593,13 +594,15 @@ local function updateCamera(displayInfo, dt)
 	end
 
 	local tracking = displayInfo.tracking
-	local xSum, ySum, zSum, trackedLocationCount = 0, 0, 0, 0
+	local xSum, ySum, zSum, xvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	for unit, location in pairs(tracking) do
 		local x, y, z = spGetUnitPosition(unit)
-		if (x and y and z) then
+		local xv, _, zv = spGetUnitVelocity(unit)
+		if x and y and z and xv and zv then
 			location = { x, y, z }
 			tracking[unit] = { x, y, z }
+			xvSum, zvSum = xvSum + xv, zvSum + zv
 		else
 			x, y, z = unpack(location)
 		end
@@ -607,12 +610,13 @@ local function updateCamera(displayInfo, dt)
 		xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
 		trackedLocationCount = trackedLocationCount + 1
 	end
+
 	if trackedLocationCount > 0 then
 		displayInfo.location = {
-			xSum / trackedLocationCount,
+			xSum / trackedLocationCount + (xvSum / trackedLocationCount * framesPerSecond),
 			ySum / trackedLocationCount,
-			zSum / trackedLocationCount,
-		}	
+			zSum / trackedLocationCount + (zvSum / trackedLocationCount * framesPerSecond),
+		}
 	end
 
 	-- Smoothly move to the location of the event.
