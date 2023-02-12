@@ -768,7 +768,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		return
 	end
 
-	local x, y, z, _, isStatic = unitInfo:get(unitID)
+	local x, y, z, importance, isStatic = unitInfo:get(unitID)
 	if isStatic then
 		return
 	end
@@ -779,7 +779,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		-- Ignore smaller moves to keep event numbers down.
 		return
 	end
-	addEvent(unitTeam, sqrt(moveDistance), unitLocation, unitMovedEventType, unitID, unitDefID)
+	addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
