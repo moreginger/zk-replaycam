@@ -31,6 +31,7 @@ local spGetTeamColor = Spring.GetTeamColor
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
 local spGetUnitDefID = Spring.GetUnitDefID
+local spGetUnitHealth = Spring.GetUnitHealth
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spGetUnitsInRectangle = Spring.GetUnitsInRectangle
@@ -806,14 +807,17 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
-	local unitDef = UnitDefs[unitDefID]
-	-- Clamp damage to unit health.
-	local importance = min(unitDef.health, damage)
-	if (paralyzer) then
-		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage.
-		importance = importance / 2
+	if paralyzer then
+		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage
+		damage = damage / 2
 	end
-	local x, y, z = unitInfo:get(unitID)
+	local x, y, z, unitImportance = unitInfo:get(unitID)
+	local currentHealth = spGetUnitHealth(unitID)
+	-- Percentage of current health being dealt in damage, up to 100
+	local importance = 100 * min(currentHealth, damage) / currentHealth
+	-- Multiply by unit importance factor
+	importance = importance * sqrt(unitImportance)
+
 	addEvent(attackerTeam, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
 end
 
