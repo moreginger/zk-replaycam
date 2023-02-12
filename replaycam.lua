@@ -798,13 +798,20 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 
 	local x, y, z, importance, isStatic = unitInfo:get(unitID)
 	if isStatic then
+		-- Not interested in commands given to factories
+		return
+	end
+
+	local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
+	if buildProgress < 0.9 then
+		-- Don't watch units that probably won't move any time soon
 		return
 	end
 
 	local unitLocation = { x, y, z }
 	local moveDistance = distance(cmdParams, unitLocation)
 	if (moveDistance < 256) then
-		-- Ignore smaller moves to keep event numbers down.
+		-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 		return
 	end
 	addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
