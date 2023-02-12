@@ -261,7 +261,7 @@ function EventStatistics:logEvent(type, importance)
 	self[type][2] = meanImportance
 
 	-- Assume exponential distribution.
-	local m = 1 / (meanImportance / self.eventMeanAdj[type])
+	local m = 1 / (meanImportance * self.eventMeanAdj[type])
 	return 1 - math.exp(-m * importance)
 end
 
@@ -310,13 +310,14 @@ local importanceDecayFactor = 0.9
 local tailEvent = nil
 local headEvent = nil
 local eventStatistics = EventStatistics:new({
+	-- Adjust mean of events: lower = boosts the importance of individual events.
 	eventMeanAdj = {
-		hotspot = 1.2,
-		unitBuilt = 1,
-		unitDamaged = 1.8,
-		unitDestroyed = 2.2,
-		unitMoved = 1.1,
-		unitTaken = 3,
+		hotspot = 0.8,
+		unitBuilt = 1.4,
+		unitDamaged = 0.6,
+		unitDestroyed = 0.4,
+		unitMoved = 0.9,
+		unitTaken = 0.2,
 	}
 }, eventTypes)
 
