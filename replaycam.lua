@@ -449,7 +449,7 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 end
 
 local function purgeEventsOfUnit(unitID)
-	local event = headEvent
+	local event = tailEvent
 	while event ~= nil do
 		-- Keep unit if it was destroyed as we'll track its destroyed location.
 		if event.units[unitID] and event.type ~= unitDestroyedEventType then
