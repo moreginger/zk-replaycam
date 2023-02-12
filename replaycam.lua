@@ -732,7 +732,7 @@ function widget:GameFrame(frame)
 
 	interestGrid:fade()
 	local igMax, igX, igZ = interestGrid:max()
-	if igMax > 2 then
+	if igMax > 3 then
 		local event = addEvent(nil, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igX + worldGridSize / 2)
 		for _, unit in pairs(units) do
