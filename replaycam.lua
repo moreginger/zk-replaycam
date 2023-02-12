@@ -167,7 +167,7 @@ local unitInfoCacheFrames = framesPerSecond
 
 UnitInfoCache = { cache = nil, locationListener = nil }
 
-function UnitInfoCache:new(o, value)
+function UnitInfoCache:new(o)
 	o = o or {} -- create object if user does not provide one
 	setmetatable(o, self)
 	self.__index = self
@@ -237,6 +237,37 @@ function UnitInfoCache:update(currentFrame)
 	end
 end
 
+-- EVENT STATISTICS
+
+EventStatistics = { eventMeanAdj = {} }
+
+function EventStatistics:new(o, types)
+	o = o or {} -- create object if user does not provide one
+	setmetatable(o, self)
+	self.__index = self
+
+	for _, type in pairs(types) do
+		o[type] = { 0, 0 }
+	end
+
+	return o
+end
+
+-- Log event and return percentile in unit range (not sure what to call it).
+function EventStatistics:logEvent(type, importance)
+	local count, meanImportance = unpack(self[type])
+	local newCount = count + 1
+	meanImportance = (meanImportance * count / newCount) + (importance / newCount)
+	self[type][1] = newCount
+	self[type][2] = meanImportance
+
+	spEcho(type, newCount, meanImportance, importance)
+
+	-- Assume exponential distribution.
+	local m = 1 / (meanImportance / self.eventMeanAdj[type])
+	return 1 - math.exp(-m * importance)
+end
+
 -- CONFIGURATION
 
 local updateIntervalFrames = framesPerSecond * 2
@@ -265,36 +296,35 @@ local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
 local unitMovedEventType = "unitMoved"
 local unitTakenEventType = "unitTaken"
+local eventTypes = {
+	hotspotEventType,
+	unitBuiltEventType,
+	unitDamagedEventType,
+	unitDestroyedEventType,
+	unitMovedEventType,
+	unitTakenEventType
+}
 
 local eventMergeRange = 256
 
 -- Importance decay factor per second.
 local importanceDecayFactor = 0.9
 
-local eventTargetRatios = normalizeTable({
-	hotspot = 3,
-	unitBuilt = 1,
-	unitDamaged = 5,
-	unitDestroyed = 3,
-	unitMoved = 1,
-	unitTaken = 2,
-})
-
--- These values are dynamically adjusted as we process events.
--- Note that importance is a different quantity for different events, which is also accounted for here.
-local eventImportanceAdj = normalizeTable({
-	hotspot = 0.001,
-	unitBuilt = 0.05, -- Initially high as many build actions at start.
-	unitDamaged = 0.15,
-	unitDestroyed = 0.8,
-	unitMoved = 0.001,
-	unitTaken = 0.05,
-})
 local tailEvent = nil
 local headEvent = nil
+local eventStatistics = EventStatistics:new({
+	eventMeanAdj = {
+		hotspot = 1.2,
+		unitBuilt = 1,
+		unitDamaged = 1.5,
+		unitDestroyed = 2,
+		unitMoved = 1.1,
+		unitTaken = 3,
+	}
+}, eventTypes)
+
 local shownEventTypes = {}
 local showingEvent = {}
-local minimumDisplayFrames = framesPerSecond * 3
 local display = nil
 
 -- CAMERA TRACKING
@@ -452,39 +482,23 @@ local function selectNextEventToShow()
 		event = event.next
 	end
 
-	-- Work out modifiers to show more events.
-	if (#shownEventTypes > 0) then
-		local eventCounts = {}
-		for k, _ in pairs(eventTargetRatios) do
-			eventCounts[k] = 0
-		end
-		for _, v in pairs(shownEventTypes) do
-			eventCounts[v] = eventCounts[v] + 1
-		end
-
-		local eventRatios = normalizeTable(eventCounts)
-		for k, v in pairs(eventRatios) do
-			local deviation = eventTargetRatios[k] - v
-			eventImportanceAdj[k] = math.max(0.001, eventImportanceAdj[k] + deviation * 0.1)
-		end
-		eventImportanceAdj = normalizeTable(eventImportanceAdj)
-	end
-
 	-- Find next event to show
 	local mostImportantEvent = nil
-	local mostImportance = 0
+	local mostPercentile = 0
 
 	debugText = "" .. debugGetEventCount() .. " events\n"
 	event = tailEvent
 	while (event ~= nil) do
 		local x, _, z = unpack(event.location)
 		local interestModifier = 1 + interestGrid:get(x, z)
-		local adjImportance = event.importance * interestModifier * eventImportanceAdj[event.type]
-		if (adjImportance > mostImportance) then
+		local adjImportance = event.importance * interestModifier
+		local eventPercentile = eventStatistics:logEvent(event.type, adjImportance)
+		spEcho("percentile", event.type, eventPercentile)
+		if (eventPercentile > mostPercentile) then
 			mostImportantEvent = event
-			mostImportance = adjImportance
+			mostPercentile = eventPercentile
 			debugText = debugText ..
-					mostImportantEvent.type .. " " .. adjImportance .. ", "
+					mostImportantEvent.type .. " " .. eventPercentile .. ", "
 		end
 		event = event.next
 	end
@@ -727,7 +741,7 @@ function widget:GameFrame(frame)
 	end
 
 	local newEvent = selectNextEventToShow()
-	if newEvent and newEvent ~= showingEvent and (not display or frame - display.shownAt >= minimumDisplayFrames) then
+	if newEvent and newEvent ~= showingEvent then
 		display = toDisplayInfo(newEvent, frame)
 
 		-- Sticky locations.
