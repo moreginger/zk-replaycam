@@ -379,12 +379,13 @@ local function removeEvent(event)
 	event.next = nil
 end
 
-local function addEvent(actor, importance, location, type, unit, unitDef)
+local function addEvent(actor, expireIn, importance, location, type, unit, unitDef)
 	local frame = spGetGameFrame()
 	local object = {}
 	if unit then
 		object = spGetHumanName(UnitDefs[unitDef], unit)
 	end
+	local expiry = frame + expireIn
 
 	-- Try to merge into recent events.
 	local considerForMergeAfterFrame = frame - framesPerSecond
@@ -400,6 +401,7 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 
 			-- Merge new event into old
 			event.importance = event.importance + importance
+			event.expiry = expiry
 			event.location = location
 			event.started = frame
 			if (actor and not event.actors[actor]) then
@@ -426,6 +428,7 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 		event = {
 			actorCount = 1,
 			actors = initTable(actor, true),
+			expiry = expiry,
 			importance = importance,
 			location = location,
 			object = object,
@@ -478,31 +481,27 @@ local function selectNextEventToShow()
 	-- Purge old events and merge similar events.
 	local currentFrame = spGetGameFrame()
 
-	-- Discard old events
-	local purgeBeforeFrame = currentFrame - eventFrameHorizon
-	if tailEvent then
-		while tailEvent.started < purgeBeforeFrame do
-			tailEvent = tailEvent.next
-			if not tailEvent then
-				headEvent = nil
-				break
-			end
-			tailEvent.previous.next = nil
-			tailEvent.previous = nil
+	-- Remove expired events
+	local event = tailEvent
+	while event ~= nil do
+		local nextEvent = event.next
+		if event.expiry < currentFrame then
+			removeEvent(event)
 		end
+		event = nextEvent
 	end
 
 	-- Decay events that were added before the last check.
 	local addedBeforeLastCheckFrame = currentFrame - updateIntervalFrames
 	local updateIntervalDecayFactor = decayImportance(1, updateIntervalFrames)
-	local event = tailEvent
-	while (event ~= nil and event.started < addedBeforeLastCheckFrame) do
+	event = tailEvent
+	while event ~= nil and event.started < addedBeforeLastCheckFrame do
 		event.importance = event.importance * updateIntervalDecayFactor
 		event = event.next
 	end
 
 	-- Decay events that were added after the last check.
-	while (event ~= nil) do
+	while event ~= nil do
 		event.importance = decayImportance(event.importance, event.started - currentFrame)
 		event = event.next
 	end
@@ -761,7 +760,7 @@ function widget:GameFrame(frame)
 	interestGrid:fade()
 	local igMax, igX, igZ = interestGrid:max()
 	if igMax > 3 then
-		local event = addEvent(nil, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
+		local event = addEvent(nil, 1, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igX + worldGridSize / 2)
 		for _, unit in pairs(units) do
 			event.units[unit] = { igX, _, igZ }
@@ -814,7 +813,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 		return
 	end
-	addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
+	addEvent(unitTeam, updateIntervalFrames, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
@@ -829,7 +828,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	-- Multiply by unit importance factor
 	importance = importance * sqrt(unitImportance)
 
-	addEvent(attackerTeam, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
+	addEvent(attackerTeam, updateIntervalFrames, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
@@ -848,7 +847,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	end
 
 	local x, y, z = spGetUnitPosition(unitID)
-	local event = addEvent(attackerTeam, importance or unitDef.cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
+	local event = addEvent(attackerTeam, eventFrameHorizon, importance or unitDef.cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
 	interestGrid:add(x, z, 4)
 	x, y, z = spGetUnitPosition(attackerID)
 	event.units[attackerID] = { x, y, z }
@@ -856,7 +855,7 @@ end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local x, y, z, importance = unitInfo:watch(unitID, unitDefID)
-	addEvent(unitTeam, importance, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
+	addEvent(unitTeam, eventFrameHorizon, importance, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
 end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
@@ -867,7 +866,7 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	end
 
 	local x, y, z, importance = unitInfo:get(unitID)
-	local event = addEvent(newTeam, importance, { x, y, z}, unitTakenEventType, unitID, unitDefID)
+	local event = addEvent(newTeam, eventFrameHorizon, importance, { x, y, z}, unitTakenEventType, unitID, unitDefID)
 	x, y, z =  unitInfo:get(captureController)
 	event.units[captureController] = { x, y, z }
 end
