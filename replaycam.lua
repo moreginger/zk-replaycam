@@ -49,9 +49,14 @@ local screen0
 local CMD_MOVE = CMD.MOVE
 local CMD_ATTACK_MOVE = CMD.FIGHT
 
+local debugText = "DEBUG"
+
 local framesPerSecond = 30
 
-local debugText = "DEBUG"
+-- CONFIGURATION
+
+local updateIntervalFrames = framesPerSecond
+local eventFrameHorizon = framesPerSecond * 8
 
 -- UTILITY FUNCTIONS
 
@@ -132,7 +137,7 @@ end
 
 function WorldGrid:getInterestingScore()
 	-- TODO: Derive 8 in better way. 8 is equal to 4 ally units for 2 cache polls, or 2 x 1 units from different ally teams for 2 cache poll.
-	return 8
+	return 4 * updateIntervalFrames / framesPerSecond
 end
 
 -- @param f Units of interest to add.
@@ -295,11 +300,6 @@ function EventStatistics:logEvent(type, importance)
 	local m = 1 / (meanImportance * self.eventMeanAdj[type])
 	return 1 - math.exp(-m * importance)
 end
-
--- CONFIGURATION
-
-local updateIntervalFrames = framesPerSecond * 2
-local eventFrameHorizon = framesPerSecond * 8
 
 -- WORLD INFO
 
@@ -541,10 +541,10 @@ local function selectNextEventToShow()
 	-- If not yet showing then add importance to make it slightly sticky.
 	local showingEventImportanceDecayPerSecond = 0.98
 	if (mostImportantEvent == showingEvent) then
-		mostImportantEvent.importance = mostImportantEvent.importance *
-				pow(showingEventImportanceDecayPerSecond, updateIntervalFrames / framesPerSecond)
+		-- Give it a fighting chance of staying there for 2s.
+		mostImportantEvent.importance = mostImportantEvent.importance * pow(showingEventImportanceDecayPerSecond, 2)
 	else
-		mostImportantEvent.importance = mostImportantEvent.importance / pow(showingEventImportanceDecayPerSecond, 2)
+		mostImportantEvent.importance = mostImportantEvent.importance / pow(showingEventImportanceDecayPerSecond, updateIntervalFrames / framesPerSecond)
 	end
 
 	return mostImportantEvent
