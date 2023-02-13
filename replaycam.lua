@@ -35,6 +35,7 @@ local spGetUnitHealth = Spring.GetUnitHealth
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spGetUnitsInRectangle = Spring.GetUnitsInRectangle
+local spGetUnitTeam = Spring.GetUnitTeam
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
@@ -89,57 +90,74 @@ end
 -- WORLD GRID CLASS
 -- Translates world coordinates into operations on a grid.
 
-WorldGrid = { xSize = 0, ySize = 0, gridSize = 0, baseValue = 0, data = nil }
+WorldGrid = { xSize = 0, ySize = 0, gridSize = 0, allyTeams = {}, data = {} }
 
 function WorldGrid:new(o)
 	o = o or {} -- create object if user does not provide one
 	setmetatable(o, self)
 	self.__index = self
 
-	o.baseValue = o.baseValue or 0
+	o.allyTeams = o.allyTeams or {}
 	o.data = o.data or {}
 	for x = 1, o.xSize do
 		o.data[x] = {}
 		for y = 1, o.ySize do
-			o.data[x][y] = o.baseValue
+			o.data[x][y] = {}
 		end
 	end
+	o:reset()
 
 	return o
 end
 
-function WorldGrid:__toGridCoordinates(x, y)
+function WorldGrid:__toGridCoords(x, y)
 	x = 1 + min(floor(x / self.gridSize), self.xSize - 1)
 	y = 1 + min(floor(y / self.gridSize), self.ySize - 1)
 	return x, y
 end
 
-function WorldGrid:get(x, y)
-	x, y = self:__toGridCoordinates(x, y)
-	return self.data[x][y]
+function WorldGrid:_getScoreGridCoords(x, y)
+	local data = self.data[x][y]
+	local allyTeamCount = 0
+	for _, _ in pairs(data[2]) do
+		allyTeamCount = allyTeamCount + 1
+	end
+	return data[1] * allyTeamCount * allyTeamCount
 end
 
--- @param f Factor of basevalue to add to this location.
-function WorldGrid:add(x, y, f)
-	x, y = self:__toGridCoordinates(x, y)
-	self.data[x][y] = self.data[x][y] + self.baseValue * f
+function WorldGrid:getScore(x, y)
+	x, y = self:__toGridCoords(x, y)
+	return self:_getScoreGridCoords(x, y)
 end
 
--- 
-function WorldGrid:fade()
-	local fadeExp = 0.5
+function WorldGrid:getInterestingScore()
+	-- TODO: Derive 8 in better way. 8 is equal to 4 ally units for 2 cache polls, or 2 x 1 units from different ally teams for 2 cache poll.
+	return 8
+end
+
+-- @param f Units of interest to add.
+function WorldGrid:add(x, y, allyTeam, f)
+	x, y = self:__toGridCoords(x, y)
+	local data = self.data[x][y]
+	data[1] = data[1] + f
+	if allyTeam then
+		data[2][allyTeam] = true
+	end
+end
+
+function WorldGrid:reset()
 	for x = 1, self.xSize do
 		for y = 1, self.ySize do
-			self.data[x][y] = pow(self.data[x][y] + self.baseValue, fadeExp)
+			self.data[x][y] = { 0, {} }
 		end
 	end
 end
 
-function WorldGrid:max()
-	local maxValue, maxX, maxY = 0, nil, nil
+function WorldGrid:maxScore()
+	local maxValue, maxX, maxY = -1, nil, nil
 	for x = 1, self.xSize do
 		for y = 1, self.ySize do
-			local value = self.data[x][y]
+			local value = self:_getScoreGridCoords(x, y)
 			if maxValue < value then
 				maxValue = value
 				maxX = x
@@ -154,6 +172,15 @@ end
 
 local unitInfoCacheFrames = framesPerSecond
 
+-- cacheObject {}
+-- 1 - allyTeam
+-- 2 - unitDefID
+-- 3 - lastUpdatedFrame
+-- 4 - last known x
+-- 5 - last known y
+-- 6 - last known z
+-- 7 - importance
+-- 8 - static (not mobile)
 UnitInfoCache = { cache = nil, locationListener = nil }
 
 function UnitInfoCache:new(o)
@@ -170,19 +197,21 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local x, y, z = spGetUnitPosition(unitID)
 	if not x or not y or not z then
 		-- DEBUG: Why is this happening?
-		spEcho("ERROR! _updatePosition failed", unitID, UnitDefs[cacheObject[1]].name)
+		spEcho("ERROR! _updatePosition failed", unitID, UnitDefs[cacheObject[2]].name)
 		return false
 	end
-	cacheObject[3] = x
-	cacheObject[4] = y
-	cacheObject[5] = z
+	cacheObject[4] = x
+	cacheObject[5] = y
+	cacheObject[6] = z
 	if self.locationListener then
-		self.locationListener(x, y, z)
+		-- TODO: Track velocity?
+		local isMoving = not cacheObject[8]
+		self.locationListener(x, y, z, cacheObject[1], isMoving)
 	end
 	return true
 end
 
-function UnitInfoCache:watch(unitID, unitDefID)
+function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	local currentFrame = spGetGameFrame()
 	if not unitDefID then
 		unitDefID = spGetUnitDefID(unitID)
@@ -194,7 +223,7 @@ function UnitInfoCache:watch(unitID, unitDefID)
 		importance = importance * 1.5
 	end
 	local isStatic = not spGetMovetype(unitDef)
-	local cacheObject = { unitDefID, currentFrame, 0, 0, 0, importance, isStatic }
+	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, importance, isStatic }
 	self:_updatePosition(unitID, cacheObject)
 	self.cache[unitID] = cacheObject
 	return self:get(unitID)
@@ -205,10 +234,12 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local _, _, x, y, z, importance, isStatic = unpack(cacheObject)
+		local _, _, _, x, y, z, importance, isStatic = unpack(cacheObject)
 		return x, y, z, importance, isStatic
 	end
-	return self:watch(unitID)
+	local unitTeamID = spGetUnitTeam(unitID)
+	local _, _, _, _, _, allyTeam = spGetTeamInfo(unitTeamID)
+	return self:watch(unitID, allyTeam)
 end
 
 function UnitInfoCache:forget(unitID)
@@ -219,9 +250,9 @@ end
 
 function UnitInfoCache:update(currentFrame)
 	for unitID, cacheObject in pairs(self.cache) do
-		local lastUpdated, isStatic = cacheObject[2], cacheObject[7]
-		if not isStatic and (currentFrame - lastUpdated) > unitInfoCacheFrames then
-			cacheObject[2] = currentFrame
+		local lastUpdated = cacheObject[3]
+		if (currentFrame - lastUpdated) > unitInfoCacheFrames then
+			cacheObject[3] = currentFrame
 			if not self:_updatePosition(unitID, cacheObject) then
 				-- Something went wrong, drop from cache.
 				self.cache[unitID] = nil
@@ -275,11 +306,7 @@ local eventFrameHorizon = framesPerSecond * 8
 local mapSizeX, mapSizeZ = Game.mapSizeX, Game.mapSizeZ
 local worldGridSize = 512
 local mapGridX, mapGridZ = mapSizeX / worldGridSize, mapSizeZ / worldGridSize
-local teamInfo = {}
-local interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, baseValue = 1 })
-local unitInfo = UnitInfoCache:new({ locationListener = function(x, y, z)
-	interestGrid:add(x, z, 1)
-end})
+local teamInfo, interestGrid, unitInfo
 
 -- GUI COMPONENTS
 
@@ -310,10 +337,12 @@ local importanceDecayFactor = 0.9
 local tailEvent = nil
 local headEvent = nil
 local eventStatistics = EventStatistics:new({
-	-- Adjust mean of events: lower = boosts the importance of individual events.
+	-- Adjust mean of events in percentile estimation
+	-- > 1: make each event seem more likely (less interesting)
+	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
-		hotspot = 0.8,
-		unitBuilt = 1.4,
+		hotspot = 1.0,
+		unitBuilt = 1.6,
 		unitDamaged = 0.6,
 		unitDestroyed = 0.4,
 		unitMoved = 0.9,
@@ -330,32 +359,6 @@ local display = nil
 local camHeightMax = 1600
 local camHeightMin = 1000
 local camera = nil
-
-local function initTeams()
-	local allyTeamList = spGetAllyTeamList()
-	for _, allyTeamID in pairs(allyTeamList) do
-		local teamList = spGetTeamList(allyTeamID)
-
-		local allyTeam = spGetGameRulesParam("allyteam_long_name_" .. allyTeamID)
-		if string.len(allyTeam) > 10 then
-			allyTeam = spGetGameRulesParam("allyteam_short_name_" .. allyTeamID)
-		end
-
-		for _, teamID in pairs(teamList) do
-			local teamLeader = nil
-			_, teamLeader = spGetTeamInfo(teamID)
-			local teamName = "unknown"
-			if (teamLeader) then
-				teamName = spGetPlayerInfo(teamLeader)
-			end
-			teamInfo[teamID] = {
-				allyTeam = allyTeam, -- TODO: Is there any need for separate ally team name or can just concat here?
-				color = { spGetTeamColor(teamID) } or { 1, 1, 1, 1 },
-				name = teamName
-			}
-		end
-	end
-end
 
 local function decayImportance(importance, frames)
 	return importance * pow(importanceDecayFactor, frames / framesPerSecond)
@@ -513,7 +516,7 @@ local function selectNextEventToShow()
 	event = tailEvent
 	while (event ~= nil) do
 		local x, _, z = unpack(event.location)
-		local interestModifier = 1 + interestGrid:get(x, z)
+		local interestModifier = 1 + interestGrid:getScore(x, z)
 		local adjImportance = event.importance * interestModifier
 		local eventPercentile = eventStatistics:logEvent(event.type, adjImportance)
 		if (eventPercentile > mostPercentile) then
@@ -554,7 +557,7 @@ local function toDisplayInfo(event, frame)
 	-- TODO: Tailor message if multiple actors
 	local actorName = "unknown"
 	if (actorID) then
-		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeam .. ")"
+		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeamName .. ")"
 	end
 
 	if (event.type == hotspotEventType) then
@@ -729,7 +732,43 @@ function widget:Initialize()
 		ScrollPanel = Chili.ScrollPanel
 		screen0 = Chili.Screen0
 
-		initTeams()
+		-- Init teams.
+		teamInfo = {}
+		local allyTeams = spGetAllyTeamList()
+		for _, allyTeam in pairs(allyTeams) do
+			local teamList = spGetTeamList(allyTeam)
+
+			local allyTeamName = spGetGameRulesParam("allyteam_long_name_" .. allyTeam)
+			if string.len(allyTeamName) > 10 then
+				allyTeamName = spGetGameRulesParam("allyteam_short_name_" .. allyTeam)
+			end
+
+			for _, teamID in pairs(teamList) do
+				local teamLeader = nil
+				_, teamLeader = spGetTeamInfo(teamID)
+				local teamName = "unknown"
+				if (teamLeader) then
+					teamName = spGetPlayerInfo(teamLeader)
+				end
+				teamInfo[teamID] = {
+					allyTeam = allyTeam,
+					allyTeamName = allyTeamName, -- TODO: Is there any need for separate ally team name or can just concat here?
+					color = { spGetTeamColor(teamID) } or { 1, 1, 1, 1 },
+					name = teamName
+				}
+			end
+		end
+
+		interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, allyTeams = allyTeams })
+		unitInfo = UnitInfoCache:new({ locationListener = function(x, _, z, allyTeam, isMoving)
+			local interest = 1
+			if not isMoving then
+				-- Static things aren't themselves very interesting but count for #teams
+				interest = 0.1
+			end
+			interestGrid:add(x, z, allyTeam, interest)
+		end})
+
 		setupPanels()
 	else
 		spEcho(loadText .. "AND REMOVED " .. widget:GetInfo().name)
@@ -755,13 +794,15 @@ function widget:GameFrame(frame)
 		return
 	end
 
-	interestGrid:fade()
-	local igMax, igX, igZ = interestGrid:max()
-	if igMax > 3 then
-		local event = addEvent(nil, 1, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
+	local igMax, igX, igZ = interestGrid:maxScore()
+	interestGrid:reset()
+	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
-		for _, unit in pairs(units) do
-			event.units[unit] = { igX, _, igZ }
+		if #units > 0 then
+			local event = addEvent(nil, 1, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
+			for _, unit in pairs(units) do
+				event.units[unit] = { igX, _, igZ }
+			end
 		end
 	end
 
@@ -772,7 +813,7 @@ function widget:GameFrame(frame)
 		-- Sticky locations.
 		-- TODO: Apply to whole screen?
 		local x, _, z = unpack(display.location)
-		interestGrid:add(x, z, 1)
+		interestGrid:add(x, z, nil, 1)
 
 		-- Don't bounce between events e.g. comm spawn.
 		showingEvent.importance = 0
@@ -830,7 +871,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-	local _, _, _, importance = unitInfo:forget(unitID)
+	local x, y, z, importance = unitInfo:forget(unitID)
 	purgeEventsOfUnit(unitID)
 
 	if (not attackerTeam) then
@@ -844,15 +885,19 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		return
 	end
 
-	local x, y, z = spGetUnitPosition(unitID)
 	local event = addEvent(attackerTeam, eventFrameHorizon, importance or unitDef.cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
-	interestGrid:add(x, z, 4)
 	x, y, z = spGetUnitPosition(attackerID)
 	event.units[attackerID] = { x, y, z }
+	-- Areas where units are being destroyed are particularly interesting, and
+	-- also the destroyed unit will no longer count, so add some extra interest
+	-- here.
+	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 2)
+	interestGrid:add(x, z, teamInfo[attackerTeam].allyTeam, 1)
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
-	local x, y, z, importance = unitInfo:watch(unitID, unitDefID)
+	local allyTeam = teamInfo[unitTeam].allyTeam
+	local x, y, z, importance = unitInfo:watch(unitID, allyTeam, unitDefID)
 	addEvent(unitTeam, eventFrameHorizon, importance, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
 end
 
