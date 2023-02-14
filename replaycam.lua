@@ -136,8 +136,8 @@ function WorldGrid:getScore(x, y)
 end
 
 function WorldGrid:getInterestingScore()
-	-- TODO: Derive 8 in better way. 8 is equal to 4 ally units for 2 cache polls, or 2 x 1 units from different ally teams for 2 cache poll.
-	return 4 * updateIntervalFrames / framesPerSecond
+	-- TODO: 4 is equal to 4 ally units, or 2 x 1 units from different ally teams.
+	return 5 * updateIntervalFrames / framesPerSecond
 end
 
 -- @param f Units of interest to add.
@@ -225,6 +225,7 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	local importance = unitDef.cost
 	if unitDef.customParams.iscommander then
 		-- Commanders are extra important.
+		-- TODO: Make upgrades less important as they tend to be boring stay at home units.
 		importance = importance * 1.5
 	end
 	local isStatic = not spGetMovetype(unitDef)
@@ -345,10 +346,10 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		hotspot = 1.0,
-		unitBuilt = 1.6,
+		unitBuilt = 2.5,
 		unitDamaged = 0.6,
-		unitDestroyed = 0.4,
-		unitMoved = 0.9,
+		unitDestroyed = 0.6,
+		unitMoved = 1.2,
 		unitTaken = 0.2,
 	}
 }, eventTypes)
@@ -767,7 +768,7 @@ function widget:Initialize()
 			local interest = 1
 			if not isMoving then
 				-- Static things aren't themselves very interesting but count for #teams
-				interest = 0.1
+				interest = 0.2
 			end
 			interestGrid:add(x, z, allyTeam, interest)
 		end})
@@ -871,6 +872,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	importance = importance * sqrt(unitImportance)
 
 	addEvent(attackerTeam, updateIntervalFrames, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
+	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 0.2)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
@@ -894,7 +896,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	-- Areas where units are being destroyed are particularly interesting, and
 	-- also the destroyed unit will no longer count, so add some extra interest
 	-- here.
-	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 2)
+	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 1)
 	interestGrid:add(x, z, teamInfo[attackerTeam].allyTeam, 1)
 end
 
