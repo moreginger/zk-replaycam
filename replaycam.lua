@@ -141,12 +141,19 @@ function WorldGrid:getInterestingScore()
 end
 
 -- @param f Units of interest to add.
-function WorldGrid:add(x, y, allyTeam, f)
+function WorldGrid:add(x, y, allyTeam, f, radius)
+	if not radius then
+		radius = 0
+	end
 	x, y = self:__toGridCoords(x, y)
-	local data = self.data[x][y]
-	data[1] = data[1] + f
-	if allyTeam then
-		data[2][allyTeam] = true
+	for ix = max(1, x - radius), min(self.xSize, x + radius) do
+		for iy = max(1, y - radius), min(self.ySize, y + radius) do
+			local data = self.data[ix][iy]
+			data[1] = data[1] + f
+			if allyTeam then
+				data[2][allyTeam] = true
+			end
+		end
 	end
 end
 
@@ -815,9 +822,8 @@ function widget:GameFrame(frame)
 		display = toDisplayInfo(newEvent, frame)
 
 		-- Sticky locations.
-		-- TODO: Apply to whole screen?
 		local x, _, z = unpack(display.location)
-		interestGrid:add(x, z, nil, 1)
+		interestGrid:add(x, z, nil, 2, 1)
 
 		-- Don't bounce between events e.g. comm spawn.
 		showingEvent.importance = 0
