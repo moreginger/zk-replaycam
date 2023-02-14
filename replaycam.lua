@@ -286,13 +286,16 @@ end
 function EventStatistics:logEvent(type, importance)
 	local count, meanImportance = unpack(self[type])
 	local newCount = count + 1
+
 	-- Switch to a weighted mean after a certain number of events, for faster adaptation.
-	if newCount < 32 then
-		meanImportance = (meanImportance * count / newCount) + (importance / newCount)
-	else
-		meanImportance = (meanImportance * 31/32) + (importance /32)
+	-- NOTE: This is called each update, so events get logged multiple times as their importance decreases.
+	local switchCount = 8 * eventFrameHorizon / updateIntervalFrames
+	if newCount > switchCount then
+		count = switchCount - 1
+		newCount = switchCount
 	end
-	
+
+	meanImportance = meanImportance * count / newCount + importance / newCount
 	self[type][1] = newCount
 	self[type][2] = meanImportance
 
