@@ -548,14 +548,12 @@ local function selectNextEventToShow()
 		table.remove(shownEventTypes, 1)
 	end
 
-	-- Decay importance of showing event to encourage events of similar importance to show.
-	-- If not yet showing then add importance to make it slightly sticky.
-	local showingEventImportanceDecayPerSecond = 0.98
-	if (mostImportantEvent == showingEvent) then
-		-- Give it a fighting chance of staying there for 2s.
-		mostImportantEvent.importance = mostImportantEvent.importance * pow(showingEventImportanceDecayPerSecond, 2)
+	-- We want the selected event to be a little sticky to avoid too much jumping,
+	-- but we also want to encourage it to go away so we can show the next thing.
+	if mostImportantEvent ~= showingEvent then
+		mostImportantEvent.importance = mostImportantEvent.importance / pow(updateIntervalDecayFactor, 4)
 	else
-		mostImportantEvent.importance = mostImportantEvent.importance / pow(showingEventImportanceDecayPerSecond, updateIntervalFrames / framesPerSecond)
+		mostImportantEvent.importance = mostImportantEvent.importance * pow(updateIntervalDecayFactor, 2)
 	end
 
 	return mostImportantEvent
