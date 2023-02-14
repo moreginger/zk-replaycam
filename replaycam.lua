@@ -229,11 +229,11 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 		unitDefID = spGetUnitDefID(unitID)
 	end
 	local unitDef = UnitDefs[unitDefID]
-	local importance = unitDef.cost
-	if unitDef.customParams.iscommander then
+	local importance = unitDef.metalCost
+	local isCommander = true and spGetUnitRulesParam(unitID, "comm_level")
+	if isCommander then
 		-- Commanders are extra important.
-		-- TODO: Make upgrades less important as they tend to be boring stay at home units.
-		importance = importance * 1.5
+		importance = importance * 1.2
 	end
 	local isStatic = not spGetMovetype(unitDef)
 	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, importance, isStatic }
@@ -896,7 +896,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		return
 	end
 
-	local event = addEvent(attackerTeam, eventFrameHorizon, importance or unitDef.cost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
+	local event = addEvent(attackerTeam, eventFrameHorizon, importance or unitDef.metalCost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
 	x, y, z = spGetUnitPosition(attackerID)
 	event.units[attackerID] = { x, y, z }
 	-- Areas where units are being destroyed are particularly interesting, and
