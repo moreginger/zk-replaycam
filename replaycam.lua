@@ -228,11 +228,6 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	end
 	local unitDef = UnitDefs[unitDefID]
 	local importance = unitDef.metalCost
-	local isCommander = true and spGetUnitRulesParam(unitID, "comm_level")
-	if isCommander then
-		-- Commanders are extra important.
-		importance = importance * 1.2
-	end
 	local isStatic = not spGetMovetype(unitDef)
 	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, importance, isStatic }
 	self:_updatePosition(unitID, cacheObject)
