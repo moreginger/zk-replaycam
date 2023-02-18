@@ -338,6 +338,7 @@ local window_cpl, panel_cpl, commentary_cpl
 -- EVENT TRACKING
 
 local hotspotEventType = "hotspot"
+local overviewEventType = "overview"
 local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
@@ -345,6 +346,7 @@ local unitMovedEventType = "unitMoved"
 local unitTakenEventType = "unitTaken"
 local eventTypes = {
 	hotspotEventType,
+	overviewEventType,
 	unitBuiltEventType,
 	unitDamagedEventType,
 	unitDestroyedEventType,
@@ -360,6 +362,7 @@ local headEvent = nil
 -- Linear decay rate
 local decayPerSecond = {
 	hotspot = 1,
+	overview = 1,
 	unitBuilt = 0.05,
 	unitDamaged = 0.4,
 	unitDestroyed = 0.1,
@@ -373,6 +376,7 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		hotspot = 1.1,
+		overview = 3.0,
 		unitBuilt = 2.5,
 		unitDamaged = 0.6,
 		unitDestroyed = 0.6,
@@ -555,16 +559,18 @@ local function toDisplayInfo(event, frame)
 		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeamName .. ")"
 	end
 
-	if (event.type == hotspotEventType) then
+	if event.type == hotspotEventType then
 		commentary = "Something's going down here"
-	elseif (event.type == unitBuiltEventType) then
+	elseif event.type == overviewEventType then
+		commentary = "Let's get an overview of the battlefield"
+	elseif event.type == unitBuiltEventType then
 		commentary = event.object .. " built by " .. actorName
-	elseif (event.type == unitDamagedEventType) then
+	elseif event.type == unitDamagedEventType then
 		-- TODO: Add actor when Spring allows it: https://github.com/beyond-all-reason/spring/issues/391
 		commentary = event.object .. " under attack"
-	elseif (event.type == unitDestroyedEventType) then
+	elseif event.type == unitDestroyedEventType then
 		commentary = event.object .. " destroyed by " .. actorName
-	elseif (event.type == unitMovedEventType) then
+	elseif event.type == unitMovedEventType then
 		local quantityPrefix = " "
 		if (event.unitCount > 5) then
 			quantityPrefix = " batallion "
@@ -572,7 +578,7 @@ local function toDisplayInfo(event, frame)
 			quantityPrefix = " team "
 		end
 		commentary = event.object .. quantityPrefix .. "moving"
-	elseif (event.type == unitTakenEventType) then
+	elseif event.type == unitTakenEventType then
 		commentary = event.object .. " captured by " .. actorName
 	end
 
@@ -800,6 +806,7 @@ function widget:GameFrame(frame)
 			end
 		end
 	end
+	addEvent(nil, 10, { mapSizeX / 2, 0, mapSizeZ / 2}, overviewEventType, nil, nil)
 
 	local newEvent = selectNextEventToShow()
 	if newEvent and newEvent ~= showingEvent then
