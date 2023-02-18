@@ -56,7 +56,6 @@ local framesPerSecond = 30
 -- CONFIGURATION
 
 local updateIntervalFrames = framesPerSecond
-local eventFrameHorizon = framesPerSecond * 8
 
 -- UTILITY FUNCTIONS
 
@@ -274,6 +273,22 @@ function UnitInfoCache:update(currentFrame)
 	end
 end
 
+-- EVENT
+
+Event = {}
+
+function Event:new(o)
+	o = o or {} -- create object if user does not provide one
+	setmetatable(o, self)
+	self.__index = self
+
+	return o
+end
+
+function Event:importanceAtFrame(frame)
+  return self.importance * (1 - self.decay * (frame - self.started) / framesPerSecond)
+end
+
 -- EVENT STATISTICS
 
 EventStatistics = { eventMeanAdj = {} }
@@ -290,14 +305,12 @@ function EventStatistics:new(o, types)
 	return o
 end
 
--- Log event and return percentile in unit range (not sure what to call it).
 function EventStatistics:logEvent(type, importance)
 	local count, meanImportance = unpack(self[type])
 	local newCount = count + 1
 
 	-- Switch to a weighted mean after a certain number of events, for faster adaptation.
-	-- NOTE: This is called each update, so events get logged multiple times as their importance decreases.
-	local switchCount = 8 * eventFrameHorizon / updateIntervalFrames
+	local switchCount = 32
 	if newCount > switchCount then
 		count = switchCount - 1
 		newCount = switchCount
@@ -306,8 +319,13 @@ function EventStatistics:logEvent(type, importance)
 	meanImportance = meanImportance * count / newCount + importance / newCount
 	self[type][1] = newCount
 	self[type][2] = meanImportance
+end
 
-	-- Assume exponential distribution.
+-- Return percentile in unit range
+function EventStatistics:getPercentile(type, importance)
+	local meanImportance = self[type][2]
+
+	-- Assume exponential distribution
 	local m = 1 / (meanImportance * self.eventMeanAdj[type])
 	return 1 - math.exp(-m * importance)
 end
@@ -342,11 +360,19 @@ local eventTypes = {
 
 local eventMergeRange = 256
 
--- Importance decay factor per second.
-local importanceDecayFactor = 0.9
-
 local tailEvent = nil
 local headEvent = nil
+
+-- Linear decay rate
+local decayPerSecond = {
+	hotspot = 1,
+	unitBuilt = 0.05,
+	unitDamaged = 0.4,
+	unitDestroyed = 0.1,
+	unitMoved = 0.4, -- FIXME: Maybe could keep for longer?
+	unitTaken = 0.1,
+}
+
 local eventStatistics = EventStatistics:new({
 	-- Adjust mean of events in percentile estimation
 	-- > 1: make each event seem more likely (less interesting)
@@ -361,8 +387,7 @@ local eventStatistics = EventStatistics:new({
 	}
 }, eventTypes)
 
-local shownEventTypes = {}
-local showingEvent = {}
+local showingEvent = nil
 local display = nil
 
 -- CAMERA TRACKING
@@ -371,11 +396,8 @@ local camHeightMax = 1600
 local camHeightMin = 1000
 local camera = nil
 
-local function decayImportance(importance, frames)
-	return importance * pow(importanceDecayFactor, frames / framesPerSecond)
-end
-
 local function removeEvent(event)
+	event.importance = 0
 	if event == headEvent then
 		headEvent = event.previous
 	end
@@ -392,29 +414,32 @@ local function removeEvent(event)
 	event.next = nil
 end
 
-local function addEvent(actor, expireIn, importance, location, type, unit, unitDef)
+local function addEvent(actor, importance, location, type, unit, unitDef)
 	local frame = spGetGameFrame()
 	local object = {}
 	if unit then
 		object = spGetHumanName(UnitDefs[unitDef], unit)
 	end
-	local expiry = frame + expireIn
+	local decay = decayPerSecond[type]
 
 	-- Try to merge into recent events.
 	local considerForMergeAfterFrame = frame - framesPerSecond
 	local event = headEvent
-	while (event ~= nil) do
-		if (event.started < considerForMergeAfterFrame) then
+	while event ~= nil do
+		local nextEvent = event.previous
+		if event.started < considerForMergeAfterFrame then
 			-- Don't want to check further back, so break.
 			event = nil
 			break
 		end
-		if (event.type == type and event.object == object and
-				distance(event.location, location) < eventMergeRange) then
-
-			-- Merge new event into old
-			event.importance = event.importance + importance
-			event.expiry = expiry
+		local importanceAtFrame = event:importanceAtFrame(frame)
+		if importanceAtFrame <= 0 then
+			-- Just remove the event forever.
+			removeEvent(event)
+		elseif event.type == type and event.object == object and distance(event.location, location) < eventMergeRange then
+			-- Merge new event into old.
+			event.importance = importanceAtFrame + importance
+			event.decay = decay
 			event.location = location
 			event.started = frame
 			if (actor and not event.actors[actor]) then
@@ -426,31 +451,31 @@ local function addEvent(actor, expireIn, importance, location, type, unit, unitD
 				event.units[unit] = location
 			end
 
-			-- We put it back in later.
+			-- Remove it and attach at head later.
 			removeEvent(event)
 
 			-- We merged, so break.
 			break
 		end
-
-		-- Keep looking.
-		event = event.previous
+		event = nextEvent
 	end
 
-	if (not event) then
-		event = {
+	if not event then
+		event = Event:new({
 			actorCount = 1,
 			actors = initTable(actor, true),
-			expiry = expiry,
 			importance = importance,
+			decay = decay,
 			location = location,
 			object = object,
 			started = frame,
 			type = type,
 			unitCount = 1,
 			units = initTable(unit, location)
-		}
+		})
 	end
+
+	eventStatistics:logEvent(type, importance)
 
 	if (headEvent == nil) then
 		tailEvent = event
@@ -467,6 +492,7 @@ end
 local function purgeEventsOfUnit(unitID)
 	local event = tailEvent
 	while event ~= nil do
+		local nextEvent = event.next
 		-- Keep unit if it was destroyed as we'll track its destroyed location.
 		if event.units[unitID] and event.type ~= unitDestroyedEventType then
 			event.units[unitID] = nil
@@ -476,7 +502,7 @@ local function purgeEventsOfUnit(unitID)
 				removeEvent(event)
 			end
 		end
-		event = event.next
+		event = nextEvent
 	end
 end
 
@@ -494,66 +520,32 @@ local function selectNextEventToShow()
 	-- Purge old events and merge similar events.
 	local currentFrame = spGetGameFrame()
 
-	-- Remove expired events
-	local event = tailEvent
-	while event ~= nil do
-		local nextEvent = event.next
-		if event.expiry < currentFrame then
-			removeEvent(event)
-		end
-		event = nextEvent
-	end
-
-	-- Decay events that were added before the last check.
-	local addedBeforeLastCheckFrame = currentFrame - updateIntervalFrames
-	local updateIntervalDecayFactor = decayImportance(1, updateIntervalFrames)
-	event = tailEvent
-	while event ~= nil and event.started < addedBeforeLastCheckFrame do
-		event.importance = event.importance * updateIntervalDecayFactor
-		event = event.next
-	end
-
-	-- Decay events that were added after the last check.
-	while event ~= nil do
-		event.importance = decayImportance(event.importance, event.started - currentFrame)
-		event = event.next
-	end
-
 	-- Find next event to show
 	local mostImportantEvent = nil
 	local mostPercentile = 0
 
 	debugText = "" .. debugGetEventCount() .. " events\n"
-	event = tailEvent
-	while (event ~= nil) do
-		local x, _, z = unpack(event.location)
-		local interestModifier = 1 + interestGrid:getScore(x, z)
-		local adjImportance = event.importance * interestModifier
-		local eventPercentile = eventStatistics:logEvent(event.type, adjImportance)
-		if (eventPercentile > mostPercentile) then
-			mostImportantEvent = event
-			mostPercentile = eventPercentile
-			debugText = debugText ..
-					mostImportantEvent.type .. " " .. eventPercentile .. ", "
+	local event = tailEvent
+	while event ~= nil do
+		local nextEvent = event.next
+		local importance = event:importanceAtFrame(currentFrame)
+		if importance <= 0 then
+			removeEvent(event)
+		else
+		  local x, _, z = unpack(event.location)
+			local interestModifier = 1 + interestGrid:getScore(x, z)
+			local eventPercentile = eventStatistics:getPercentile(event.type, importance * interestModifier)
+			if eventPercentile > mostPercentile then
+				mostImportantEvent = event
+				mostPercentile = eventPercentile
+				debugText = debugText .. mostImportantEvent.type .. " " .. eventPercentile .. ", "
+			end
 		end
-		event = event.next
+		event = nextEvent
 	end
 
-	if (not mostImportantEvent) then
+	if not mostImportantEvent then
 		return
-	end
-
-	shownEventTypes[#shownEventTypes + 1] = mostImportantEvent.type
-	if (#shownEventTypes == 17) then
-		table.remove(shownEventTypes, 1)
-	end
-
-	-- We want the selected event to be a little sticky to avoid too much jumping,
-	-- but we also want to encourage it to go away so we can show the next thing.
-	if mostImportantEvent ~= showingEvent then
-		mostImportantEvent.importance = mostImportantEvent.importance / pow(updateIntervalDecayFactor, 4)
-	else
-		mostImportantEvent.importance = mostImportantEvent.importance * pow(updateIntervalDecayFactor, 2)
 	end
 
 	return mostImportantEvent
@@ -808,7 +800,7 @@ function widget:GameFrame(frame)
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
 		if #units > 0 then
-			local event = addEvent(nil, 1, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
+			local event = addEvent(nil, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
 			for _, unit in pairs(units) do
 				event.units[unit] = { igX, _, igZ }
 			end
@@ -817,18 +809,30 @@ function widget:GameFrame(frame)
 
 	local newEvent = selectNextEventToShow()
 	if newEvent and newEvent ~= showingEvent then
+		-- Avoid coming back to the previous event
+		if showingEvent then
+			removeEvent(showingEvent)
+		end
+
+		-- We want the selected event to be a little sticky to avoid too much jumping,
+		-- but we also want to make sure it goes away reasonably soon.
+		newEvent.importance = newEvent.importance * 2
+		newEvent.decay = 0.25
+		newEvent.started = frame
+
 		display = toDisplayInfo(newEvent, frame)
 
 		-- Sticky locations.
 		local x, _, z = unpack(display.location)
 		interestGrid:add(x, z, nil, 2, 1)
 
-		-- Don't bounce between events e.g. comm spawn.
-		showingEvent.importance = 0
-		showingEvent = newEvent
-
 		commentary_cpl:SetText(display.commentary .. "\n" .. debugText)
+		
+		showingEvent = newEvent
 	end
+
+	-- DEBUG
+	commentary_cpl:SetText(display.commentary .. "\n" .. debugText)
 end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
@@ -860,7 +864,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 		return
 	end
-	addEvent(unitTeam, updateIntervalFrames, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
+	addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
@@ -875,7 +879,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	-- Multiply by unit importance factor
 	importance = importance * sqrt(unitImportance)
 
-	addEvent(attackerTeam, updateIntervalFrames, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
+	addEvent(attackerTeam, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
 	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 0.2)
 end
 
@@ -894,7 +898,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		return
 	end
 
-	local event = addEvent(attackerTeam, eventFrameHorizon, importance or unitDef.metalCost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
+	local event = addEvent(attackerTeam, importance or unitDef.metalCost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
 	x, y, z = spGetUnitPosition(attackerID)
 	event.units[attackerID] = { x, y, z }
 	-- Areas where units are being destroyed are particularly interesting, and
@@ -907,7 +911,7 @@ end
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local allyTeam = teamInfo[unitTeam].allyTeam
 	local x, y, z, importance = unitInfo:watch(unitID, allyTeam, unitDefID)
-	addEvent(unitTeam, eventFrameHorizon, importance, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
+	addEvent(unitTeam, importance, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
 end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
@@ -918,7 +922,7 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	end
 
 	local x, y, z, importance = unitInfo:get(unitID)
-	local event = addEvent(newTeam, eventFrameHorizon, importance, { x, y, z}, unitTakenEventType, unitID, unitDefID)
+	local event = addEvent(newTeam, importance, { x, y, z}, unitTakenEventType, unitID, unitDefID)
 	x, y, z =  unitInfo:get(captureController)
 	event.units[captureController] = { x, y, z }
 end
