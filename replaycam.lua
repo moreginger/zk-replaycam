@@ -14,7 +14,6 @@ local abs = math.abs
 local floor = math.floor
 local max = math.max
 local min = math.min
-local pow = math.pow
 local sqrt = math.sqrt
 
 local spEcho = Spring.Echo
