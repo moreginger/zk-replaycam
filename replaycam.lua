@@ -376,7 +376,7 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		hotspot = 1.1,
-		overview = 3.0,
+		overview = 4.0,
 		unitBuilt = 2.5,
 		unitDamaged = 0.6,
 		unitDestroyed = 0.6,
@@ -621,16 +621,28 @@ local function updateCamera(displayInfo, dt)
 	end
 
 	-- Smoothly move to the location of the event.
-
-	-- Event location
-	local ex, _, ez = unpack(displayInfo.location)
-	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Camera position and vector
-	local cx, cz, ch, cxv, czv = camera.x, camera.z, camera.h, camera.xv, camera.zv
+	local cx, cy, cz, cxv, czv, rx = camera.x, camera.y, camera.z, camera.xv, camera.zv, camera.rx
+	-- Event location
+	local ex, ey, ez = unpack(displayInfo.location)
+	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
+	-- Calculate height we want the camera at.
+	local boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
+	local targetHeight = ey + bound(camHeightMin + boundingDiagLength + length(ex - cx, ez - cz), camHeightMin, camHeightMax)
+	local heightChange = 128 * dt
+	if abs(targetHeight - cy) <= math.max(8, heightChange) then
+		-- Don't jitter when close to correct.
+		cy = targetHeight
+	elseif targetHeight > cy then
+		cy = cy + heightChange
+	elseif targetHeight < cy then
+		cy = cy - heightChange
+	end
+
 	if (length(ex - cx, ez - cz) > maxPanDistance) then
 		cx = ex
+		cy = ey + math.random(camHeightMin, camHeightMax)
 		cz = ez
-		ch = math.random(camHeightMin, camHeightMax)
 		cxv = 0
 		czv = 0
 	else
@@ -662,30 +674,23 @@ local function updateCamera(displayInfo, dt)
 		cz = cz + dt * czv
 	end
 
-	-- Change height based on unit distribution.
-	local boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
-	local targetHeight = bound(camHeightMin + boundingDiagLength + length(ex - cx, ez - cz), camHeightMin, camHeightMax)
-	local heightChange = 128 * dt
-	if (abs(targetHeight - ch) <= heightChange) then
-		ch = targetHeight
-	elseif (targetHeight > ch) then
-		ch = ch + heightChange
-	elseif (targetHeight < ch) then
-		ch = ch - heightChange
-	end
-
 	camera = {
 		x = cx,
+		y = cy,
 		z = cz,
-		h = ch,
 		xv = cxv,
-		zv = czv
+		zv = czv,
+		rx = rx
 	}
 
-	spSetCameraTarget(camera.x, 0, camera.z, 1)
-
 	local cameraState = spGetCameraState()
-	cameraState.height = camera.h
+	cameraState.mode = 4
+	cameraState.px = cx
+	cameraState.py = cy
+	cameraState.pz = cz - cy / math.tan(rx)
+	cameraState.rx = rx
+	cameraState.ry = math.pi
+	cameraState.rz = 0
 	spSetCameraState(cameraState)
 end
 
@@ -776,15 +781,15 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget()
 	end
 
-	local cx, _, cz = spGetCameraPosition()
-	local height = spGetCameraState().height
-
+  -- FIXME: Save and restore camera state?
+	local cx, cy, cz = spGetCameraPosition()
 	camera = {
 		x = cx,
+		y = cy,
 		z = cz,
-		h = height,
 		xv = 0,
-		zv = 0
+		zv = 0,
+		rx = -1.2
 	}
 end
 
