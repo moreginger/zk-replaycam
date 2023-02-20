@@ -636,7 +636,7 @@ local function updateCamera(displayInfo, dt)
 
 	if (length(ex - cx, ez - cz) > maxPanDistance) then
 		cx = ex
-		cy = cy
+		cy = ey + displayInfo.camRange
 		cz = ez
 		cxv = 0
 		czv = 0
