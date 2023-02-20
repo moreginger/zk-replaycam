@@ -38,7 +38,6 @@ local spGetUnitTeam = Spring.GetUnitTeam
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
-local spSetCameraTarget = Spring.SetCameraTarget
 
 local Chili
 local Window
@@ -55,6 +54,7 @@ local framesPerSecond = 30
 -- CONFIGURATION
 
 local updateIntervalFrames = framesPerSecond
+local fov = 45
 
 -- UTILITY FUNCTIONS
 
@@ -390,8 +390,8 @@ local display = nil
 
 -- CAMERA TRACKING
 
-local camHeightMax = 1600
-local camHeightMin = 1000
+local camRangeMax = 1600
+local camRangeMin = 1000
 local camera = nil
 
 local function removeEvent(event)
@@ -550,7 +550,7 @@ local function selectNextEventToShow()
 end
 
 local function toDisplayInfo(event, frame)
-	local commentary = nil
+	local camAngle, camRange, commentary = -1.2, camRangeMin, nil
 	local actorID = pairs(event.actors)(event.actors)
 
 	-- TODO: Tailor message if multiple actors
@@ -562,6 +562,8 @@ local function toDisplayInfo(event, frame)
 	if event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
+		camAngle = - math.pi / 2
+		camRange = 1.2 * math.max(mapSizeX, mapSizeZ) / math.tan(math.pi * fov / 180)
 		commentary = "Let's get an overview of the battlefield"
 	elseif event.type == unitBuiltEventType then
 		commentary = event.object .. " built by " .. actorName
@@ -582,7 +584,7 @@ local function toDisplayInfo(event, frame)
 		commentary = event.object .. " captured by " .. actorName
 	end
 
-	return { commentary = commentary, location = event.location, shownAt = frame, tracking = event.units }
+	return { camAngle = camAngle, camRange = camRange, commentary = commentary, location = event.location, shownAt = frame, tracking = event.units }
 end
 
 local function updateCamera(displayInfo, dt)
@@ -622,26 +624,19 @@ local function updateCamera(displayInfo, dt)
 
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
-	local cx, cy, cz, cxv, czv, rx = camera.x, camera.y, camera.z, camera.xv, camera.zv, camera.rx
+	local cx, cy, cz, cxv, czv = camera.x, camera.y, camera.z, camera.xv, camera.zv
 	-- Event location
 	local ex, ey, ez = unpack(displayInfo.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Calculate height we want the camera at.
 	local boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
-	local targetHeight = ey + bound(camHeightMin + boundingDiagLength + length(ex - cx, ez - cz), camHeightMin, camHeightMax)
-	local heightChange = 128 * dt
-	if abs(targetHeight - cy) <= math.max(8, heightChange) then
-		-- Don't jitter when close to correct.
-		cy = targetHeight
-	elseif targetHeight > cy then
-		cy = cy + heightChange
-	elseif targetHeight < cy then
-		cy = cy - heightChange
-	end
+	local targetRange = ey + displayInfo.camRange + bound(boundingDiagLength + length(ex - cx, ez - cz), 0, camRangeMax - camRangeMin)
+	local heightChange = (targetRange - cy) * dt
+	cy = cy + heightChange
 
 	if (length(ex - cx, ez - cz) > maxPanDistance) then
 		cx = ex
-		cy = ey + math.random(camHeightMin, camHeightMax)
+		cy = cy
 		cz = ez
 		cxv = 0
 		czv = 0
@@ -679,18 +674,19 @@ local function updateCamera(displayInfo, dt)
 		y = cy,
 		z = cz,
 		xv = cxv,
-		zv = czv,
-		rx = rx
+		zv = czv
 	}
 
 	local cameraState = spGetCameraState()
 	cameraState.mode = 4
 	cameraState.px = cx
 	cameraState.py = cy
-	cameraState.pz = cz - cy / math.tan(rx)
-	cameraState.rx = rx
+	cameraState.pz = cz - cy / math.tan(displayInfo.camAngle)
+	cameraState.rx = displayInfo.camAngle
 	cameraState.ry = math.pi
 	cameraState.rz = 0
+	cameraState.fov = fov
+
 	spSetCameraState(cameraState)
 end
 
@@ -788,8 +784,7 @@ function widget:Initialize()
 		y = cy,
 		z = cz,
 		xv = 0,
-		zv = 0,
-		rx = -1.2
+		zv = 0
 	}
 end
 
@@ -811,6 +806,7 @@ function widget:GameFrame(frame)
 			end
 		end
 	end
+	-- FIXME: Add height at center.
 	addEvent(nil, 10, { mapSizeX / 2, 0, mapSizeZ / 2}, overviewEventType, nil, nil)
 
 	local newEvent = selectNextEventToShow()
