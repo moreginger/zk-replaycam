@@ -134,7 +134,7 @@ function WorldGrid:getScore(x, y)
 end
 
 function WorldGrid:getInterestingScore()
-	-- TODO: 4 is equal to 4 ally units, or 2 x 1 units from different ally teams.
+	-- 4 is equal to 4 ally units, or 2 x 1 units from different ally teams.
 	return 5 * updateIntervalFrames / framesPerSecond
 end
 
@@ -214,7 +214,6 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	cacheObject[5] = y
 	cacheObject[6] = z
 	if self.locationListener then
-		-- TODO: Track velocity?
 		local isMoving = not cacheObject[8]
 		self.locationListener(x, y, z, cacheObject[1], isMoving)
 	end
@@ -236,7 +235,6 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 end
 
 -- Returns unit info including rough position.
--- TODO: Override indexer?
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
@@ -366,7 +364,7 @@ local decayPerSecond = {
 	unitBuilt = 0.05,
 	unitDamaged = 0.4,
 	unitDestroyed = 0.1,
-	unitMoved = 0.4, -- FIXME: Maybe could keep for longer?
+	unitMoved = 0.4,
 	unitTaken = 0.1,
 }
 
@@ -553,7 +551,6 @@ local function toDisplayInfo(event, frame)
 	local camAngle, camRange, commentary = -1.2, camRangeMin, nil
 	local actorID = pairs(event.actors)(event.actors)
 
-	-- TODO: Tailor message if multiple actors
 	local actorName = "unknown"
 	if (actorID) then
 		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeamName .. ")"
@@ -568,7 +565,6 @@ local function toDisplayInfo(event, frame)
 	elseif event.type == unitBuiltEventType then
 		commentary = event.object .. " built by " .. actorName
 	elseif event.type == unitDamagedEventType then
-		-- TODO: Add actor when Spring allows it: https://github.com/beyond-all-reason/spring/issues/391
 		commentary = event.object .. " under attack"
 	elseif event.type == unitDestroyedEventType then
 		commentary = event.object .. " destroyed by " .. actorName
@@ -726,7 +722,6 @@ local function setupPanels()
 end
 
 function widget:Initialize()
-	-- TODO: Force overhead camera
 	local loadText = "LOADED "
 	if (WG.Chili and (spIsReplay() or spGetSpectatingState())) then
 		Chili = WG.Chili
@@ -754,7 +749,7 @@ function widget:Initialize()
 				end
 				teamInfo[teamID] = {
 					allyTeam = allyTeam,
-					allyTeamName = allyTeamName, -- TODO: Is there any need for separate ally team name or can just concat here?
+					allyTeamName = allyTeamName,
 					color = { spGetTeamColor(teamID) } or { 1, 1, 1, 1 },
 					name = teamName
 				}
@@ -777,7 +772,6 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget()
 	end
 
-  -- FIXME: Save and restore camera state?
 	local cx, cy, cz = spGetCameraPosition()
 	camera = {
 		x = cx,
