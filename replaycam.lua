@@ -22,6 +22,7 @@ local spGetCameraPosition = Spring.GetCameraPosition
 local spGetCameraState = Spring.GetCameraState
 local spGetGameFrame = Spring.GetGameFrame
 local spGetGameRulesParam = Spring.GetGameRulesParam
+local spGetGroundHeight = Spring.GetGroundHeight
 local spGetHumanName = Spring.Utilities.GetHumanName
 local spGetMovetype = Spring.Utilities.getMovetype
 local spGetPlayerInfo = Spring.GetPlayerInfo
@@ -800,8 +801,7 @@ function widget:GameFrame(frame)
 			end
 		end
 	end
-	-- FIXME: Add height at center.
-	addEvent(nil, 10, { mapSizeX / 2, 0, mapSizeZ / 2}, overviewEventType, nil, nil)
+	addEvent(nil, 10, { mapSizeX / 2, spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2), mapSizeZ / 2 }, overviewEventType, nil, nil)
 
 	local newEvent = selectNextEventToShow()
 	if newEvent and newEvent ~= showingEvent then
