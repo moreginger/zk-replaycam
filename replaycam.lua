@@ -849,13 +849,10 @@ function widget:GameFrame(frame)
 		local x, _, z = unpack(display.location)
 		interestGrid:add(x, z, nil, 2, worldGridSize * 2)
 
-		commentary_cpl:SetText(display.commentary .. "\n" .. debugText)
+		commentary_cpl:SetText(display.commentary)
 		
 		showingEvent = newEvent
 	end
-
-	-- DEBUG
-	commentary_cpl:SetText(display.commentary .. "\n" .. debugText)
 end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
