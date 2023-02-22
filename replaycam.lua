@@ -39,6 +39,7 @@ local spGetUnitTeam = Spring.GetUnitTeam
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
+local spTableEcho = Spring.Utilities.TableEcho
 
 local Chili
 local Window
@@ -139,21 +140,47 @@ function WorldGrid:getInterestingScore()
 	return 5 * updateIntervalFrames / framesPerSecond
 end
 
--- @param f Units of interest to add.
-function WorldGrid:add(x, y, allyTeam, f, radius)
+function WorldGrid:add(x, y, allyTeam, interest, radius)
 	if not radius then
-		radius = 0
+		radius = self.gridSize
 	end
-	x, y = self:__toGridCoords(x, y)
-	for ix = max(1, x - radius), min(self.xSize, x + radius) do
-		for iy = max(1, y - radius), min(self.ySize, y + radius) do
-			local data = self.data[ix][iy]
-			data[1] = data[1] + f
-			if allyTeam then
-				data[2][allyTeam] = true
+	local gx, gy = self:__toGridCoords(x, y)
+
+	-- Work out how to divvy the interest up around nearby grid squares.
+	local proportions, i, totalArea = {}, 1, 0
+	for ix = gx - 1, gx + 1 do
+		for iy = gy - 1, gy + 1 do
+			if ix >= 1 and ix <= self.xSize and iy >= 1 and iy <= self.ySize then
+				proportions[i] = self:_intersectArea(x - radius / 2, y - radius / 2, x + radius / 2, y + radius / 2,
+					(ix - 1) * self.gridSize, (iy - 1) * self.gridSize, ix * self.gridSize, iy * self.gridSize)
+				totalArea = totalArea + proportions[i]
 			end
+			i = i + 1
 		end
 	end
+
+	-- Divvy out the interest.
+	i = 1
+	for ix = gx - 1, gx + 1 do
+		for iy = gy - 1, gy + 1 do
+			if proportions[i] then
+				local data = self.data[ix][iy]
+				data[1] = data[1] + interest * proportions[i] / totalArea
+				if allyTeam then
+					data[2][allyTeam] = true
+				end
+			end
+			i = i + 1
+		end
+	end
+end
+
+function WorldGrid:_intersectArea(x1, y1, x2, y2, x3, y3, x4, y4)
+	local x5, y5, x6, y6 = max(x1, x3), max(y1, y3), min(x2, x4), min(y2, y4)
+	if x5 >= x6 or y5 >= y6 then
+		return 0
+	end
+	return (x6 - x5) * (y6 - y5)
 end
 
 function WorldGrid:reset()
@@ -820,7 +847,7 @@ function widget:GameFrame(frame)
 
 		-- Sticky locations.
 		local x, _, z = unpack(display.location)
-		interestGrid:add(x, z, nil, 2, 1)
+		interestGrid:add(x, z, nil, 2, worldGridSize * 2)
 
 		commentary_cpl:SetText(display.commentary .. "\n" .. debugText)
 		
