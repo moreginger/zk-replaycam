@@ -116,8 +116,8 @@ function WorldGrid:new(o)
 end
 
 function WorldGrid:__toGridCoords(x, y)
-	x = 1 + min(floor(x / self.gridSize), self.xSize - 1)
-	y = 1 + min(floor(y / self.gridSize), self.ySize - 1)
+	x = 1 + bound(floor(x / self.gridSize), 0, self.xSize - 1)
+	y = 1 + bound(floor(y / self.gridSize), 0, self.ySize - 1)
 	return x, y
 end
 
