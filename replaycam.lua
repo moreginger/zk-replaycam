@@ -191,11 +191,13 @@ function WorldGrid:reset()
 	end
 end
 
-function WorldGrid:maxScore()
-	local maxValue, maxX, maxY = -1, nil, nil
+-- Return mean, max, maxX, maxY
+function WorldGrid:statistics()
+	local maxValue, maxX, maxY, total = -1, nil, nil, 0
 	for x = 1, self.xSize do
 		for y = 1, self.ySize do
 			local value = self:_getScoreGridCoords(x, y)
+			total = total + value
 			if maxValue < value then
 				maxValue = value
 				maxX = x
@@ -203,7 +205,7 @@ function WorldGrid:maxScore()
 			end
 		end
 	end
-	return maxValue, (maxX - 0.5) * self.gridSize, (maxY - 0.5) * self.gridSize
+	return total / (self.xSize * self.ySize), maxValue, (maxX - 0.5) * self.gridSize, (maxY - 0.5) * self.gridSize
 end
 
 -- UNIT INFO CACHE
@@ -402,7 +404,7 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		hotspot = 1.1,
-		overview = 4.0,
+		overview = 3.0,
 		unitBuilt = 3.0,
 		unitDamaged = 0.6,
 		unitDestroyed = 0.6,
@@ -817,7 +819,7 @@ function widget:GameFrame(frame)
 		return
 	end
 
-	local igMax, igX, igZ = interestGrid:maxScore()
+	local _, igMax, igX, igZ = interestGrid:statistics()
 	interestGrid:reset()
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
@@ -828,7 +830,7 @@ function widget:GameFrame(frame)
 			end
 		end
 	end
-	addEvent(nil, 10, { mapSizeX / 2, spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2), mapSizeZ / 2 }, overviewEventType, nil, nil)
+	addEvent(nil, 100 / igMax, { mapSizeX / 2, spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2), mapSizeZ / 2 }, overviewEventType, nil, nil)
 
 	local newEvent = selectNextEventToShow()
 	if newEvent and newEvent ~= showingEvent then
