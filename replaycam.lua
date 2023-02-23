@@ -845,7 +845,7 @@ function widget:GameFrame(frame)
 
 		-- We want the selected event to be a little sticky to avoid too much jumping,
 		-- but we also want to make sure it goes away reasonably soon.
-		newEvent.importance = newEvent.importance * 2
+		newEvent.importance = newEvent.importance * 3
 		newEvent.decay = 0.25
 		newEvent.started = frame
 
