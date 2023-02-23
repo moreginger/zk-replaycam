@@ -186,7 +186,7 @@ end
 function WorldGrid:reset()
 	for x = 1, self.xSize do
 		for y = 1, self.ySize do
-			self.data[x][y] = { 0, {} }
+			self.data[x][y] = { 1, {} }
 		end
 	end
 end
@@ -219,8 +219,9 @@ local unitInfoCacheFrames = framesPerSecond
 -- 4 - last known x
 -- 5 - last known y
 -- 6 - last known z
--- 7 - importance
--- 8 - static (not mobile)
+-- 7 - last known velocity
+-- 8 - importance
+-- 9 - static (not mobile)
 UnitInfoCache = { cache = nil, locationListener = nil }
 
 function UnitInfoCache:new(o)
@@ -235,16 +236,19 @@ end
 
 function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local x, y, z = spGetUnitPosition(unitID)
-	if not x or not y or not z then
+	local xv, _, zv = spGetUnitVelocity(unitID)
+	if not x or not y or not z or not xv or not zv then
 		-- DEBUG: Why is this happening?
 		spEcho("ERROR! _updatePosition failed", unitID, UnitDefs[cacheObject[2]].name)
 		return false
 	end
+	local v = length(xv, zv)
 	cacheObject[4] = x
 	cacheObject[5] = y
 	cacheObject[6] = z
+	cacheObject[7] = v
 	if self.locationListener then
-		local isMoving = not cacheObject[8]
+		local isMoving = v > 0.1
 		self.locationListener(x, y, z, cacheObject[1], isMoving)
 	end
 	return true
@@ -258,7 +262,7 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	local unitDef = UnitDefs[unitDefID]
 	local importance = unitDef.metalCost
 	local isStatic = not spGetMovetype(unitDef)
-	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, importance, isStatic }
+	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, 0, importance, isStatic }
 	self:_updatePosition(unitID, cacheObject)
 	self.cache[unitID] = cacheObject
 	return self:get(unitID)
@@ -268,7 +272,7 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local _, _, _, x, y, z, importance, isStatic = unpack(cacheObject)
+		local _, _, _, x, y, z, _, importance, isStatic = unpack(cacheObject)
 		return x, y, z, importance, isStatic
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
@@ -870,7 +874,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 
 	local x, y, z, importance, isStatic = unitInfo:get(unitID)
 	if isStatic then
-		-- Not interested in commands given to factories
+		-- Not interested in move commands given to static buildings e.g. factories
 		return
 	end
 
