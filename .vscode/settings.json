@@ -6,6 +6,7 @@
     "widgetHandler",
     "Game",
     "WG",
-    "CMD"
+    "CMD",
+    "WeaponDefs"
   ]
 }

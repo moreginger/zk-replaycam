@@ -46,8 +46,9 @@ local Window
 local ScrollPanel
 local screen0
 
-local CMD_MOVE = CMD.MOVE
+local CMD_ATTACK = CMD.ATTACK
 local CMD_ATTACK_MOVE = CMD.FIGHT
+local CMD_MOVE = CMD.MOVE
 
 local debugText = "DEBUG"
 
@@ -239,7 +240,7 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local xv, _, zv = spGetUnitVelocity(unitID)
 	if not x or not y or not z or not xv or not zv then
 		-- DEBUG: Why is this happening?
-		spEcho("ERROR! _updatePosition failed", unitID, UnitDefs[cacheObject[2]].name)
+		spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, UnitDefs[cacheObject[2]].name)
 		return false
 	end
 	local v = length(xv, zv)
@@ -276,6 +277,10 @@ function UnitInfoCache:get(unitID)
 		return x, y, z, importance, isStatic
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
+	if not unitTeamID then
+		spEcho("ERROR! UnitInfoCache:get failed", unitID)
+		return
+	end
 	local _, _, _, _, _, allyTeam = spGetTeamInfo(unitTeamID)
 	return self:watch(unitID, allyTeam)
 end
@@ -369,6 +374,7 @@ local window_cpl, panel_cpl, commentary_cpl
 
 -- EVENT TRACKING
 
+local attackEventType = "attack"
 local hotspotEventType = "hotspot"
 local overviewEventType = "overview"
 local unitBuiltEventType = "unitBuilt"
@@ -377,6 +383,7 @@ local unitDestroyedEventType = "unitDestroyed"
 local unitMovedEventType = "unitMoved"
 local unitTakenEventType = "unitTaken"
 local eventTypes = {
+	attackEventType,
 	hotspotEventType,
 	overviewEventType,
 	unitBuiltEventType,
@@ -393,6 +400,7 @@ local headEvent = nil
 
 -- Linear decay rate
 local decayPerSecond = {
+	attack = 1,
 	hotspot = 1,
 	overview = 1,
 	unitBuilt = 0.05,
@@ -407,12 +415,13 @@ local eventStatistics = EventStatistics:new({
 	-- > 1: make each event seem more likely (less interesting)
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
+		attack = 1.0,
 		hotspot = 1.1,
-		overview = 3.0,
-		unitBuilt = 3.0,
+		overview = 4.0,
+		unitBuilt = 4.0,
 		unitDamaged = 0.6,
 		unitDestroyed = 0.6,
-		unitMoved = 1.2,
+		unitMoved = 1.5,
 		unitTaken = 0.2,
 	}
 }, eventTypes)
@@ -590,7 +599,9 @@ local function toDisplayInfo(event, frame)
 		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeamName .. ")"
 	end
 
-	if event.type == hotspotEventType then
+	if event.type == attackEventType then
+		commentary = event.object .. " is attacking"
+  elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
 		camAngle = - math.pi / 2
@@ -862,35 +873,71 @@ function widget:GameFrame(frame)
 end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
-	if cmdID ~= CMD_MOVE and cmdID ~= CMD_ATTACK_MOVE then
-		return
-	end
-
 	local unitDef = UnitDefs[unitDefID]
 	if unitDef.customParams.dontcount or unitDef.customParams.is_drone then
 		-- Drones get move commands too :shrug:
 		return
 	end
 
-	local x, y, z, importance, isStatic = unitInfo:get(unitID)
-	if isStatic then
-		-- Not interested in move commands given to static buildings e.g. factories
-		return
-	end
-
 	local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
-	if buildProgress < 0.9 then
-		-- Don't watch units that probably won't move any time soon
+	if buildProgress < 1.0 then
+		-- Don't watch units that aren't finished.
 		return
 	end
 
-	local unitLocation = { x, y, z }
-	local moveDistance = distance(cmdParams, unitLocation)
-	if (moveDistance < 256) then
-		-- Ignore smaller moves to keep event numbers down and help ignore unitAI
-		return
+	if cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE then
+		-- Process move event.
+
+		local x, y, z, importance, isStatic = unitInfo:get(unitID)
+		if isStatic then
+			-- Not interested in move commands given to static buildings e.g. factories
+			return
+		end
+		local unitLocation = { x, y, z }
+
+		local moveDistance = distance(cmdParams, unitLocation)
+		if (moveDistance < 256) then
+			-- Ignore smaller moves to keep event numbers down and help ignore unitAI
+			return
+		end
+		addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
+	elseif cmdID == CMD_ATTACK then
+		-- Process attack event
+		-- Get weapon damage from first weapon. Hacked together from gui_contextmenu.lua.
+		-- TODO: Cache this.
+		local weapon = unitDef.weapons[1]
+		if not weapon then
+			return
+		end
+		local weaponDef = WeaponDefs[weapon.weaponDef]
+		local weaponDefCp = weaponDef.customParams or {}
+		if not weaponDefCp or weaponDefCp.fake_weapon then
+			return
+		end
+		local weaponDam = tonumber(weaponDefCp.stats_damage)
+		if not weaponDam then
+			return
+		end
+
+		local ax, ay, az, attackedUnitID
+		-- Find the location / unit being attacked.
+		if #cmdParams == 1 then
+			attackedUnitID = cmdParams[1]
+			ax, ay, az = unitInfo:get(attackedUnitID)
+		else
+			ax, ay, az = unpack(cmdParams)
+		end
+		if ax and ay and az then
+			local x, y, z = unitInfo:get(unitID)
+			local event = addEvent(unitTeam, weaponDam, {x, y, z}, attackEventType, unitID, unitDefID)
+			-- Hack: we want the primary unit to be the attacker but the event location to be the target.
+			event.location = { ax, ay, az }
+			if attackedUnitID then
+				event.units[attackedUnitID] = { x, y, z }
+			end
+			interestGrid:add(ax, az, teamInfo[unitTeam].allyTeam, 1)
+		end
 	end
-	addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
