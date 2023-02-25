@@ -213,26 +213,57 @@ end
 
 local unitInfoCacheFrames = framesPerSecond
 
--- cacheObject {}
--- 1 - allyTeam
--- 2 - unitDefID
--- 3 - lastUpdatedFrame
--- 4 - last known x
--- 5 - last known y
--- 6 - last known z
--- 7 - last known velocity
--- 8 - importance
--- 9 - static (not mobile)
-UnitInfoCache = { cache = nil, locationListener = nil }
+
+UnitInfoCache = { locationListener = nil }
 
 function UnitInfoCache:new(o)
 	o = o or {} -- create object if user does not provide one
 	setmetatable(o, self)
 	self.__index = self
 
+	-- cacheObject {}
+  -- 1 - unit importance
+	-- 2 - static (not mobile)
+	-- 3 - weapon importance
+	o._unitStatsCache = {}
+	-- cacheObject {}
+	-- 1 - allyTeam
+	-- 2 - unitDefID
+	-- 3 - lastUpdatedFrame
+	-- 4 - last known x
+	-- 5 - last known y
+	-- 6 - last known z
+	-- 7 - last known velocity
 	o.cache = o.cache or {}
 	o.locationListener = o.locationListener or nil
 	return o
+end
+
+-- Weapon importance, 0 if no weapon found.
+function UnitInfoCache:_weaponImportance(unitDef)
+	-- Get weapon damage from first weapon. Hacked together from gui_contextmenu.lua.
+	local weapon = unitDef.weapons[1]
+	if not weapon then
+		return 0
+	end
+	local weaponDef = WeaponDefs[weapon.weaponDef]
+	if not weaponDef.customParams or weaponDef.customParams.fake_weapon then
+		return 0
+	end
+	return tonumber(weaponDef.customParams.stats_damage)
+end
+
+function UnitInfoCache:_unitStats(unitDefID)
+	local cacheObject = self._unitStatsCache[unitDefID]
+	if not cacheObject then
+		local unitDef = UnitDefs[unitDefID]
+		local importance = unitDef.metalCost
+		local isStatic = not spGetMovetype(unitDef)
+		local weaponImportance = self:_weaponImportance(unitDef)
+		cacheObject = { importance, isStatic, weaponImportance }
+		self._unitStatsCache[unitDefID] = cacheObject
+	end
+	return unpack(cacheObject)
 end
 
 function UnitInfoCache:_updatePosition(unitID, cacheObject)
@@ -260,10 +291,7 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	if not unitDefID then
 		unitDefID = spGetUnitDefID(unitID)
 	end
-	local unitDef = UnitDefs[unitDefID]
-	local importance = unitDef.metalCost
-	local isStatic = not spGetMovetype(unitDef)
-	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, 0, importance, isStatic }
+	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, 0 }
 	self:_updatePosition(unitID, cacheObject)
 	self.cache[unitID] = cacheObject
 	return self:get(unitID)
@@ -273,8 +301,9 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local _, _, _, x, y, z, _, importance, isStatic = unpack(cacheObject)
-		return x, y, z, importance, isStatic
+		local _, unitDefID, _, x, y, z, _ = unpack(cacheObject)
+		local importance, isStatic, weaponImportance = self:_unitStats(unitDefID)
+		return x, y, z, importance, isStatic, weaponImportance
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -903,22 +932,6 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
 	elseif cmdID == CMD_ATTACK then
 		-- Process attack event
-		-- Get weapon damage from first weapon. Hacked together from gui_contextmenu.lua.
-		-- TODO: Cache this.
-		local weapon = unitDef.weapons[1]
-		if not weapon then
-			return
-		end
-		local weaponDef = WeaponDefs[weapon.weaponDef]
-		local weaponDefCp = weaponDef.customParams or {}
-		if not weaponDefCp or weaponDefCp.fake_weapon then
-			return
-		end
-		local weaponDam = tonumber(weaponDefCp.stats_damage)
-		if not weaponDam then
-			return
-		end
-
 		local ax, ay, az, attackedUnitID
 		-- Find the location / unit being attacked.
 		if #cmdParams == 1 then
@@ -928,8 +941,8 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			ax, ay, az = unpack(cmdParams)
 		end
 		if ax and ay and az then
-			local x, y, z = unitInfo:get(unitID)
-			local event = addEvent(unitTeam, weaponDam, {x, y, z}, attackEventType, unitID, unitDefID)
+			local x, y, z, _, _, weaponImportance = unitInfo:get(unitID)
+			local event = addEvent(unitTeam, weaponImportance, {x, y, z}, attackEventType, unitID, unitDefID)
 			-- Hack: we want the primary unit to be the attacker but the event location to be the target.
 			event.location = { ax, ay, az }
 			if attackedUnitID then
