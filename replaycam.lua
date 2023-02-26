@@ -11,10 +11,13 @@ function widget:GetInfo()
 end
 
 local abs = math.abs
+local exp = math.exp
 local floor = math.floor
 local max = math.max
 local min = math.min
+local pi = math.pi
 local sqrt = math.sqrt
+local tan = math.tan
 
 local spEcho = Spring.Echo
 local spGetAllyTeamList = Spring.GetAllyTeamList
@@ -387,7 +390,7 @@ function EventStatistics:getPercentile(type, importance)
 
 	-- Assume exponential distribution
 	local m = 1 / (meanImportance * self.eventMeanAdj[type])
-	return 1 - math.exp(-m * importance)
+	return 1 - exp(-m * importance)
 end
 
 -- WORLD INFO
@@ -632,8 +635,8 @@ local function toDisplayInfo(event, frame)
   elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
-		camAngle = - math.pi / 2
-		camRange = 1.2 * math.max(mapSizeX, mapSizeZ) / math.tan(math.pi * fov / 180)
+		camAngle = - pi / 2
+		camRange = 1.2 * max(mapSizeX, mapSizeZ) / tan(pi * fov / 180)
 		commentary = "Let's get an overview of the battlefield"
 	elseif event.type == unitBuiltEventType then
 		commentary = event.object .. " built by " .. actorName
