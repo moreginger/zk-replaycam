@@ -465,7 +465,6 @@ local camRangeMin = 1000
 local camera = nil
 
 local function removeEvent(event)
-	event.importance = 0
 	if event == headEvent then
 		headEvent = event.previous
 	end
