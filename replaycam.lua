@@ -228,6 +228,7 @@ function UnitInfoCache:new(o)
   -- 1 - unit importance
 	-- 2 - static (not mobile)
 	-- 3 - weapon importance
+	-- 4 - weapon range
 	o._unitStatsCache = {}
 	-- cacheObject {}
 	-- 1 - allyTeam
@@ -243,17 +244,21 @@ function UnitInfoCache:new(o)
 end
 
 -- Weapon importance, 0 if no weapon found.
-function UnitInfoCache:_weaponImportance(unitDef)
+function UnitInfoCache:_weaponStats(unitDef)
 	-- Get weapon damage from first weapon. Hacked together from gui_contextmenu.lua.
 	local weapon = unitDef.weapons[1]
 	if not weapon then
-		return 0
+		return 0, 0
 	end
-	local weaponDef = WeaponDefs[weapon.weaponDef]
-	if not weaponDef.customParams or weaponDef.customParams.fake_weapon then
-		return 0
+	local wd = WeaponDefs[weapon.weaponDef]
+  local wdcp = wd.customParams
+	if not wdcp or wdcp.fake_weapon then
+		return 0, 0
 	end
-	return tonumber(weaponDef.customParams.stats_damage)
+	local mult = tonumber(wdcp.statsprojectiles) or ((tonumber(wdcp.script_burst) or wd.salvoSize) * wd.projectiles)
+	local weaponDamage = tonumber(wdcp.stats_damage) * mult
+	local range = wdcp.truerange or wd.range
+	return weaponDamage, range
 end
 
 function UnitInfoCache:_unitStats(unitDefID)
@@ -262,8 +267,8 @@ function UnitInfoCache:_unitStats(unitDefID)
 		local unitDef = UnitDefs[unitDefID]
 		local importance = unitDef.metalCost
 		local isStatic = not spGetMovetype(unitDef)
-		local weaponImportance = self:_weaponImportance(unitDef)
-		cacheObject = { importance, isStatic, weaponImportance }
+		local wImportance, wRange = self:_weaponStats(unitDef)
+		cacheObject = { importance, isStatic, wImportance, wRange }
 		self._unitStatsCache[unitDefID] = cacheObject
 	end
 	return unpack(cacheObject)
@@ -305,8 +310,8 @@ function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
 		local _, unitDefID, _, x, y, z, _ = unpack(cacheObject)
-		local importance, isStatic, weaponImportance = self:_unitStats(unitDefID)
-		return x, y, z, importance, isStatic, weaponImportance
+		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(unitDefID)
+		return x, y, z, importance, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -484,7 +489,9 @@ local function removeEvent(event)
 	event.next = nil
 end
 
-local function addEvent(actor, importance, location, type, unit, unitDef)
+-- deferFunc - Optional function taking the event as a parameter.
+--             Useful for command events that may become interesting e.g. when units close range.
+local function addEvent(actor, importance, location, meta, type, unit, unitDef, deferFunc)
 	local frame = spGetGameFrame()
 	local object = {}
 	if unit then
@@ -534,9 +541,11 @@ local function addEvent(actor, importance, location, type, unit, unitDef)
 		event = Event:new({
 			actorCount = 1,
 			actors = initTable(actor, true),
+			deferFunc = deferFunc,
 			importance = importance,
 			decay = decay,
 			location = location,
+			meta = meta,
 			object = object,
 			started = frame,
 			type = type,
@@ -576,48 +585,42 @@ local function purgeEventsOfUnit(unitID)
 	end
 end
 
--- This is slow, don't use it in anger.
-local function debugGetEventCount()
-	local event, count = tailEvent, 0
-	while (event ~= nil) do
-		count = count + 1
-		event = event.next
+local function _processEvent(currentFrame, event)
+	if event.deferFunc then
+	  event.deferredFrom = event.deferredFrom or event.started
+		-- TODO: Check if event in command queue, if not then remove it.
+		local defer, abort = event.deferFunc(event)
+		if abort or event.deferredFrom - currentFrame > framesPerSecond * 16 then
+			removeEvent(event)
+			return
+		elseif defer then
+			-- Try it again later.
+			event.started = currentFrame
+			return
+		end
 	end
-	return count
+	local importance = event:importanceAtFrame(currentFrame)
+	if importance <= 0 then
+		removeEvent(event)
+		return
+	end
+	local x, _, z = unpack(event.location)
+	local interestModifier = 1 + interestGrid:getScore(x, z)
+	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
 local function selectNextEventToShow()
-	-- Purge old events and merge similar events.
 	local currentFrame = spGetGameFrame()
-
-	-- Find next event to show
-	local mostImportantEvent = nil
-	local mostPercentile = 0
-
-	debugText = "" .. debugGetEventCount() .. " events\n"
-	local event = tailEvent
+	local mostImportantEvent, mostPercentile, event = nil, 0, tailEvent
 	while event ~= nil do
+		-- Get next event before we process the current one, as this may nil out .next.
 		local nextEvent = event.next
-		local importance = event:importanceAtFrame(currentFrame)
-		if importance <= 0 then
-			removeEvent(event)
-		else
-		  local x, _, z = unpack(event.location)
-			local interestModifier = 1 + interestGrid:getScore(x, z)
-			local eventPercentile = eventStatistics:getPercentile(event.type, importance * interestModifier)
-			if eventPercentile > mostPercentile then
-				mostImportantEvent = event
-				mostPercentile = eventPercentile
-				debugText = debugText .. mostImportantEvent.type .. " " .. eventPercentile .. ", "
-			end
+		local eventPercentile = _processEvent(currentFrame, event)
+		if eventPercentile and eventPercentile > mostPercentile then
+			mostImportantEvent, mostPercentile = event, eventPercentile
 		end
 		event = nextEvent
 	end
-
-	if not mostImportantEvent then
-		return
-	end
-
 	return mostImportantEvent
 end
 
@@ -870,13 +873,13 @@ function widget:GameFrame(frame)
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
 		if #units > 0 then
-			local event = addEvent(nil, 10 * igMax, { igX, 0, igZ }, hotspotEventType, nil, nil)
+			local event = addEvent(nil, 10 * igMax, { igX, 0, igZ }, nil, hotspotEventType, nil, nil)
 			for _, unit in pairs(units) do
 				event.units[unit] = { igX, _, igZ }
 			end
 		end
 	end
-	addEvent(nil, 100 / igMax, { mapSizeX / 2, spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2), mapSizeZ / 2 }, overviewEventType, nil, nil)
+	addEvent(nil, 100 / igMax, { mapSizeX / 2, spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2), mapSizeZ / 2 }, nil, overviewEventType, nil, nil)
 
 	local newEvent = selectNextEventToShow()
 	if newEvent and newEvent ~= showingEvent then
@@ -887,8 +890,8 @@ function widget:GameFrame(frame)
 
 		-- We want the selected event to be a little sticky to avoid too much jumping,
 		-- but we also want to make sure it goes away reasonably soon.
-		newEvent.importance = newEvent.importance * 3
-		newEvent.decay = 0.25
+		newEvent.importance = newEvent.importance * 2.5
+		newEvent.decay = 0.20
 		newEvent.started = frame
 
 		display = toDisplayInfo(newEvent, frame)
@@ -901,6 +904,21 @@ function widget:GameFrame(frame)
 		
 		showingEvent = newEvent
 	end
+end
+
+function _deferAttackEvent(event)
+	-- TODO: Incorporate unit velocity.
+	local attackerID = event.meta.attackerID
+	local ux, uy, uz, _, _, _, weaponRange = unitInfo:get(attackerID)
+	if not ux or not uy or not uz then
+		return false, true
+	end
+	local defer = distance(event.location, { ux, uy, uz }) > weaponRange * 2
+	if not defer then
+		local x, _, z = unpack(event.location)
+		interestGrid:add(x, z, event.meta.attackerAllyTeam, 1)
+	end
+	return defer, false
 end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
@@ -931,7 +949,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 			return
 		end
-		addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, unitMovedEventType, unitID, unitDefID)
+		addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, nil, unitMovedEventType, unitID, unitDefID)
 	elseif cmdID == CMD_ATTACK then
 		-- Process attack event
 		local ax, ay, az, attackedUnitID
@@ -944,13 +962,14 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		end
 		if ax and ay and az then
 			local x, y, z, _, _, weaponImportance = unitInfo:get(unitID)
-			local event = addEvent(unitTeam, weaponImportance, {x, y, z}, attackEventType, unitID, unitDefID)
+			local attackerAllyTeam = teamInfo[unitTeam].allyTeam
+			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, { attackerAllyTeam = attackerAllyTeam, attackerID = unitID }, attackEventType, unitID, unitDefID, _deferAttackEvent)
 			-- Hack: we want the primary unit to be the attacker but the event location to be the target.
 			event.location = { ax, ay, az }
 			if attackedUnitID then
-				event.units[attackedUnitID] = { x, y, z }
+				event.units[attackedUnitID] = { ax, ay, az }
 			end
-			interestGrid:add(ax, az, teamInfo[unitTeam].allyTeam, 1)
+			interestGrid:add(ax, az, attackerAllyTeam, 1)
 		end
 	end
 end
@@ -967,7 +986,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	-- Multiply by unit importance factor
 	importance = importance * sqrt(unitImportance)
 
-	addEvent(attackerTeam, importance, { x, y, z }, unitDamagedEventType, unitID, unitDefID)
+	addEvent(attackerTeam, importance, { x, y, z }, nil, unitDamagedEventType, unitID, unitDefID)
 	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 0.2)
 end
 
@@ -986,7 +1005,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		return
 	end
 
-	local event = addEvent(attackerTeam, importance or unitDef.metalCost, { x, y, z }, unitDestroyedEventType, unitID, unitDefID)
+	local event = addEvent(attackerTeam, importance or unitDef.metalCost, { x, y, z }, nil, unitDestroyedEventType, unitID, unitDefID)
 	x, y, z = spGetUnitPosition(attackerID)
 	event.units[attackerID] = { x, y, z }
 	-- Areas where units are being destroyed are particularly interesting, and
@@ -999,7 +1018,7 @@ end
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local allyTeam = teamInfo[unitTeam].allyTeam
 	local x, y, z, importance = unitInfo:watch(unitID, allyTeam, unitDefID)
-	addEvent(unitTeam, importance, { x, y, z }, unitBuiltEventType, unitID, unitDefID)
+	addEvent(unitTeam, importance, { x, y, z }, nil, unitBuiltEventType, unitID, unitDefID)
 end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
@@ -1010,7 +1029,7 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	end
 
 	local x, y, z, importance = unitInfo:get(unitID)
-	local event = addEvent(newTeam, importance, { x, y, z}, unitTakenEventType, unitID, unitDefID)
+	local event = addEvent(newTeam, importance, { x, y, z}, nil, unitTakenEventType, unitID, unitDefID)
 	x, y, z =  unitInfo:get(captureController)
 	event.units[captureController] = { x, y, z }
 end
