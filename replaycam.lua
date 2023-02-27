@@ -309,9 +309,9 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local _, unitDefID, _, x, y, z, _ = unpack(cacheObject)
+		local _, unitDefID, _, x, y, z, v = unpack(cacheObject)
 		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(unitDefID)
-		return x, y, z, importance, isStatic, weaponImportance, weaponRange
+		return x, y, z, v, importance, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -323,9 +323,9 @@ function UnitInfoCache:get(unitID)
 end
 
 function UnitInfoCache:forget(unitID)
-	local x, y, z, importance, isStatic = self:get(unitID)
+	local x, y, z, v, importance, isStatic = self:get(unitID)
 	self.cache[unitID] = nil
-	return x, y, z, importance, isStatic
+	return x, y, z, v, importance, isStatic
 end
 
 function UnitInfoCache:update(currentFrame)
@@ -590,7 +590,7 @@ local function _processEvent(currentFrame, event)
 	  event.deferredFrom = event.deferredFrom or event.started
 		-- TODO: Check if event in command queue, if not then remove it.
 		local defer, abort = event.deferFunc(event)
-		if abort or event.deferredFrom - currentFrame > framesPerSecond * 16 then
+		if abort or event.deferredFrom - currentFrame > framesPerSecond * 8 then
 			removeEvent(event)
 			return
 		elseif defer then
@@ -906,14 +906,14 @@ function widget:GameFrame(frame)
 	end
 end
 
-function _deferAttackEvent(event)
+local function _deferAttackEvent(event)
 	-- TODO: Incorporate unit velocity.
 	local attackerID = event.meta.attackerID
-	local ux, uy, uz, _, _, _, weaponRange = unitInfo:get(attackerID)
-	if not ux or not uy or not uz then
+	local ux, uy, uz, uv, _, _, _, weaponRange = unitInfo:get(attackerID)
+	if not ux or not uy or not uz or not uv then
 		return false, true
 	end
-	local defer = distance(event.location, { ux, uy, uz }) > weaponRange * 2
+	local defer = distance(event.location, { ux, uy, uz }) > weaponRange + uv * 2.5
 	if not defer then
 		local x, _, z = unpack(event.location)
 		interestGrid:add(x, z, event.meta.attackerAllyTeam, 1)
@@ -937,7 +937,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 	if cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE then
 		-- Process move event.
 
-		local x, y, z, importance, isStatic = unitInfo:get(unitID)
+		local x, y, z, _, importance, isStatic = unitInfo:get(unitID)
 		if isStatic then
 			-- Not interested in move commands given to static buildings e.g. factories
 			return
@@ -961,7 +961,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			ax, ay, az = unpack(cmdParams)
 		end
 		if ax and ay and az then
-			local x, y, z, _, _, weaponImportance = unitInfo:get(unitID)
+			local x, y, z, _, _, _, weaponImportance = unitInfo:get(unitID)
 			local attackerAllyTeam = teamInfo[unitTeam].allyTeam
 			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, { attackerAllyTeam = attackerAllyTeam, attackerID = unitID }, attackEventType, unitID, unitDefID, _deferAttackEvent)
 			-- Hack: we want the primary unit to be the attacker but the event location to be the target.
@@ -979,12 +979,12 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage
 		damage = damage / 2
 	end
-	local x, y, z, unitImportance = unitInfo:get(unitID)
-	local currentHealth = spGetUnitHealth(unitID)
+	local x, y, z, _, unitImportance = unitInfo:get(unitID)
+	local currentHealth, _, _, _, buildProgress = spGetUnitHealth(unitID)
 	-- Percentage of current health being dealt in damage, up to 100
 	local importance = 100 * min(currentHealth, damage) / currentHealth
 	-- Multiply by unit importance factor
-	importance = importance * sqrt(unitImportance)
+	importance = importance * sqrt(unitImportance * buildProgress)
 
 	addEvent(attackerTeam, importance, { x, y, z }, nil, unitDamagedEventType, unitID, unitDefID)
 	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 0.2)
@@ -1017,7 +1017,7 @@ end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local allyTeam = teamInfo[unitTeam].allyTeam
-	local x, y, z, importance = unitInfo:watch(unitID, allyTeam, unitDefID)
+	local x, y, z, _, importance = unitInfo:watch(unitID, allyTeam, unitDefID)
 	addEvent(unitTeam, importance, { x, y, z }, nil, unitBuiltEventType, unitID, unitDefID)
 end
 
@@ -1028,7 +1028,7 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 		return
 	end
 
-	local x, y, z, importance = unitInfo:get(unitID)
+	local x, y, z, _, importance = unitInfo:get(unitID)
 	local event = addEvent(newTeam, importance, { x, y, z}, nil, unitTakenEventType, unitID, unitDefID)
 	x, y, z =  unitInfo:get(captureController)
 	event.units[captureController] = { x, y, z }
