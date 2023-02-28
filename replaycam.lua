@@ -912,16 +912,15 @@ function widget:GameFrame(frame)
 end
 
 local function _deferAttackEvent(event)
-	-- TODO: Incorporate unit velocity.
-	local attackerID = event.meta.attackerID
-	local ux, uy, uz, uv, _, _, _, weaponRange = unitInfo:get(attackerID)
-	if not ux or not uy or not uz or not uv then
+	local attID = event.meta.attID
+	local attx, atty, attz, attv, _, _, _, weaponRange = unitInfo:get(attID)
+	if not attx or not atty or not attz or not attv then
 		return false, true
 	end
-	local defer = distance(event.location, { ux, uy, uz }) > weaponRange + uv * 2.5
+	local defer = distance(event.location, { attx, atty, attz }) > weaponRange + attv * framesPerSecond * 2.5
 	if not defer then
-		local x, _, z = unpack(event.location)
-		interestGrid:add(x, z, event.meta.attackerAllyTeam, 1)
+		local vctx, _, vctz = unpack(event.location)
+		interestGrid:add(vctx, vctz, event.meta.attAllyTeam, 1)
 	end
 	return defer, false
 end
@@ -967,14 +966,14 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		end
 		if ax and ay and az then
 			local x, y, z, _, _, _, weaponImportance = unitInfo:get(unitID)
-			local attackerAllyTeam = teamInfo[unitTeam].allyTeam
-			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, { attackerAllyTeam = attackerAllyTeam, attackerID = unitID }, attackEventType, unitID, unitDefID, _deferAttackEvent)
+			local attAllyTeam = teamInfo[unitTeam].allyTeam
+			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, { attAllyTeam = attAllyTeam, attID = unitID }, attackEventType, unitID, unitDefID, _deferAttackEvent)
 			-- Hack: we want the primary unit to be the attacker but the event location to be the target.
 			event.location = { ax, ay, az }
 			if attackedUnitID then
 				event.units[attackedUnitID] = { ax, ay, az }
 			end
-			interestGrid:add(ax, az, attackerAllyTeam, 1)
+			interestGrid:add(ax, az, attAllyTeam, 1)
 		end
 	end
 end
