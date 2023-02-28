@@ -588,6 +588,7 @@ end
 local function _processEvent(currentFrame, event)
 	if event.deferFunc then
 	  event.deferredFrom = event.deferredFrom or event.started
+		event.started = currentFrame
 		-- TODO: Check if event in command queue, if not then remove it.
 		local defer, abort = event.deferFunc(event)
 		if abort or event.deferredFrom - currentFrame > framesPerSecond * 8 then
@@ -595,9 +596,10 @@ local function _processEvent(currentFrame, event)
 			return
 		elseif defer then
 			-- Try it again later.
-			event.started = currentFrame
 			return
 		end
+		-- Stop deferring.
+		event.deferFunc = nil
 	end
 	local importance = event:importanceAtFrame(currentFrame)
 	if importance <= 0 then
