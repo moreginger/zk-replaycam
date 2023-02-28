@@ -257,8 +257,11 @@ function UnitInfoCache:_weaponStats(unitDef)
 	end
 	local mult = tonumber(wdcp.statsprojectiles) or ((tonumber(wdcp.script_burst) or wd.salvoSize) * wd.projectiles)
 	local weaponDamage = tonumber(wdcp.stats_damage) * mult
+	local aoe = wd.impactOnly and 0 or wd.damageAreaOfEffect
+	-- Likho bomb is 192 so this gives a boost of 1 + 2.25. Feels about right.
+	local aoeBoost = 1 + (aoe * aoe) / (128 * 128)
 	local range = wdcp.truerange or wd.range
-	return weaponDamage, range
+	return weaponDamage * aoeBoost, range
 end
 
 function UnitInfoCache:_unitStats(unitDefID)
