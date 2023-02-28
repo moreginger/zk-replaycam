@@ -911,16 +911,17 @@ function widget:GameFrame(frame)
 	end
 end
 
-local function _deferAttackEvent(event)
-	local attID = event.meta.attID
-	local attx, atty, attz, attv, _, _, _, weaponRange = unitInfo:get(attID)
-	if not attx or not atty or not attz or not attv then
+local function _deferCommandEvent(event)
+	local meta = event.meta
+	local sbjUnitID = meta.sbjUnitID
+	local sbjx, sbjy, sbjz, sbjv = unitInfo:get(sbjUnitID)
+	if not sbjx or not sbjy or not sbjz or not sbjv then
 		return false, true
 	end
-	local defer = distance(event.location, { attx, atty, attz }) > weaponRange + attv * framesPerSecond * 2.5
+	local defer = distance(event.location, { sbjx, sbjy, sbjz }) > meta.deferRange + sbjv * framesPerSecond * 2.5
 	if not defer then
 		local vctx, _, vctz = unpack(event.location)
-		interestGrid:add(vctx, vctz, event.meta.attAllyTeam, 1)
+		interestGrid:add(vctx, vctz, meta.sbjAllyTeam, 1)
 	end
 	return defer, false
 end
@@ -946,34 +947,41 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			-- Not interested in move commands given to static buildings e.g. factories
 			return
 		end
-		local unitLocation = { x, y, z }
 
-		local moveDistance = distance(cmdParams, unitLocation)
-		if (moveDistance < 256) then
+		local sbjLocation = { x, y, z }
+		local trgx, trgy, trgz = unpack(cmdParams)
+		local trgLocation = { trgx, trgy, trgz }
+
+		local moveDistance = distance(trgLocation, sbjLocation)
+		if (moveDistance < 512) then
 			-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 			return
 		end
-		addEvent(unitTeam, sqrt(moveDistance) * importance, unitLocation, nil, unitMovedEventType, unitID, unitDefID)
+		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
+		local event = addEvent(unitTeam, importance, sbjLocation, meta, unitMovedEventType, unitID, unitDefID, _deferCommandEvent)
+		-- Hack: we want the subject to be the "actor" but the event location to be the target.
+		event.location = trgLocation
 	elseif cmdID == CMD_ATTACK then
 		-- Process attack event
-		local ax, ay, az, attackedUnitID
+		local trgx, trgy, trgz, attackedUnitID
 		-- Find the location / unit being attacked.
 		if #cmdParams == 1 then
 			attackedUnitID = cmdParams[1]
-			ax, ay, az = unitInfo:get(attackedUnitID)
+			trgx, trgy, trgz = unitInfo:get(attackedUnitID)
 		else
-			ax, ay, az = unpack(cmdParams)
+			trgx, trgy, trgz = unpack(cmdParams)
 		end
-		if ax and ay and az then
-			local x, y, z, _, _, _, weaponImportance = unitInfo:get(unitID)
-			local attAllyTeam = teamInfo[unitTeam].allyTeam
-			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, { attAllyTeam = attAllyTeam, attID = unitID }, attackEventType, unitID, unitDefID, _deferAttackEvent)
-			-- Hack: we want the primary unit to be the attacker but the event location to be the target.
-			event.location = { ax, ay, az }
+		if trgx and trgy and trgz then
+		  local trgLocation = { trgx, trgy, trgz }
+			local x, y, z, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
+			local sbjAllyTeam = teamInfo[unitTeam].allyTeam
+			local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
+			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
+			-- Hack: we want the subject to be the "actor" but the event location to be the target.
+			event.location = trgLocation
 			if attackedUnitID then
-				event.units[attackedUnitID] = { ax, ay, az }
+				event.units[attackedUnitID] = trgLocation
 			end
-			interestGrid:add(ax, az, attAllyTeam, 1)
 		end
 	end
 end
