@@ -458,7 +458,7 @@ local eventStatistics = EventStatistics:new({
 		unitBuilt = 4.0,
 		unitDamaged = 0.6,
 		unitDestroyed = 0.6,
-		unitMoved = 1.5,
+		unitMoved = 1.6,
 		unitTaken = 0.2,
 	}
 }, eventTypes)
