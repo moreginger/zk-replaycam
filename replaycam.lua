@@ -130,7 +130,7 @@ function WorldGrid:_getScoreGridCoords(x, y)
 	for _, _ in pairs(data[2]) do
 		allyTeamCount = allyTeamCount + 1
 	end
-	return data[1] * allyTeamCount * allyTeamCount
+	return data[1] * max(1, allyTeamCount * allyTeamCount)
 end
 
 function WorldGrid:getScore(x, y)
@@ -559,7 +559,7 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 		})
 	end
 
-	eventStatistics:logEvent(type, importance)
+	eventStatistics:logEvent(type, importance * interestGrid:getScore(location[1], location[3]))
 
 	if (headEvent == nil) then
 		tailEvent = event
@@ -612,7 +612,7 @@ local function _processEvent(currentFrame, event)
 		return
 	end
 	local x, _, z = unpack(event.location)
-	local interestModifier = 1 + interestGrid:getScore(x, z)
+	local interestModifier = interestGrid:getScore(x, z)
 	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
