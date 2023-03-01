@@ -53,12 +53,11 @@ local CMD_ATTACK = CMD.ATTACK
 local CMD_ATTACK_MOVE = CMD.FIGHT
 local CMD_MOVE = CMD.MOVE
 
-local debugText = "DEBUG"
-
 local framesPerSecond = 30
 
 -- CONFIGURATION
 
+local debug = true
 local updateIntervalFrames = framesPerSecond
 local fov = 45
 
@@ -281,8 +280,9 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local x, y, z = spGetUnitPosition(unitID)
 	local xv, _, zv = spGetUnitVelocity(unitID)
 	if not x or not y or not z or not xv or not zv then
-		-- DEBUG: Why is this happening?
-		spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, UnitDefs[cacheObject[2]].name)
+		if debug then
+			spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, UnitDefs[cacheObject[2]].name)
+		end
 		return false
 	end
 	local v = length(xv, zv)
@@ -496,9 +496,9 @@ end
 --             Useful for command events that may become interesting e.g. when units close range.
 local function addEvent(actor, importance, location, meta, type, unit, unitDef, deferFunc)
 	local frame = spGetGameFrame()
-	local object = {}
+	local sbj = {}
 	if unit then
-		object = spGetHumanName(UnitDefs[unitDef], unit)
+		sbj = spGetHumanName(UnitDefs[unitDef], unit)
 	end
 	local decay = decayPerSecond[type]
 
@@ -516,7 +516,7 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 		if importanceAtFrame <= 0 then
 			-- Just remove the event forever.
 			removeEvent(event)
-		elseif event.type == type and event.object == object and distance(event.location, location) < eventMergeRange then
+		elseif event.type == type and event.sbj == sbj and distance(event.location, location) < eventMergeRange then
 			-- Merge new event into old.
 			event.importance = importanceAtFrame + importance
 			event.decay = decay
@@ -549,7 +549,7 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 			decay = decay,
 			location = location,
 			meta = meta,
-			object = object,
+			sbj = sbj,
 			started = frame,
 			type = type,
 			unitCount = 1,
@@ -614,19 +614,22 @@ local function _processEvent(currentFrame, event)
 	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
-local function selectNextEventToShow()
+local function selectMostImportantEvent()
 	local currentFrame = spGetGameFrame()
-	local mostImportantEvent, mostPercentile, event = nil, 0, tailEvent
+	local mie, mostPercentile, event = nil, 0, tailEvent
 	while event ~= nil do
 		-- Get next event before we process the current one, as this may nil out .next.
 		local nextEvent = event.next
 		local eventPercentile = _processEvent(currentFrame, event)
 		if eventPercentile and eventPercentile > mostPercentile then
-			mostImportantEvent, mostPercentile = event, eventPercentile
+			mie, mostPercentile = event, eventPercentile
 		end
 		event = nextEvent
 	end
-	return mostImportantEvent
+	if debug and mie then
+		spEcho('Next event', mie.type, mie.sbj, mie:importanceAtFrame(currentFrame))
+	end
+	return mie
 end
 
 local function toDisplayInfo(event, frame)
@@ -639,7 +642,7 @@ local function toDisplayInfo(event, frame)
 	end
 
 	if event.type == attackEventType then
-		commentary = event.object .. " is attacking"
+		commentary = event.sbj .. " is attacking"
   elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
@@ -647,11 +650,11 @@ local function toDisplayInfo(event, frame)
 		camRange = 1.2 * max(mapSizeX, mapSizeZ) / tan(pi * fov / 180)
 		commentary = "Let's get an overview of the battlefield"
 	elseif event.type == unitBuiltEventType then
-		commentary = event.object .. " built by " .. actorName
+		commentary = event.sbj .. " built by " .. actorName
 	elseif event.type == unitDamagedEventType then
-		commentary = event.object .. " under attack"
+		commentary = event.sbj .. " under attack"
 	elseif event.type == unitDestroyedEventType then
-		commentary = event.object .. " destroyed by " .. actorName
+		commentary = event.sbj .. " destroyed by " .. actorName
 	elseif event.type == unitMovedEventType then
 		local quantityPrefix = " "
 		if (event.unitCount > 5) then
@@ -659,9 +662,9 @@ local function toDisplayInfo(event, frame)
 		elseif (event.unitCount > 2) then
 			quantityPrefix = " team "
 		end
-		commentary = event.object .. quantityPrefix .. "moving"
+		commentary = event.sbj .. quantityPrefix .. "moving"
 	elseif event.type == unitTakenEventType then
-		commentary = event.object .. " captured by " .. actorName
+		commentary = event.sbj .. " captured by " .. actorName
 	end
 
 	return { camAngle = camAngle, camRange = camRange, commentary = commentary, location = event.location, shownAt = frame, tracking = event.units }
@@ -886,7 +889,7 @@ function widget:GameFrame(frame)
 	end
 	addEvent(nil, 100 / igMax, { mapSizeX / 2, spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2), mapSizeZ / 2 }, nil, overviewEventType, nil, nil)
 
-	local newEvent = selectNextEventToShow()
+	local newEvent = selectMostImportantEvent()
 	if newEvent and newEvent ~= showingEvent then
 		-- Avoid coming back to the previous event
 		if showingEvent then
