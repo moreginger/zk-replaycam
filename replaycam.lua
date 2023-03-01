@@ -629,7 +629,7 @@ local function selectMostImportantEvent()
 		event = nextEvent
 	end
 	if debug and mie then
-		spEcho('Selected mie:', mie.type, mie.sbj, mie:importanceAtFrame(currentFrame))
+		spEcho('mie:', mie.type, mie.sbj, mostPercentile)
 	end
 	return mie
 end
