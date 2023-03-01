@@ -494,6 +494,8 @@ end
 
 -- deferFunc - Optional function taking the event as a parameter.
 --             Useful for command events that may become interesting e.g. when units close range.
+-- returns event {}
+-- - units Contains unit IDs and their current locations. May contain negative unit IDs e.g. for dead units.
 local function addEvent(actor, importance, location, meta, type, unit, unitDef, deferFunc)
 	local frame = spGetGameFrame()
 	local sbj = {}
@@ -627,7 +629,7 @@ local function selectMostImportantEvent()
 		event = nextEvent
 	end
 	if debug and mie then
-		spEcho('Next event', mie.type, mie.sbj, mie:importanceAtFrame(currentFrame))
+		spEcho('Selected mie:', mie.type, mie.sbj, mie:importanceAtFrame(currentFrame))
 	end
 	return mie
 end
@@ -675,7 +677,7 @@ local function updateCamera(displayInfo, dt)
 	local maxPanDistance = worldGridSize * 3
 	local mapEdgeBorder = worldGridSize * 0.5
 
-	if (not displayInfo) then
+	if not displayInfo then
 		return
 	end
 
@@ -683,12 +685,18 @@ local function updateCamera(displayInfo, dt)
 	local xSum, ySum, zSum, xvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	for unit, location in pairs(tracking) do
-		local x, y, z = spGetUnitPosition(unit)
-		local xv, _, zv = spGetUnitVelocity(unit)
-		if x and y and z and xv and zv then
-			location = { x, y, z }
-			tracking[unit] = { x, y, z }
-			xvSum, zvSum = xvSum + xv, zvSum + zv
+		local x, y, z
+		if unit > 0 then
+			x, y, z = spGetUnitPosition(unit)
+			local xv, _, zv = spGetUnitVelocity(unit)
+			if x and y and z and xv and zv then
+				xvSum, zvSum = xvSum + xv, zvSum + zv
+				tracking[unit] = { x, y, z }
+			else
+				x, y, z = unpack(location)
+				tracking[-unit] = location
+				tracking[unit] = nil
+			end
 		else
 			x, y, z = unpack(location)
 		end
@@ -982,9 +990,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
 			-- Hack: we want the subject to be the "actor" but the event location to be the target.
 			event.location = trgLocation
-			if attackedUnitID then
-				event.units[attackedUnitID] = trgLocation
-			end
+			event.units[attackedUnitID or -unitID] = trgLocation
 		end
 	end
 end
