@@ -353,11 +353,31 @@ function Event:new(o)
 	setmetatable(o, self)
 	self.__index = self
 
+	o._unitCount = 0
+  o._units = {}
 	return o
 end
 
 function Event:importanceAtFrame(frame)
   return self.importance * (1 - self.decay * (frame - self.started) / framesPerSecond)
+end
+
+function Event:addUnit(unitID, location)
+	if not self._units[unitID] then
+		self._unitCount = self._unitCount + 1
+		self._units[unitID] = location
+	end
+end
+
+function Event:removeUnit(unitID)
+	if self._units[unitID] then
+		self._unitCount = self._unitCount - 1
+		self._units[unitID] = nil
+	end
+end
+
+function Event:unitCount()
+	return self._unitCount
 end
 
 -- EVENT STATISTICS
@@ -524,13 +544,12 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 			event.decay = decay
 			event.location = location
 			event.started = frame
-			if (actor and not event.actors[actor]) then
+			if actor and not event.actors[actor] then
 				event.actorCount = event.actorCount + 1
 				event.actors[actor] = actor
 			end
-			if (unit and not event.units[unit]) then
-				event.unitCount = event.unitCount + 1
-				event.units[unit] = location
+			if unit then
+				event:addUnit(unit, location)
 			end
 
 			-- Remove it and attach at head later.
@@ -553,10 +572,11 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 			meta = meta,
 			sbj = sbj,
 			started = frame,
-			type = type,
-			unitCount = 1,
-			units = initTable(unit, location)
+			type = type
 		})
+		if unit then
+		  event:addUnit(unit, location)
+		end
 	end
 
 	eventStatistics:logEvent(type, importance * interestGrid:getScore(location[1], location[3]))
@@ -578,16 +598,24 @@ local function purgeEventsOfUnit(unitID)
 	while event ~= nil do
 		local nextEvent = event.next
 		-- Keep unit if it was destroyed as we'll track its destroyed location.
-		if event.units[unitID] and event.type ~= unitDestroyedEventType then
-			event.units[unitID] = nil
-			event.unitCount = event.unitCount - 1
-			if event.unitCount == 0 then
-				event.importance = 0
+		if event.type ~= unitDestroyedEventType then
+			event:removeUnit(unitID)
+			if event:unitCount() == 0 then
 				removeEvent(event)
 			end
 		end
 		event = nextEvent
 	end
+end
+
+local function _getEventPercentile(currentFrame, event)
+	local importance = event:importanceAtFrame(currentFrame)
+	if importance <= 0 then
+		return
+	end
+	local x, _, z = unpack(event.location)
+	local interestModifier = interestGrid:getScore(x, z)
+	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
 local function _processEvent(currentFrame, event)
@@ -606,19 +634,17 @@ local function _processEvent(currentFrame, event)
 		-- Stop deferring.
 		event.deferFunc = nil
 	end
-	local importance = event:importanceAtFrame(currentFrame)
-	if importance <= 0 then
+	local percentile = _getEventPercentile(currentFrame, event)
+	if not percentile then
 		removeEvent(event)
-		return
 	end
-	local x, _, z = unpack(event.location)
-	local interestModifier = interestGrid:getScore(x, z)
-	return eventStatistics:getPercentile(event.type, importance * interestModifier)
+	return percentile
 end
 
 local function selectMostImportantEvent()
 	local currentFrame = spGetGameFrame()
-	local mie, mostPercentile, event = nil, 0, tailEvent
+	-- Make sure we always include current event even if it's not in the list.
+	local mie, mostPercentile, event = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent) or 0, tailEvent
 	while event ~= nil do
 		-- Get next event before we process the current one, as this may nil out .next.
 		local nextEvent = event.next
@@ -658,10 +684,10 @@ local function toDisplayInfo(event, frame)
 	elseif event.type == unitDestroyedEventType then
 		commentary = event.sbj .. " destroyed by " .. actorName
 	elseif event.type == unitMovedEventType then
-		local quantityPrefix = " "
-		if (event.unitCount > 5) then
+		local quantityPrefix, unitCount = " ", event:unitCount()
+		if unitCount > 5 then
 			quantityPrefix = " batallion "
-		elseif (event.unitCount > 2) then
+		elseif unitCount > 2 then
 			quantityPrefix = " team "
 		end
 		commentary = event.sbj .. quantityPrefix .. "moving"
@@ -669,7 +695,11 @@ local function toDisplayInfo(event, frame)
 		commentary = event.sbj .. " captured by " .. actorName
 	end
 
-	return { camAngle = camAngle, camRange = camRange, commentary = commentary, location = event.location, shownAt = frame, tracking = event.units }
+	local tracking = {}
+	for k, v in pairs(event._units) do
+		tracking[k] = v
+	end
+	return { camAngle = camAngle, camRange = camRange, commentary = commentary, location = event.location, shownAt = frame, tracking = tracking }
 end
 
 local function updateCamera(displayInfo, dt)
@@ -890,8 +920,8 @@ function widget:GameFrame(frame)
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
 		if #units > 0 then
 			local event = addEvent(nil, 10 * igMax, { igX, 0, igZ }, nil, hotspotEventType, nil, nil)
-			for _, unit in pairs(units) do
-				event.units[unit] = { igX, _, igZ }
+			for _, unitID in pairs(units) do
+				event:addUnit(unitID, { igX, 0, igZ })
 			end
 		end
 	end
@@ -990,7 +1020,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
 			-- Hack: we want the subject to be the "actor" but the event location to be the target.
 			event.location = trgLocation
-			event.units[attackedUnitID or -unitID] = trgLocation
+			event:addUnit(attackedUnitID or -unitID, trgLocation)
 		end
 	end
 end
@@ -1028,7 +1058,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 
 	local event = addEvent(attackerTeam, importance or unitDef.metalCost, { x, y, z }, nil, unitDestroyedEventType, unitID, unitDefID)
 	x, y, z = spGetUnitPosition(attackerID)
-	event.units[attackerID] = { x, y, z }
+	event:addUnit(attackerID, { x, y, z })
 	-- Areas where units are being destroyed are particularly interesting, and
 	-- also the destroyed unit will no longer count, so add some extra interest
 	-- here.
@@ -1052,7 +1082,7 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	local x, y, z, _, importance = unitInfo:get(unitID)
 	local event = addEvent(newTeam, importance, { x, y, z}, nil, unitTakenEventType, unitID, unitDefID)
 	x, y, z =  unitInfo:get(captureController)
-	event.units[captureController] = { x, y, z }
+	event:addUnit(captureController, { x, y, z })
 end
 
 function widget:Update(dt)
