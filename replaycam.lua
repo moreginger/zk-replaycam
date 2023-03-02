@@ -110,7 +110,7 @@ function WorldGrid:new(o)
 	for x = 1, o.xSize do
 		o.data[x] = {}
 		for y = 1, o.ySize do
-			o.data[x][y] = {}
+			o.data[x][y] = { nil, nil, 0 }
 		end
 	end
 	o:reset()
@@ -125,12 +125,12 @@ function WorldGrid:__toGridCoords(x, y)
 end
 
 function WorldGrid:_getScoreGridCoords(x, y)
-	local data = self.data[x][y]
+	local interest, allyTeams, punish = unpack(self.data[x][y])
 	local allyTeamCount = 0
-	for _, _ in pairs(data[2]) do
+	for _, _ in pairs(allyTeams) do
 		allyTeamCount = allyTeamCount + 1
 	end
-	return data[1] * max(1, allyTeamCount * allyTeamCount)
+	return interest * max(1, allyTeamCount * allyTeamCount) * (1 - punish)
 end
 
 function WorldGrid:getScore(x, y)
@@ -143,7 +143,7 @@ function WorldGrid:getInterestingScore()
 	return 5 * updateIntervalFrames / framesPerSecond
 end
 
-function WorldGrid:add(x, y, allyTeam, interest, radius)
+function WorldGrid:add(x, y, allyTeam, interest, radius, punish)
 	if not radius then
 		radius = self.gridSize
 	end
@@ -168,14 +168,26 @@ function WorldGrid:add(x, y, allyTeam, interest, radius)
 		for iy = gy - 1, gy + 1 do
 			if proportions[i] then
 				local data = self.data[ix][iy]
-				data[1] = data[1] + interest * proportions[i] / totalArea
+				local f = proportions[i] / totalArea
+				data[1] = data[1] + interest * f
 				if allyTeam then
 					data[2][allyTeam] = true
+				end
+				if punish then
+					data[3] = min(1, data[3] + punish * f)
 				end
 			end
 			i = i + 1
 		end
 	end
+end
+
+-- Call this exactly once between each reset.
+-- When watching an area we apply a fixed boost to make things sticky,
+-- but a longer-term punish to encourage moving.
+function WorldGrid:setWatching(x, y)
+	x, y = self:__toGridCoords(x, y)
+	self:add(x, y, nil, 2, self.gridSize * 2, 0.1)
 end
 
 function WorldGrid:_intersectArea(x1, y1, x2, y2, x3, y3, x4, y4)
@@ -189,7 +201,10 @@ end
 function WorldGrid:reset()
 	for x = 1, self.xSize do
 		for y = 1, self.ySize do
-			self.data[x][y] = { 1, {} }
+			local data = self.data[x][y]
+			data[1] = 1
+			data[2] = {}
+			data[3] = data[3] * 0.9
 		end
 	end
 end
@@ -476,12 +491,12 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		attack = 1.0,
-		hotspot = 1.1,
+		hotspot = 1.0,
 		overview = 4.0,
-		unitBuilt = 4.0,
-		unitDamaged = 0.6,
-		unitDestroyed = 0.6,
-		unitMoved = 1.6,
+		unitBuilt = 3.6,
+		unitDamaged = 0.7,
+		unitDestroyed = 0.7,
+		unitMoved = 1.8,
 		unitTaken = 0.2,
 	}
 }, eventTypes)
@@ -886,7 +901,7 @@ function widget:Initialize()
 			local interest = 1
 			if not isMoving then
 				-- Static things aren't themselves very interesting but count for #teams
-				interest = 0.2
+				interest = 0.16
 			end
 			interestGrid:add(x, z, allyTeam, interest)
 		end})
@@ -914,8 +929,12 @@ function widget:GameFrame(frame)
 		return
 	end
 
+	if display then
+		local x, _, z = unpack(display.location)
+		interestGrid:setWatching(x, z)
+	end
+
 	local _, igMax, igX, igZ = interestGrid:statistics()
-	interestGrid:reset()
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
 		if #units > 0 then
@@ -936,20 +955,18 @@ function widget:GameFrame(frame)
 
 		-- We want the selected event to be a little sticky to avoid too much jumping,
 		-- but we also want to make sure it goes away reasonably soon.
-		newEvent.importance = newEvent.importance * 2.5
+		newEvent.importance = newEvent.importance * 3
 		newEvent.decay = 0.20
 		newEvent.started = frame
 
 		display = toDisplayInfo(newEvent, frame)
 
-		-- Sticky locations.
-		local x, _, z = unpack(display.location)
-		interestGrid:add(x, z, nil, 2, worldGridSize * 2)
-
 		commentary_cpl:SetText(display.commentary)
-		
+
 		showingEvent = newEvent
 	end
+
+	interestGrid:reset()
 end
 
 local function _deferCommandEvent(event)
