@@ -125,12 +125,12 @@ function WorldGrid:__toGridCoords(x, y)
 end
 
 function WorldGrid:_getScoreGridCoords(x, y)
-	local interest, allyTeams, punish = unpack(self.data[x][y])
+	local interest, allyTeams, passe = unpack(self.data[x][y])
 	local allyTeamCount = 0
 	for _, _ in pairs(allyTeams) do
 		allyTeamCount = allyTeamCount + 1
 	end
-	return interest * max(1, allyTeamCount * allyTeamCount) * (1 - punish)
+	return interest * max(1, allyTeamCount * allyTeamCount) * (1 - passe)
 end
 
 function WorldGrid:getScore(x, y)
@@ -143,20 +143,20 @@ function WorldGrid:getInterestingScore()
 	return 5 * updateIntervalFrames / framesPerSecond
 end
 
-function WorldGrid:add(x, y, allyTeam, interest, radius, punish)
+function WorldGrid:_addInternal(x, y, radius, opts, func)
 	if not radius then
 		radius = self.gridSize
 	end
 	local gx, gy = self:__toGridCoords(x, y)
 
 	-- Work out how to divvy the interest up around nearby grid squares.
-	local proportions, i, totalArea = {}, 1, 0
+	local areas, i, totalArea = {}, 1, 0
 	for ix = gx - 1, gx + 1 do
 		for iy = gy - 1, gy + 1 do
 			if ix >= 1 and ix <= self.xSize and iy >= 1 and iy <= self.ySize then
-				proportions[i] = self:_intersectArea(x - radius / 2, y - radius / 2, x + radius / 2, y + radius / 2,
+				areas[i] = self:_intersectArea(x - radius / 2, y - radius / 2, x + radius / 2, y + radius / 2,
 					(ix - 1) * self.gridSize, (iy - 1) * self.gridSize, ix * self.gridSize, iy * self.gridSize)
-				totalArea = totalArea + proportions[i]
+				totalArea = totalArea + areas[i]
 			end
 			i = i + 1
 		end
@@ -166,28 +166,41 @@ function WorldGrid:add(x, y, allyTeam, interest, radius, punish)
 	i = 1
 	for ix = gx - 1, gx + 1 do
 		for iy = gy - 1, gy + 1 do
-			if proportions[i] then
+			if areas[i] then
 				local data = self.data[ix][iy]
-				local f = proportions[i] / totalArea
-				data[1] = data[1] + interest * f
-				if allyTeam then
-					data[2][allyTeam] = true
-				end
-				if punish then
-					data[3] = min(1, data[3] + punish * f)
-				end
+				func(data, areas[i] / totalArea, opts)
 			end
 			i = i + 1
 		end
 	end
 end
 
+local function _addInterest(data, f, opts)
+	data[1] = data[1] + opts.interest * f
+	if opts.allyTeam then
+		data[2][opts.allyTeam] = true
+	end
+end
+
+local function _boostInterest(data, f, opts)
+	data[1] = data[1] * (1 + (opts.boost - 1) * f)
+end
+
+local function _addPasse(data, f, opts)
+	data[3] = data[3] + opts.passe * f
+end
+
+function WorldGrid:add(x, y, allyTeam, interest, radius)
+	return self:_addInternal(x, y, radius, { allyTeam = allyTeam, interest = interest }, _addInterest)
+end
+
 -- Call this exactly once between each reset.
 -- When watching an area we apply a fixed boost to make things sticky,
--- but a longer-term punish to encourage moving.
+-- but a longer-term negative factor (passe) to encourage moving.
 function WorldGrid:setWatching(x, y)
-	x, y = self:__toGridCoords(x, y)
-	self:add(x, y, nil, 2, self.gridSize * 2, 0.1)
+	-- Note: boost is spread over a 2x2 grid.
+	self:_addInternal(x, y, self.gridSize * 2, { boost = 8 }, _boostInterest)
+	self:_addInternal(x, y, self.gridSize, { passe = 0.1 }, _addPasse)
 end
 
 function WorldGrid:_intersectArea(x1, y1, x2, y2, x3, y3, x4, y4)
@@ -954,9 +967,7 @@ function widget:GameFrame(frame)
 			removeEvent(showingEvent)
 		end
 
-		-- We want the selected event to be a little sticky to avoid too much jumping,
-		-- but we also want to make sure it goes away reasonably soon.
-		newEvent.importance = newEvent.importance * 3
+		-- Set a standard decay so that we don't show the event for too long.
 		newEvent.decay = 0.20
 		newEvent.started = frame
 
