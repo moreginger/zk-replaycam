@@ -507,10 +507,10 @@ local eventStatistics = EventStatistics:new({
 	eventMeanAdj = {
 		attack = 1.0,
 		hotspot = 1.0,
-		overview = 4.0,
-		unitBuilt = 3.8,
+		overview = 4.4,
+		unitBuilt = 4.2,
 		unitDamaged = 0.6,
-		unitDestroyed = 0.6,
+		unitDestroyed = 0.5,
 		unitMoving = 2.0,
 		unitTaken = 0.2,
 	}
