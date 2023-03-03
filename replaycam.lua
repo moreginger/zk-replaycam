@@ -729,8 +729,8 @@ local function toDisplayInfo(event, frame)
 	return { camAngle = camAngle, commentary = commentary, location = event.location, shownAt = frame, tracking = tracking }
 end
 
-local function calcCamRange(distance, fov)
-	return 1.25 * distance / tan(pi * fov / 180)
+local function calcCamRange(diag, fov)
+	return diag / tan(pi * fov / 180)
 end
 
 local function updateCamera(displayInfo, dt)
