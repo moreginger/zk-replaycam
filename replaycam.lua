@@ -1076,7 +1076,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	-- Percentage of current health being dealt in damage, up to 100
 	local importance = 100 * min(currentHealth, damage) / currentHealth
 	-- Multiply by unit importance factor
-	importance = importance * sqrt(unitImportance * buildProgress)
+	importance = importance * unitImportance * buildProgress
 
 	addEvent(attackerTeam, importance, { x, y, z }, nil, unitDamagedEventType, unitID, unitDefID)
 	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 0.2)
