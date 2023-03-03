@@ -379,7 +379,9 @@ end
 
 function Event:addUnit(unitID, location)
 	if not self._units[unitID] then
-		self._unitCount = self._unitCount + 1
+		if unitID > 0 then
+			self._unitCount = self._unitCount + 1
+		end
 		self._units[unitID] = location
 	end
 end
@@ -455,7 +457,7 @@ local overviewEventType = "overview"
 local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
-local unitMovedEventType = "unitMoved"
+local unitMovingEventType = "unitMoving"
 local unitTakenEventType = "unitTaken"
 local eventTypes = {
 	attackEventType,
@@ -464,7 +466,7 @@ local eventTypes = {
 	unitBuiltEventType,
 	unitDamagedEventType,
 	unitDestroyedEventType,
-	unitMovedEventType,
+	unitMovingEventType,
 	unitTakenEventType
 }
 
@@ -481,7 +483,7 @@ local decayPerSecond = {
 	unitBuilt = 0.05,
 	unitDamaged = 0.4,
 	unitDestroyed = 0.1,
-	unitMoved = 0.4,
+	unitMoving = 0.4,
 	unitTaken = 0.1,
 }
 
@@ -493,16 +495,15 @@ local eventStatistics = EventStatistics:new({
 		attack = 1.0,
 		hotspot = 1.0,
 		overview = 4.0,
-		unitBuilt = 3.6,
-		unitDamaged = 0.7,
-		unitDestroyed = 0.7,
-		unitMoved = 1.8,
+		unitBuilt = 3.8,
+		unitDamaged = 0.6,
+		unitDestroyed = 0.6,
+		unitMoving = 2.0,
 		unitTaken = 0.2,
 	}
 }, eventTypes)
 
-local showingEvent = nil
-local display = nil
+local showingEvent, display
 
 -- CAMERA TRACKING
 
@@ -698,7 +699,7 @@ local function toDisplayInfo(event, frame)
 		commentary = event.sbj .. " under attack"
 	elseif event.type == unitDestroyedEventType then
 		commentary = event.sbj .. " destroyed by " .. actorName
-	elseif event.type == unitMovedEventType then
+	elseif event.type == unitMovingEventType then
 		local quantityPrefix, unitCount = " ", event:unitCount()
 		if unitCount > 5 then
 			quantityPrefix = " batallion "
@@ -1016,9 +1017,10 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			return
 		end
 		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
-		local event = addEvent(unitTeam, importance, sbjLocation, meta, unitMovedEventType, unitID, unitDefID, _deferCommandEvent)
+		local event = addEvent(unitTeam, importance, sbjLocation, meta, unitMovingEventType, unitID, unitDefID, _deferCommandEvent)
 		-- Hack: we want the subject to be the "actor" but the event location to be the target.
 		event.location = trgLocation
+		event:addUnit(-unitID, trgLocation)
 	elseif cmdID == CMD_ATTACK then
 		-- Process attack event
 		local trgx, trgy, trgz, attackedUnitID
@@ -1033,6 +1035,8 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		  local trgLocation = { trgx, trgy, trgz }
 			local x, y, z, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
 			local sbjAllyTeam = teamInfo[unitTeam].allyTeam
+			-- HACK: Silo is weird.
+			unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
 			local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
 			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
 			-- Hack: we want the subject to be the "actor" but the event location to be the target.
