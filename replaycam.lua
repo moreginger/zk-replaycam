@@ -1063,7 +1063,9 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 		damage = damage / 2
 	end
 	local x, y, z, _, unitImportance = unitInfo:get(unitID)
-	local currentHealth, _, _, _, buildProgress = spGetUnitHealth(unitID)
+	local currentHealth, maxHealth, _, _, buildProgress = spGetUnitHealth(unitID)
+	-- currentHealth can be 0, also avoid skewing the score overly much
+	currentHealth = max(currentHealth, maxHealth / 16)
 	-- Percentage of current health being dealt in damage, up to 100
 	local importance = 100 * min(currentHealth, damage) / currentHealth
 	-- Multiply by unit importance factor
