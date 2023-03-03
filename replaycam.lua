@@ -520,7 +520,6 @@ local showingEvent, display
 
 -- CAMERA TRACKING
 
-local camRangeMax = 1600
 local camRangeMin = 1000
 local camera = nil
 
@@ -690,7 +689,7 @@ local function selectMostImportantEvent()
 end
 
 local function toDisplayInfo(event, frame)
-	local camAngle, camRange, commentary = -1.2, camRangeMin, nil
+	local camAngle, commentary = -1.2, nil
 	local actorID = pairs(event.actors)(event.actors)
 
 	local actorName = "unknown"
@@ -704,7 +703,6 @@ local function toDisplayInfo(event, frame)
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
 		camAngle = - pi / 2
-		camRange = 1.2 * max(mapSizeX, mapSizeZ) / tan(pi * fov / 180)
 		commentary = "Let's get an overview of the battlefield"
 	elseif event.type == unitBuiltEventType then
 		commentary = event.sbj .. " built by " .. actorName
@@ -728,7 +726,11 @@ local function toDisplayInfo(event, frame)
 	for k, v in pairs(event._units) do
 		tracking[k] = v
 	end
-	return { camAngle = camAngle, camRange = camRange, commentary = commentary, location = event.location, shownAt = frame, tracking = tracking }
+	return { camAngle = camAngle, commentary = commentary, location = event.location, shownAt = frame, tracking = tracking }
+end
+
+local function calcCamRange(distance, fov)
+	return 1.25 * distance / tan(pi * fov / 180)
 end
 
 local function updateCamera(displayInfo, dt)
@@ -764,12 +766,14 @@ local function updateCamera(displayInfo, dt)
 		trackedLocationCount = trackedLocationCount + 1
 	end
 
+	local boundingDiagLength = camRangeMin
 	if trackedLocationCount > 0 then
 		displayInfo.location = {
 			xSum / trackedLocationCount + (xvSum / trackedLocationCount * framesPerSecond),
 			ySum / trackedLocationCount,
 			zSum / trackedLocationCount + (zvSum / trackedLocationCount * framesPerSecond),
 		}
+		boundingDiagLength = max(boundingDiagLength, distance({ xMin, nil, zMin }, { xMax, nil, zMax }))
 	end
 
 	-- Smoothly move to the location of the event.
@@ -779,14 +783,13 @@ local function updateCamera(displayInfo, dt)
 	local ex, ey, ez = unpack(displayInfo.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Calculate height we want the camera at.
-	local boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
-	local targetRange = ey + displayInfo.camRange + bound(boundingDiagLength + length(ex - cx, ez - cz), 0, camRangeMax - camRangeMin)
+	local targetRange = ey + calcCamRange(boundingDiagLength + length(ex - cx, ez - cz), fov)
 	local heightChange = (targetRange - cy) * dt
 	cy = cy + heightChange
 
 	if (length(ex - cx, ez - cz) > maxPanDistance) then
 		cx = ex
-		cy = ey + displayInfo.camRange
+		cy = calcCamRange(boundingDiagLength, fov)
 		cz = ez
 		cxv = 0
 		czv = 0
@@ -958,7 +961,11 @@ function widget:GameFrame(frame)
 			end
 		end
 	end
-	addEvent(nil, 100 / igMax, { mapSizeX / 2, spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2), mapSizeZ / 2 }, nil, overviewEventType, nil, nil)
+	local overviewY = spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2)
+	local overviewEvent = addEvent(nil, 100 / igMax, { mapSizeX / 2, overviewY, mapSizeZ / 2 }, nil, overviewEventType, nil, nil)
+	-- Set two "units" at the corners so that we calculate the correct camera range
+	overviewEvent:addUnit(-1, { 0, overviewY, 0})
+	overviewEvent:addUnit(-2, { mapSizeX, overviewY, mapSizeZ})
 
 	local newEvent = selectMostImportantEvent()
 	if newEvent and newEvent ~= showingEvent then
