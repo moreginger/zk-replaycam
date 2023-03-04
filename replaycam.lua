@@ -27,6 +27,7 @@ local spGetGameFrame = Spring.GetGameFrame
 local spGetGameRulesParam = Spring.GetGameRulesParam
 local spGetGroundHeight = Spring.GetGroundHeight
 local spGetHumanName = Spring.Utilities.GetHumanName
+local spGetMouseState = Spring.GetMouseState
 local spGetMovetype = Spring.Utilities.getMovetype
 local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetSpectatingState = Spring.GetSpectatingState
@@ -524,7 +525,7 @@ local tailEvent, headEvent, showingEvent
 
 local camRangeMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 2, worldGridSize * 3, worldGridSize * 0.5
 local initialCameraState, display, camera
-local userCameraOverrideFrame = -1000
+local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
 local function removeEvent(event)
 	if event == headEvent then
@@ -1158,5 +1159,11 @@ local function updateCamera(displayInfo, dt)
 end
 
 function widget:Update(dt)
+	local mx, my = spGetMouseState()
+	local newMouseLocation = { mx, 0, my }
+  if distance(newMouseLocation, lastMouseLocation) ~= 0 then
+		lastMouseLocation = newMouseLocation
+		userAction()
+	end
 	updateCamera(display, dt)
 end
