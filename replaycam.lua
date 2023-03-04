@@ -288,8 +288,12 @@ function UnitInfoCache:_weaponStats(unitDef)
 	local aoe = wd.impactOnly and 0 or wd.damageAreaOfEffect
 	-- Likho bomb is 192 so this gives a boost of 1 + 2.25. Feels about right.
 	local aoeBoost = 1 + (aoe * aoe) / (128 * 128)
+	-- Afterburn is difficult to quantify; dps is 15 but it also decloaks, burntime varies but
+	-- ground flames may persist, denying area and causing more damage. Shrug.
+	local afterburnBoost = 1 or ((wdcp.burntime or wd.fireStarter) and 1.5)
+	local weaponImportance = weaponDamage * aoeBoost * afterburnBoost
 	local range = wdcp.truerange or wd.range
-	return weaponDamage * aoeBoost, range
+	return weaponImportance, range
 end
 
 function UnitInfoCache:_unitStats(unitDefID)
