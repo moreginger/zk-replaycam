@@ -243,7 +243,6 @@ end
 
 local unitInfoCacheFrames = framesPerSecond
 
-
 UnitInfoCache = { locationListener = nil }
 
 function UnitInfoCache:new(o)
@@ -485,9 +484,6 @@ local eventTypes = {
 
 local eventMergeRange = 256
 
-local tailEvent = nil
-local headEvent = nil
-
 -- Linear decay rate
 local decayPerSecond = {
 	attack = 1,
@@ -516,12 +512,13 @@ local eventStatistics = EventStatistics:new({
 	}
 }, eventTypes)
 
-local showingEvent, display
+local tailEvent, headEvent, showingEvent
 
--- CAMERA TRACKING
+-- EVENT DISPLAY
 
-local camRangeMin = 1000
-local camera = nil
+local camRangeMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 2, worldGridSize * 3, worldGridSize * 0.5
+local initialCameraState, display, camera
+local userCameraOverrideFrame = -1000
 
 local function removeEvent(event)
 	if event == headEvent then
@@ -729,120 +726,6 @@ local function toDisplayInfo(event, frame)
 	return { camAngle = camAngle, commentary = commentary, location = event.location, shownAt = frame, tracking = tracking }
 end
 
-local function calcCamRange(diag, fov)
-	return diag / tan(pi * fov / 180)
-end
-
-local function updateCamera(displayInfo, dt)
-	local cameraAccel = worldGridSize * 2
-	local maxPanDistance = worldGridSize * 3
-	local mapEdgeBorder = worldGridSize * 0.5
-
-	if not displayInfo then
-		return
-	end
-
-	local tracking = displayInfo.tracking
-	local xSum, ySum, zSum, xvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0
-	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
-	for unit, location in pairs(tracking) do
-		local x, y, z
-		if unit > 0 then
-			x, y, z = spGetUnitPosition(unit)
-			local xv, _, zv = spGetUnitVelocity(unit)
-			if x and y and z and xv and zv then
-				xvSum, zvSum = xvSum + xv, zvSum + zv
-				tracking[unit] = { x, y, z }
-			else
-				x, y, z = unpack(location)
-				tracking[-unit] = location
-				tracking[unit] = nil
-			end
-		else
-			x, y, z = unpack(location)
-		end
-		xMin, xMax, zMin, zMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
-		xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
-		trackedLocationCount = trackedLocationCount + 1
-	end
-
-	local boundingDiagLength = camRangeMin
-	if trackedLocationCount > 0 then
-		displayInfo.location = {
-			xSum / trackedLocationCount + (xvSum / trackedLocationCount * framesPerSecond),
-			ySum / trackedLocationCount,
-			zSum / trackedLocationCount + (zvSum / trackedLocationCount * framesPerSecond),
-		}
-		boundingDiagLength = max(boundingDiagLength, distance({ xMin, nil, zMin }, { xMax, nil, zMax }))
-	end
-
-	-- Smoothly move to the location of the event.
-	-- Camera position and vector
-	local cx, cy, cz, cxv, czv = camera.x, camera.y, camera.z, camera.xv, camera.zv
-	-- Event location
-	local ex, ey, ez = unpack(displayInfo.location)
-	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
-	-- Calculate height we want the camera at.
-	local targetRange = ey + calcCamRange(boundingDiagLength + length(ex - cx, ez - cz), fov)
-	local heightChange = (targetRange - cy) * dt
-	cy = cy + heightChange
-
-	if (length(ex - cx, ez - cz) > maxPanDistance) then
-		cx = ex
-		cy = calcCamRange(boundingDiagLength, fov)
-		cz = ez
-		cxv = 0
-		czv = 0
-	else
-		-- Project out current vector
-		local cv = length(cxv, czv)
-		local px, pz = cx, cz
-		if (cv > 0) then
-			local time = cv / cameraAccel
-			px = px + cxv * time / 2
-			pz = pz + czv * time / 2
-		end
-		-- Offset vector
-		local ox, oz = ex - px, ez - pz
-		local od     = length(ox, oz)
-		-- Correction vector
-		local dx, dz = -cxv, -czv
-		if (od > 0) then
-			-- Not 2 x d as we want to accelerate until half way then decelerate.
-			local ov = sqrt(od * cameraAccel)
-			dx = dx + ov * ox / od
-			dz = dz + ov * oz / od
-		end
-		local dv = length(dx, dz)
-		if (dv > 0) then
-			cxv = cxv + dt * cameraAccel * dx / dv
-			czv = czv + dt * cameraAccel * dz / dv
-		end
-		cx = cx + dt * cxv
-		cz = cz + dt * czv
-	end
-
-	camera = {
-		x = cx,
-		y = cy,
-		z = cz,
-		xv = cxv,
-		zv = czv
-	}
-
-	local cameraState = spGetCameraState()
-	cameraState.mode = 4
-	cameraState.px = cx
-	cameraState.py = cy
-	cameraState.pz = cz - cy / math.tan(displayInfo.camAngle)
-	cameraState.rx = displayInfo.camAngle
-	cameraState.ry = math.pi
-	cameraState.rz = 0
-	cameraState.fov = fov
-
-	spSetCameraState(cameraState)
-end
-
 local function setupPanels()
 	window_cpl = Window:New {
 		parent = screen0,
@@ -878,56 +761,62 @@ local function setupPanels()
 	}
 end
 
+function widget:Shutdown()
+  spSetCameraState(initialCameraState, 0)
+end
+
 function widget:Initialize()
-	local loadText = "LOADED "
-	if (WG.Chili and (spIsReplay() or spGetSpectatingState())) then
-		Chili = WG.Chili
-		Window = Chili.Window
-		ScrollPanel = Chili.ScrollPanel
-		screen0 = Chili.Screen0
+	if not WG.Chili or not (spIsReplay() and spGetSpectatingState()) then
+		spEcho("DEACTIVATING " .. widget:GetInfo().name .. " as not spec")
+		widgetHandler:RemoveWidget()
+		return
+	end
 
-		-- Init teams.
-		teamInfo = {}
-		local allyTeams = spGetAllyTeamList()
-		for _, allyTeam in pairs(allyTeams) do
-			local teamList = spGetTeamList(allyTeam)
+	Chili = WG.Chili
+	Window = Chili.Window
+	ScrollPanel = Chili.ScrollPanel
+	screen0 = Chili.Screen0
 
-			local allyTeamName = spGetGameRulesParam("allyteam_long_name_" .. allyTeam)
-			if string.len(allyTeamName) > 10 then
-				allyTeamName = spGetGameRulesParam("allyteam_short_name_" .. allyTeam)
-			end
+	-- Init teams.
+	teamInfo = {}
+	local allyTeams = spGetAllyTeamList()
+	for _, allyTeam in pairs(allyTeams) do
+		local teamList = spGetTeamList(allyTeam)
 
-			for _, teamID in pairs(teamList) do
-				local teamLeader = nil
-				_, teamLeader = spGetTeamInfo(teamID)
-				local teamName = "unknown"
-				if (teamLeader) then
-					teamName = spGetPlayerInfo(teamLeader)
-				end
-				teamInfo[teamID] = {
-					allyTeam = allyTeam,
-					allyTeamName = allyTeamName,
-					color = { spGetTeamColor(teamID) } or { 1, 1, 1, 1 },
-					name = teamName
-				}
-			end
+		local allyTeamName = spGetGameRulesParam("allyteam_long_name_" .. allyTeam)
+		if string.len(allyTeamName) > 10 then
+			allyTeamName = spGetGameRulesParam("allyteam_short_name_" .. allyTeam)
 		end
 
-		interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, allyTeams = allyTeams })
-		unitInfo = UnitInfoCache:new({ locationListener = function(x, _, z, allyTeam, isMoving)
-			local interest = 1
-			if not isMoving then
-				-- Static things aren't themselves very interesting but count for #teams
-				interest = 0.16
+		for _, teamID in pairs(teamList) do
+			local teamLeader = nil
+			_, teamLeader = spGetTeamInfo(teamID)
+			local teamName = "unknown"
+			if (teamLeader) then
+				teamName = spGetPlayerInfo(teamLeader)
 			end
-			interestGrid:add(x, z, allyTeam, interest)
-		end})
-
-		setupPanels()
-	else
-		spEcho(loadText .. "AND REMOVED " .. widget:GetInfo().name)
-		widgetHandler:RemoveWidget()
+			teamInfo[teamID] = {
+				allyTeam = allyTeam,
+				allyTeamName = allyTeamName,
+				color = { spGetTeamColor(teamID) } or { 1, 1, 1, 1 },
+				name = teamName
+			}
+		end
 	end
+
+	interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, allyTeams = allyTeams })
+	unitInfo = UnitInfoCache:new({ locationListener = function(x, _, z, allyTeam, isMoving)
+		local interest = 1
+		if not isMoving then
+			-- Static things aren't themselves very interesting but count for #teams
+			interest = 0.16
+		end
+		interestGrid:add(x, z, allyTeam, interest)
+	end})
+
+	setupPanels()
+
+	initialCameraState = spGetCameraState()
 
 	local cx, cy, cz = spGetCameraPosition()
 	camera = {
@@ -986,6 +875,27 @@ function widget:GameFrame(frame)
 	end
 
 	interestGrid:reset()
+end
+
+local function userAction()
+	-- Override camera movements for a short time.
+  userCameraOverrideFrame = spGetGameFrame() + framesPerSecond
+end
+
+function widget:MousePress(x, y, button)
+	userAction()
+end
+
+function widget:MouseMove(x, y, dx, dy, button)
+	userAction()
+end
+
+function widget:MouseRelease(x, y, button)
+	userAction()
+end
+
+function widget:MouseWheel(up, value)
+	userAction()
 end
 
 local function _deferCommandEvent(event)
@@ -1124,6 +1034,120 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	local event = addEvent(newTeam, importance, { x, y, z}, nil, unitTakenEventType, unitID, unitDefID)
 	x, y, z =  unitInfo:get(captureController)
 	event:addUnit(captureController, { x, y, z })
+end
+
+local function calcCamRange(diag, fov)
+	return diag / tan(pi * fov / 180)
+end
+
+local function updateCamera(displayInfo, dt)
+	if not displayInfo then
+		return
+	end
+
+	local tracking = displayInfo.tracking
+	local xSum, ySum, zSum, xvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0
+	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
+	for unit, location in pairs(tracking) do
+		local x, y, z
+		if unit > 0 then
+			x, y, z = spGetUnitPosition(unit)
+			local xv, _, zv = spGetUnitVelocity(unit)
+			if x and y and z and xv and zv then
+				xvSum, zvSum = xvSum + xv, zvSum + zv
+				tracking[unit] = { x, y, z }
+			else
+				x, y, z = unpack(location)
+				tracking[-unit] = location
+				tracking[unit] = nil
+			end
+		else
+			x, y, z = unpack(location)
+		end
+		xMin, xMax, zMin, zMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
+		xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
+		trackedLocationCount = trackedLocationCount + 1
+	end
+
+	local boundingDiagLength = camRangeMin
+	if trackedLocationCount > 0 then
+		displayInfo.location = {
+			xSum / trackedLocationCount + (xvSum / trackedLocationCount * framesPerSecond),
+			ySum / trackedLocationCount,
+			zSum / trackedLocationCount + (zvSum / trackedLocationCount * framesPerSecond),
+		}
+		boundingDiagLength = max(boundingDiagLength, distance({ xMin, nil, zMin }, { xMax, nil, zMax }))
+	end
+
+	if userCameraOverrideFrame >= spGetGameFrame() then
+		return
+	end
+
+	-- Smoothly move to the location of the event.
+	-- Camera position and vector
+	local cx, cy, cz, cxv, czv = camera.x, camera.y, camera.z, camera.xv, camera.zv
+	-- Event location
+	local ex, ey, ez = unpack(displayInfo.location)
+	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
+	-- Calculate height we want the camera at.
+	local targetRange = ey + calcCamRange(boundingDiagLength + length(ex - cx, ez - cz), fov)
+	local heightChange = (targetRange - cy) * dt
+	cy = cy + heightChange
+
+	if (length(ex - cx, ez - cz) > maxPanDistance) then
+		cx = ex
+		cy = calcCamRange(boundingDiagLength, fov)
+		cz = ez
+		cxv = 0
+		czv = 0
+	else
+		-- Project out current vector
+		local cv = length(cxv, czv)
+		local px, pz = cx, cz
+		if (cv > 0) then
+			local time = cv / cameraAccel
+			px = px + cxv * time / 2
+			pz = pz + czv * time / 2
+		end
+		-- Offset vector
+		local ox, oz = ex - px, ez - pz
+		local od     = length(ox, oz)
+		-- Correction vector
+		local dx, dz = -cxv, -czv
+		if (od > 0) then
+			-- Not 2 x d as we want to accelerate until half way then decelerate.
+			local ov = sqrt(od * cameraAccel)
+			dx = dx + ov * ox / od
+			dz = dz + ov * oz / od
+		end
+		local dv = length(dx, dz)
+		if (dv > 0) then
+			cxv = cxv + dt * cameraAccel * dx / dv
+			czv = czv + dt * cameraAccel * dz / dv
+		end
+		cx = cx + dt * cxv
+		cz = cz + dt * czv
+	end
+
+	camera = {
+		x = cx,
+		y = cy,
+		z = cz,
+		xv = cxv,
+		zv = czv
+	}
+
+	local cameraState = spGetCameraState()
+	cameraState.mode = 4
+	cameraState.px = cx
+	cameraState.py = cy
+	cameraState.pz = cz - cy / math.tan(displayInfo.camAngle)
+	cameraState.rx = displayInfo.camAngle
+	cameraState.ry = math.pi
+	cameraState.rz = 0
+	cameraState.fov = fov
+
+	spSetCameraState(cameraState)
 end
 
 function widget:Update(dt)
