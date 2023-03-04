@@ -207,7 +207,7 @@ end
 -- but a longer-term negative factor (passe) to encourage moving.
 function WorldGrid:setWatching(x, y)
 	-- Note: boost is spread over a 2x2 grid.
-	self:_addInternal(x, y, self.gridSize * 2, { boost = 8 }, _boostInterest)
+	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
 	self:_addInternal(x, y, self.gridSize, { passe = 0.1 }, _addPasse)
 end
 
@@ -515,12 +515,12 @@ local eventStatistics = EventStatistics:new({
 	-- > 1: make each event seem more likely (less interesting)
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
-		attack = 1.0,
-		hotspot = 1.0,
+		attack = 1.3,
+		hotspot = 0.6,
 		overview = 4.4,
 		unitBuilt = 4.2,
-		unitDamaged = 0.6,
-		unitDestroyed = 0.5,
+		unitDamaged = 0.7,
+		unitDestroyed = 0.6,
 		unitMoving = 2.0,
 		unitTaken = 0.2,
 	}
