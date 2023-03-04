@@ -11,6 +11,7 @@ function widget:GetInfo()
 end
 
 local abs = math.abs
+local atan2 = math.atan2
 local cos = math.cos
 local exp = math.exp
 local floor = math.floor
@@ -76,8 +77,8 @@ local function initTable(key, value)
 end
 
 -- Calculate length of a vector
-local function length(x, y)
-	return sqrt(x * x + y * y)
+local function length(x, y, z)
+	return sqrt(x * x + y * y + (z and z * z or 0))
 end
 
 -- Calculate x, z distance between two { x, y, z } points.
@@ -96,6 +97,10 @@ local function bound(x, min, max)
 		return max
 	end
 	return x
+end
+
+local function signum(x)
+    return x > 0 and 1 or (x == 0 and 0 or -1)
 end
 
 -- WORLD GRID CLASS
@@ -525,7 +530,7 @@ local tailEvent, headEvent, showingEvent
 
 -- EVENT DISPLAY
 
-local camRangeMin, cameraAccel, maxPanDistance, mapEdgeBorder = 800, worldGridSize * 2, worldGridSize * 3, worldGridSize * 0.5
+local camRangeMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1200, worldGridSize * 2, worldGridSize * 3, worldGridSize * 0.5
 local initialCameraState, display, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
@@ -833,6 +838,7 @@ function widget:Initialize()
 		y = cy,
 		z = cz,
 		xv = 0,
+		yv = 0,
 		zv = 0
 	}
 end
@@ -1095,16 +1101,20 @@ local function updateCamera(displayInfo, dt)
 
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
-	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
+	local cx, cy, cz, cxv, cyv, czv, crx = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv, camera.rx
 	-- Event location
 	local ex, ey, ez = unpack(displayInfo.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
-	-- Target range for the camera
-	local tcr = calcCamRange(boundingDiagLength + length(ex - cx, ez - cz), fov)
-	-- Where do we *want* the camera to be
+	-- Where do we *want* the camera to be ie: (t)arget
+	-- First calculate where it would be if correctly positioned
+	local tcr = calcCamRange(boundingDiagLength, fov)
 	local tcx, tcy, tcz = ex, ey + tcr * sin(-displayInfo.camAngle), ez + tcr * cos(-displayInfo.camAngle)
+	-- Now, recalculate range based on offset from the ideal
+	tcr = calcCamRange(boundingDiagLength + length(tcx - cx, tcz - cz), fov)
+	tcx, tcy, tcz = ex, ey + tcr * sin(-displayInfo.camAngle), ez + tcr * cos(-displayInfo.camAngle)
+	local trx = -atan2(tcy - ey, tcz - ez)
 
-	if (length(tcx - cx, tcz - cz) > maxPanDistance) then
+	if (length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance) then
 		tcr = calcCamRange(boundingDiagLength, fov)
 		cx = tcx
 		cy = ey + tcr * sin(-displayInfo.camAngle)
@@ -1112,36 +1122,42 @@ local function updateCamera(displayInfo, dt)
 		cxv = 0
 		cyv = 0
 		czv = 0
+		crx = displayInfo.camAngle
 	else
 		-- Project out current vector
-		local cv = length(cxv, czv)
-		local px, pz = cx, cz
+		local cv = length(cxv, cyv, czv)
+		local px, py, pz = cx, cy, cz
 		if (cv > 0) then
 			local time = cv / cameraAccel
 			px = px + cxv * time / 2
+			py = py + cyv * time / 2
 			pz = pz + czv * time / 2
 		end
 		-- Offset vector
-		local ox, oz = tcx - px, tcz - pz
-		local od     = length(ox, oz)
+		local ox, oy, oz = tcx - px, tcy - py, tcz - pz
+		local od     = length(ox, oy, oz)
 		-- Correction vector
-		local dx, dz = -cxv, -czv
+		local dx, dy, dz = -cxv, -cyv, -czv
 		if (od > 0) then
 			-- Not 2 x d as we want to accelerate until half way then decelerate.
 			local ov = sqrt(od * cameraAccel)
 			dx = dx + ov * ox / od
+			dy = dy + ov * oy / od
 			dz = dz + ov * oz / od
 		end
-		local dv = length(dx, dz)
+		local dv = length(dx, dy, dz)
 		if (dv > 0) then
 			cxv = cxv + dt * cameraAccel * dx / dv
+			cyv = cyv + dt * cameraAccel * dy / dv
 			czv = czv + dt * cameraAccel * dz / dv
 		end
 		cx = cx + dt * cxv
+		cy = cy + dt * cyv
 		cz = cz + dt * czv
-
-		cy = cy + (tcy - cy ) * dt
 	end
+
+	local crxd = signum(trx - crx) * dt * 0.1
+	crx = abs(crxd) >= abs(trx - crx) and trx or crx + crxd
 
 	camera = {
 		x = cx,
@@ -1149,7 +1165,8 @@ local function updateCamera(displayInfo, dt)
 		z = cz,
 		xv = cxv,
 		yv = cyv,
-		zv = czv
+		zv = czv,
+		rx = crx,
 	}
 
 	local cameraState = spGetCameraState()
@@ -1157,7 +1174,7 @@ local function updateCamera(displayInfo, dt)
 	cameraState.px = cx
 	cameraState.py = cy
 	cameraState.pz = cz
-	cameraState.rx = displayInfo.camAngle
+	cameraState.rx = crx
 	cameraState.ry = math.pi
 	cameraState.rz = 0
 	cameraState.fov = fov
