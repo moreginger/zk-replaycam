@@ -281,8 +281,10 @@ function UnitInfoCache:_weaponStats(unitDef)
 	if not wdcp or wdcp.fake_weapon then
 		return 0, 0
 	end
-	local mult = tonumber(wdcp.statsprojectiles) or ((tonumber(wdcp.script_burst) or wd.salvoSize) * wd.projectiles)
-	local weaponDamage = tonumber(wdcp.stats_damage) * mult
+	-- Weapon damage is burst damage that can be delivered in 1s.
+	local projectileMult = tonumber(wdcp.statsprojectiles) or ((tonumber(wdcp.script_burst) or wd.salvoSize) * wd.projectiles)
+	local reloadTime = tonumber(wdcp.script_reload) or wd.reload
+	local weaponDamage = tonumber(wdcp.stats_damage) * projectileMult / min(1, reloadTime)
 	local aoe = wd.impactOnly and 0 or wd.damageAreaOfEffect
 	-- Likho bomb is 192 so this gives a boost of 1 + 2.25. Feels about right.
 	local aoeBoost = 1 + (aoe * aoe) / (128 * 128)
@@ -959,18 +961,19 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		else
 			trgx, trgy, trgz = unpack(cmdParams)
 		end
-		if trgx and trgy and trgz then
-		  local trgLocation = { trgx, trgy, trgz }
-			local x, y, z, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
-			local sbjAllyTeam = teamInfo[unitTeam].allyTeam
-			-- HACK: Silo is weird.
-			unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
-			local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
-			local event = addEvent(unitTeam, weaponImportance, { x, y, z }, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
-			-- Hack: we want the subject to be the "actor" but the event location to be the target.
-			event.location = trgLocation
-			event:addUnit(attackedUnitID or -unitID, trgLocation)
+		if not trgx or not trgy or not trgz then
+			return
 		end
+		local trgLocation = { trgx, trgy, trgz }
+		local x, y, z, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
+		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
+		-- HACK: Silo is weird.
+		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
+		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
+		local event = addEvent(unitTeam, weaponImportance, { x, y, z }, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
+		-- Hack: we want the subject to be the "actor" but the event location to be the target.
+		event.location = trgLocation
+		event:addUnit(attackedUnitID or -unitID, trgLocation)
 	end
 end
 
