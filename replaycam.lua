@@ -11,11 +11,13 @@ function widget:GetInfo()
 end
 
 local abs = math.abs
+local cos = math.cos
 local exp = math.exp
 local floor = math.floor
 local max = math.max
 local min = math.min
 local pi = math.pi
+local sin = math.sin
 local sqrt = math.sqrt
 local tan = math.tan
 
@@ -523,7 +525,7 @@ local tailEvent, headEvent, showingEvent
 
 -- EVENT DISPLAY
 
-local camRangeMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 2, worldGridSize * 3, worldGridSize * 0.5
+local camRangeMin, cameraAccel, maxPanDistance, mapEdgeBorder = 800, worldGridSize * 2, worldGridSize * 3, worldGridSize * 0.5
 local initialCameraState, display, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
@@ -1093,20 +1095,22 @@ local function updateCamera(displayInfo, dt)
 
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
-	local cx, cy, cz, cxv, czv = camera.x, camera.y, camera.z, camera.xv, camera.zv
+	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
 	-- Event location
 	local ex, ey, ez = unpack(displayInfo.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
-	-- Calculate height we want the camera at.
-	local targetRange = ey + calcCamRange(boundingDiagLength + length(ex - cx, ez - cz), fov)
-	local heightChange = (targetRange - cy) * dt
-	cy = cy + heightChange
+	-- Target range for the camera
+	local tcr = calcCamRange(boundingDiagLength + length(ex - cx, ez - cz), fov)
+	-- Where do we *want* the camera to be
+	local tcx, tcy, tcz = ex, ey + tcr * sin(-displayInfo.camAngle), ez + tcr * cos(-displayInfo.camAngle)
 
-	if (length(ex - cx, ez - cz) > maxPanDistance) then
-		cx = ex
-		cy = calcCamRange(boundingDiagLength, fov)
-		cz = ez
+	if (length(tcx - cx, tcz - cz) > maxPanDistance) then
+		tcr = calcCamRange(boundingDiagLength, fov)
+		cx = tcx
+		cy = ey + tcr * sin(-displayInfo.camAngle)
+		cz = ez + tcr * cos(-displayInfo.camAngle)
 		cxv = 0
+		cyv = 0
 		czv = 0
 	else
 		-- Project out current vector
@@ -1118,7 +1122,7 @@ local function updateCamera(displayInfo, dt)
 			pz = pz + czv * time / 2
 		end
 		-- Offset vector
-		local ox, oz = ex - px, ez - pz
+		local ox, oz = tcx - px, tcz - pz
 		local od     = length(ox, oz)
 		-- Correction vector
 		local dx, dz = -cxv, -czv
@@ -1135,6 +1139,8 @@ local function updateCamera(displayInfo, dt)
 		end
 		cx = cx + dt * cxv
 		cz = cz + dt * czv
+
+		cy = cy + (tcy - cy ) * dt
 	end
 
 	camera = {
@@ -1142,6 +1148,7 @@ local function updateCamera(displayInfo, dt)
 		y = cy,
 		z = cz,
 		xv = cxv,
+		yv = cyv,
 		zv = czv
 	}
 
@@ -1149,7 +1156,7 @@ local function updateCamera(displayInfo, dt)
 	cameraState.mode = 4
 	cameraState.px = cx
 	cameraState.py = cy
-	cameraState.pz = cz - cy / math.tan(displayInfo.camAngle)
+	cameraState.pz = cz
 	cameraState.rx = displayInfo.camAngle
 	cameraState.ry = math.pi
 	cameraState.rz = 0
