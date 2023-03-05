@@ -13,11 +13,13 @@ end
 local abs = math.abs
 local atan2 = math.atan2
 local cos = math.cos
+local deg = math.deg
 local exp = math.exp
 local floor = math.floor
 local max = math.max
 local min = math.min
 local pi = math.pi
+local rad = math.rad
 local sin = math.sin
 local sqrt = math.sqrt
 local tan = math.tan
@@ -63,7 +65,7 @@ local framesPerSecond = 30
 
 local debug = true
 local updateIntervalFrames = framesPerSecond
-local fov = 45
+local defaultFov = 45
 
 -- UTILITY FUNCTIONS
 
@@ -530,7 +532,7 @@ local tailEvent, headEvent, showingEvent
 
 -- EVENT DISPLAY
 
-local camRangeMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1200, worldGridSize * 2, worldGridSize * 3, worldGridSize * 0.5
+local camDiagMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 1.2, worldGridSize * 4, worldGridSize * 0.5
 local initialCameraState, display, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
@@ -839,7 +841,8 @@ function widget:Initialize()
 		z = cz,
 		xv = 0,
 		yv = 0,
-		zv = 0
+		zv = 0,
+		fov = defaultFov
 	}
 end
 
@@ -1053,7 +1056,7 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 end
 
 local function calcCamRange(diag, fov)
-	return diag / tan(pi * fov / 180)
+	return diag / 2 / tan(rad(fov / 2))
 end
 
 local function updateCamera(displayInfo, dt)
@@ -1085,14 +1088,14 @@ local function updateCamera(displayInfo, dt)
 		trackedLocationCount = trackedLocationCount + 1
 	end
 
-	local boundingDiagLength = camRangeMin
+	local boundingDiagLength = camDiagMin
 	if trackedLocationCount > 0 then
 		displayInfo.location = {
 			xSum / trackedLocationCount + (xvSum / trackedLocationCount * framesPerSecond),
 			ySum / trackedLocationCount,
 			zSum / trackedLocationCount + (zvSum / trackedLocationCount * framesPerSecond),
 		}
-		boundingDiagLength = max(boundingDiagLength, distance({ xMin, nil, zMin }, { xMax, nil, zMax }))
+		boundingDiagLength = max(camDiagMin, distance({ xMin, nil, zMin }, { xMax, nil, zMax }))
 	end
 
 	if userCameraOverrideFrame >= spGetGameFrame() then
@@ -1101,29 +1104,29 @@ local function updateCamera(displayInfo, dt)
 
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
-	local cx, cy, cz, cxv, cyv, czv, crx = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv, camera.rx
+	local cx, cy, cz, cxv, cyv, czv, crx, cfov = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv, camera.rx, camera.fov
 	-- Event location
 	local ex, ey, ez = unpack(displayInfo.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Where do we *want* the camera to be ie: (t)arget
 	-- First calculate where it would be if correctly positioned
-	local tcr = calcCamRange(boundingDiagLength, fov)
-	local tcx, tcy, tcz = ex, ey + tcr * sin(-displayInfo.camAngle), ez + tcr * cos(-displayInfo.camAngle)
-	-- Now, recalculate range based on offset from the ideal
-	tcr = calcCamRange(boundingDiagLength + length(tcx - cx, tcz - cz), fov)
-	tcx, tcy, tcz = ex, ey + tcr * sin(-displayInfo.camAngle), ez + tcr * cos(-displayInfo.camAngle)
-	local trx = -atan2(tcy - ey, tcz - ez)
+	local tcDist = calcCamRange(boundingDiagLength, defaultFov)
+	local tcx, tcy, tcz = ex, ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle)
 
 	if (length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance) then
-		tcr = calcCamRange(boundingDiagLength, fov)
-		cx = tcx
-		cy = ey + tcr * sin(-displayInfo.camAngle)
-		cz = ez + tcr * cos(-displayInfo.camAngle)
+		cx = ex
+		cy = ey + tcDist * sin(-displayInfo.camAngle)
+		cz = ez + tcDist * cos(-displayInfo.camAngle)
 		cxv = 0
 		cyv = 0
 		czv = 0
 		crx = displayInfo.camAngle
+		cfov = defaultFov
 	else
+		-- Recalculate range based on offset from the ideal
+		boundingDiagLength = boundingDiagLength + length(tcx - cx, tcz - cz)
+		tcDist = calcCamRange(boundingDiagLength, defaultFov)
+		tcx, tcy, tcz = ex, ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle)
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
 		local px, py, pz = cx, cy, cz
@@ -1156,8 +1159,21 @@ local function updateCamera(displayInfo, dt)
 		cz = cz + dt * czv
 	end
 
-	local crxd = signum(trx - crx) * dt * 0.1
-	crx = abs(crxd) >= abs(trx - crx) and trx or crx + crxd
+	-- Rotate camera towards target
+	local camTurnRate = 0.1
+	local trx = -atan2(cy - ey, cz - ez)
+	if abs(trx - crx) < 2 then
+		-- Leave it alone
+	else
+		crx = crx + signum(trx - crx) * dt * camTurnRate
+	end
+
+	local tfov = deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz)))
+	if abs(tfov - cfov) < 2 then
+		-- Leave it alone.
+	else
+		cfov = cfov + signum(tfov - cfov) * 20 * dt
+	end
 
 	camera = {
 		x = cx,
@@ -1167,6 +1183,7 @@ local function updateCamera(displayInfo, dt)
 		yv = cyv,
 		zv = czv,
 		rx = crx,
+		fov = cfov
 	}
 
 	local cameraState = spGetCameraState()
@@ -1177,7 +1194,7 @@ local function updateCamera(displayInfo, dt)
 	cameraState.rx = crx
 	cameraState.ry = math.pi
 	cameraState.rz = 0
-	cameraState.fov = fov
+	cameraState.fov = cfov
 
 	spSetCameraState(cameraState)
 end
