@@ -65,7 +65,7 @@ local framesPerSecond = 30
 
 local debug = true
 local updateIntervalFrames = framesPerSecond
-local defaultFov = 45
+local defaultFov, defaultRx = 45, -1.2
 
 -- UTILITY FUNCTIONS
 
@@ -103,6 +103,12 @@ end
 
 local function signum(x)
     return x > 0 and 1 or (x == 0 and 0 or -1)
+end
+
+local function rollingAverage(old, new, rollingFraction, dt)
+	dt = dt or 1
+	local newFraction = rollingFraction * dt
+	return (1 - newFraction) * old + newFraction * new
 end
 
 -- WORLD GRID CLASS
@@ -532,6 +538,10 @@ local tailEvent, headEvent, showingEvent
 
 -- EVENT DISPLAY
 
+local function initCamera(cx, cy, cz, rx)
+	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, fov = defaultFov }
+end
+
 local camDiagMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 1.2, worldGridSize * 4, worldGridSize * 0.5
 local initialCameraState, display, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
@@ -702,7 +712,7 @@ local function selectMostImportantEvent()
 end
 
 local function toDisplayInfo(event, frame)
-	local camAngle, commentary = -1.2, nil
+	local camAngle, commentary = defaultRx, nil
 	local actorID = pairs(event.actors)(event.actors)
 
 	local actorName = "unknown"
@@ -835,15 +845,7 @@ function widget:Initialize()
 	initialCameraState = spGetCameraState()
 
 	local cx, cy, cz = spGetCameraPosition()
-	camera = {
-		x = cx,
-		y = cy,
-		z = cz,
-		xv = 0,
-		yv = 0,
-		zv = 0,
-		fov = defaultFov
-	}
+	camera = initCamera(cx, cy, cz, defaultRx)
 end
 
 function widget:GameFrame(frame)
@@ -1104,7 +1106,8 @@ local function updateCamera(displayInfo, dt)
 
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
-	local cx, cy, cz, cxv, cyv, czv, crx, cfov = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv, camera.rx, camera.fov
+	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
+	local crx, cfov = camera.rx, camera.fov
 	-- Event location
 	local ex, ey, ez = unpack(displayInfo.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
@@ -1114,18 +1117,8 @@ local function updateCamera(displayInfo, dt)
 	local tcx, tcy, tcz = ex, ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle)
 
 	if (length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance) then
-		cx = ex
-		cy = ey + tcDist * sin(-displayInfo.camAngle)
-		cz = ez + tcDist * cos(-displayInfo.camAngle)
-		cxv = 0
-		cyv = 0
-		czv = 0
-		crx = displayInfo.camAngle
-		cfov = defaultFov
+		camera = initCamera(ex,  ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle), displayInfo.camAngle)
 	else
-		-- Recalculate range based on offset from the ideal
-		boundingDiagLength = boundingDiagLength + length(tcx - cx, tcz - cz)
-		tcDist = calcCamRange(boundingDiagLength, defaultFov)
 		tcx, tcy, tcz = ex, ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle)
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
@@ -1157,44 +1150,24 @@ local function updateCamera(displayInfo, dt)
 		cx = cx + dt * cxv
 		cy = cy + dt * cyv
 		cz = cz + dt * czv
-	end
 
-	-- Rotate camera towards target
-	local camTurnRate = 0.1
-	local trx = -atan2(cy - ey, cz - ez)
-	if abs(trx - crx) < 2 then
-		-- Leave it alone
-	else
-		crx = crx + signum(trx - crx) * dt * camTurnRate
-	end
+		-- Rotate and zoom camera. Rotation adapts faster.
+		local trx = -atan2(cy - ey, cz - ez)
+		crx = rollingAverage(crx, trx, 0.5, dt)
+		cfov = rollingAverage(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.8, dt)
 
-	local tfov = deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz)))
-	if abs(tfov - cfov) < 2 then
-		-- Leave it alone.
-	else
-		cfov = cfov + signum(tfov - cfov) * 20 * dt
+		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, fov = cfov }
 	end
-
-	camera = {
-		x = cx,
-		y = cy,
-		z = cz,
-		xv = cxv,
-		yv = cyv,
-		zv = czv,
-		rx = crx,
-		fov = cfov
-	}
 
 	local cameraState = spGetCameraState()
 	cameraState.mode = 4
-	cameraState.px = cx
-	cameraState.py = cy
-	cameraState.pz = cz
-	cameraState.rx = crx
+	cameraState.px = camera.x
+	cameraState.py = camera.y
+	cameraState.pz = camera.z
+	cameraState.rx = camera.rx
 	cameraState.ry = math.pi
 	cameraState.rz = 0
-	cameraState.fov = cfov
+	cameraState.fov = camera.fov
 
 	spSetCameraState(cameraState)
 end
