@@ -1061,12 +1061,12 @@ local function calcCamRange(diag, fov)
 	return diag / 2 / tan(rad(fov / 2))
 end
 
-local function updateCamera(displayInfo, dt)
-	if not displayInfo then
+local function updateCamera(dt)
+	if not display then
 		return
 	end
 
-	local tracking = displayInfo.tracking
+	local tracking = display.tracking
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	for unit, location in pairs(tracking) do
@@ -1092,11 +1092,11 @@ local function updateCamera(displayInfo, dt)
 
 	local boundingDiagLength = camDiagMin
 	if trackedLocationCount > 0 then
-		local ox, oy, oz = unpack(displayInfo.location)
-		local nx = xSum / trackedLocationCount + (xvSum / trackedLocationCount * framesPerSecond)
-		local ny = ySum / trackedLocationCount + (yvSum / trackedLocationCount * framesPerSecond)
-		local nz = zSum / trackedLocationCount + (zvSum / trackedLocationCount * framesPerSecond)
-		displayInfo.location = { applyDamping(ox, nx, 0.4, dt), applyDamping(oy, ny, 0.4, dt), applyDamping(oz, nz, 0.4, dt) }
+		local ox, oy, oz = unpack(display.location)
+		local nx = xSum / trackedLocationCount + xvSum / trackedLocationCount * framesPerSecond
+		local ny = ySum / trackedLocationCount + yvSum / trackedLocationCount * framesPerSecond
+		local nz = zSum / trackedLocationCount + zvSum / trackedLocationCount * framesPerSecond
+		display.location = { applyDamping(ox, nx, 0.4, dt), applyDamping(oy, ny, 0.4, dt), applyDamping(oz, nz, 0.4, dt) }
 		boundingDiagLength = max(camDiagMin, distance({ xMin, nil, zMin }, { xMax, nil, zMax }))
 	end
 
@@ -1109,17 +1109,17 @@ local function updateCamera(displayInfo, dt)
 	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
 	local crx, cry, cfov = camera.rx, camera.ry, camera.fov
 	-- Event location
-	local ex, ey, ez = unpack(displayInfo.location)
+	local ex, ey, ez = unpack(display.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Where do we *want* the camera to be ie: (t)arget
 	-- First calculate where it would be if correctly positioned
 	local tcDist = calcCamRange(boundingDiagLength, defaultFov)
-	local tcx, tcy, tcz = ex, ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle)
+	local tcx, tcy, tcz = ex, ey + tcDist * sin(-display.camAngle), ez + tcDist * cos(-display.camAngle)
 
 	if (length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance) then
-		camera = initCamera(ex,  ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle), displayInfo.camAngle, defaultRy)
+		camera = initCamera(ex,  ey + tcDist * sin(-display.camAngle), ez + tcDist * cos(-display.camAngle), display.camAngle, defaultRy)
 	else
-		tcx, tcy, tcz = ex, ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle)
+		tcx, tcy, tcz = ex, ey + tcDist * sin(-display.camAngle), ez + tcDist * cos(-display.camAngle)
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
 		local px, py, pz = cx, cy, cz
@@ -1181,5 +1181,5 @@ function widget:Update(dt)
 		lastMouseLocation = newMouseLocation
 		userAction()
 	end
-	updateCamera(display, dt)
+	updateCamera(dt)
 end
