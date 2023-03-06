@@ -65,7 +65,7 @@ local framesPerSecond = 30
 
 local debug = true
 local updateIntervalFrames = framesPerSecond
-local defaultFov, defaultRx = 45, -1.2
+local defaultFov, defaultRx, defaultRy = 45, -1.2, pi
 
 -- UTILITY FUNCTIONS
 
@@ -538,8 +538,8 @@ local tailEvent, headEvent, showingEvent
 
 -- EVENT DISPLAY
 
-local function initCamera(cx, cy, cz, rx)
-	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, fov = defaultFov }
+local function initCamera(cx, cy, cz, rx, ry)
+	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov }
 end
 
 local camDiagMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 1.2, worldGridSize * 4, worldGridSize * 0.5
@@ -845,7 +845,7 @@ function widget:Initialize()
 	initialCameraState = spGetCameraState()
 
 	local cx, cy, cz = spGetCameraPosition()
-	camera = initCamera(cx, cy, cz, defaultRx)
+	camera = initCamera(cx, cy, cz, defaultRx, defaultRy)
 end
 
 function widget:GameFrame(frame)
@@ -1107,7 +1107,7 @@ local function updateCamera(displayInfo, dt)
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
 	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
-	local crx, cfov = camera.rx, camera.fov
+	local crx, cry, cfov = camera.rx, camera.ry, camera.fov
 	-- Event location
 	local ex, ey, ez = unpack(displayInfo.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
@@ -1117,7 +1117,7 @@ local function updateCamera(displayInfo, dt)
 	local tcx, tcy, tcz = ex, ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle)
 
 	if (length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance) then
-		camera = initCamera(ex,  ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle), displayInfo.camAngle)
+		camera = initCamera(ex,  ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle), displayInfo.camAngle, defaultRy)
 	else
 		tcx, tcy, tcz = ex, ey + tcDist * sin(-displayInfo.camAngle), ez + tcDist * cos(-displayInfo.camAngle)
 		-- Project out current vector
@@ -1153,10 +1153,12 @@ local function updateCamera(displayInfo, dt)
 
 		-- Rotate and zoom camera. Rotation adapts faster.
 		local trx = -atan2(cy - ey, cz - ez)
+		local try = atan2(cx - ex, cz - ez) + math.pi
 		crx = rollingAverage(crx, trx, 0.5, dt)
+		cry = rollingAverage(cry, try, 0.6, dt)
 		cfov = rollingAverage(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.8, dt)
 
-		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, fov = cfov }
+		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov }
 	end
 
 	local cameraState = spGetCameraState()
@@ -1165,7 +1167,7 @@ local function updateCamera(displayInfo, dt)
 	cameraState.py = camera.y
 	cameraState.pz = camera.z
 	cameraState.rx = camera.rx
-	cameraState.ry = math.pi
+	cameraState.ry = camera.ry
 	cameraState.rz = 0
 	cameraState.fov = camera.fov
 
