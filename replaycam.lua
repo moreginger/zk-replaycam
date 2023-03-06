@@ -105,7 +105,7 @@ local function signum(x)
     return x > 0 and 1 or (x == 0 and 0 or -1)
 end
 
-local function rollingAverage(old, new, rollingFraction, dt)
+local function applyDamping(old, new, rollingFraction, dt)
 	dt = dt or 1
 	local newFraction = rollingFraction * dt
 	return (1 - newFraction) * old + newFraction * new
@@ -524,7 +524,7 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		attack = 1.3,
-		hotspot = 0.6,
+		hotspot = 0.5,
 		overview = 4.4,
 		unitBuilt = 4.2,
 		unitDamaged = 0.7,
@@ -542,7 +542,7 @@ local function initCamera(cx, cy, cz, rx, ry)
 	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov }
 end
 
-local camDiagMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 1.2, worldGridSize * 4, worldGridSize * 0.5
+local camDiagMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 1.2, worldGridSize * 3, worldGridSize * 0.5
 local initialCameraState, display, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
@@ -1067,15 +1067,15 @@ local function updateCamera(displayInfo, dt)
 	end
 
 	local tracking = displayInfo.tracking
-	local xSum, ySum, zSum, xvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0
+	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	for unit, location in pairs(tracking) do
 		local x, y, z
 		if unit > 0 then
 			x, y, z = spGetUnitPosition(unit)
-			local xv, _, zv = spGetUnitVelocity(unit)
-			if x and y and z and xv and zv then
-				xvSum, zvSum = xvSum + xv, zvSum + zv
+			local xv, yv, zv = spGetUnitVelocity(unit)
+			if x and y and z and xv and yv and zv then
+				xvSum, yvSum, zvSum = xvSum + xv, yvSum + yv, zvSum + zv
 				tracking[unit] = { x, y, z }
 			else
 				x, y, z = unpack(location)
@@ -1092,11 +1092,11 @@ local function updateCamera(displayInfo, dt)
 
 	local boundingDiagLength = camDiagMin
 	if trackedLocationCount > 0 then
-		displayInfo.location = {
-			xSum / trackedLocationCount + (xvSum / trackedLocationCount * framesPerSecond),
-			ySum / trackedLocationCount,
-			zSum / trackedLocationCount + (zvSum / trackedLocationCount * framesPerSecond),
-		}
+		local ox, oy, oz = unpack(displayInfo.location)
+		local nx = xSum / trackedLocationCount + (xvSum / trackedLocationCount * framesPerSecond)
+		local ny = ySum / trackedLocationCount + (yvSum / trackedLocationCount * framesPerSecond)
+		local nz = zSum / trackedLocationCount + (zvSum / trackedLocationCount * framesPerSecond)
+		displayInfo.location = { applyDamping(ox, nx, 0.4, dt), applyDamping(oy, ny, 0.4, dt), applyDamping(oz, nz, 0.4, dt) }
 		boundingDiagLength = max(camDiagMin, distance({ xMin, nil, zMin }, { xMax, nil, zMax }))
 	end
 
@@ -1154,9 +1154,9 @@ local function updateCamera(displayInfo, dt)
 		-- Rotate and zoom camera. Rotation adapts faster.
 		local trx = -atan2(cy - ey, cz - ez)
 		local try = atan2(cx - ex, cz - ez) + math.pi
-		crx = rollingAverage(crx, trx, 0.5, dt)
-		cry = rollingAverage(cry, try, 0.6, dt)
-		cfov = rollingAverage(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.8, dt)
+		crx = applyDamping(crx, trx, 0.5, dt)
+		cry = applyDamping(cry, try, 0.6, dt)
+		cfov = applyDamping(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.8, dt)
 
 		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov }
 	end
