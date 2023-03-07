@@ -1127,7 +1127,10 @@ local function updateCamera(dt)
 		local ny = ySum / trackedLocationCount + yvSum / trackedLocationCount * framesPerSecond
 		local nz = zSum / trackedLocationCount + zvSum / trackedLocationCount * framesPerSecond
 		display.location = { applyDamping(ox, nx, 0.4, dt), applyDamping(oy, ny, 0.4, dt), applyDamping(oz, nz, 0.4, dt) }
-		boundingDiagLength = max(camDiagMin, distance({ xMin, nil, zMin }, { xMax, nil, zMax }))
+		boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
+		-- Smoothly grade from camDiagMin to the boundingDiagLength when the latter is 2x the former
+		boundingDiagLength = boundingDiagLength + max(0, camDiagMin - boundingDiagLength * 0.5)
+		boundingDiagLength = max(camDiagMin, boundingDiagLength)
 	end
 
 	if userCameraOverrideFrame >= spGetGameFrame() then
