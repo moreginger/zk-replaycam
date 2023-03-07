@@ -107,7 +107,7 @@ end
 
 local function applyDamping(old, new, rollingFraction, dt)
 	dt = dt or 1
-	local newFraction = rollingFraction * dt
+	local newFraction = (1 - rollingFraction) * dt
 	return (1 - newFraction) * old + newFraction * new
 end
 
@@ -1126,7 +1126,7 @@ local function updateCamera(dt)
 		local nx = xSum / trackedLocationCount + xvSum / trackedLocationCount * framesPerSecond
 		local ny = ySum / trackedLocationCount + yvSum / trackedLocationCount * framesPerSecond
 		local nz = zSum / trackedLocationCount + zvSum / trackedLocationCount * framesPerSecond
-		display.location = { applyDamping(ox, nx, 0.4, dt), applyDamping(oy, ny, 0.4, dt), applyDamping(oz, nz, 0.4, dt) }
+		display.location = { applyDamping(ox, nx, 0.5, dt), applyDamping(oy, ny, 0.5, dt), applyDamping(oz, nz, 0.5, dt) }
 		boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
 		-- Smoothly grade from camDiagMin to the boundingDiagLength when the latter is 2x the former
 		boundingDiagLength = boundingDiagLength + max(0, camDiagMin - boundingDiagLength * 0.5)
@@ -1145,14 +1145,18 @@ local function updateCamera(dt)
 	local ex, ey, ez = unpack(display.location)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Where do we *want* the camera to be ie: (t)arget
-	-- First calculate where it would be if correctly positioned
 	local tcDist = calcCamRange(boundingDiagLength, defaultFov)
-	local tcx, tcy, tcz = ex, ey + tcDist * sin(-display.camAngle), ez + tcDist * cos(-display.camAngle)
+	local try = atan2(cx - ex, cz - ez) + pi
+	-- Limit how much we rotate based on how far we are from the event
+	try = cry + (try - cry) * min(1, 0.25 * length(ex - cx, ey - cy, ez - cz) / tcDist)
+	-- Calculate target position
+	local tcDist2d = tcDist * cos(-display.camAngle)
+	local tcx, tcy, tcz = ex + tcDist2d * cos(try - pi / 2), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * sin(try - pi / 2)
 
 	if (length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance) then
-		camera = initCamera(ex,  ey + tcDist * sin(-display.camAngle), ez + tcDist * cos(-display.camAngle), display.camAngle, defaultRy)
+		tcx, tcy, tcz = ex + tcDist2d * cos(defaultRy - pi / 2), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * sin(defaultRy - pi / 2)
+		camera = initCamera(tcx, tcy, tcz, display.camAngle, defaultRy)
 	else
-		tcx, tcy, tcz = ex, ey + tcDist * sin(-display.camAngle), ez + tcDist * cos(-display.camAngle)
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
 		local px, py, pz = cx, cy, cz
@@ -1184,12 +1188,10 @@ local function updateCamera(dt)
 		cy = cy + dt * cyv
 		cz = cz + dt * czv
 
-		-- Rotate and zoom camera. Rotation adapts faster.
-		local trx = -atan2(cy - ey, cz - ez)
-		local try = atan2(cx - ex, cz - ez) + math.pi
-		crx = applyDamping(crx, trx, 0.5, dt)
+		-- Rotate and zoom camera.
+		crx = applyDamping(crx, -atan2(cy - ey, cz - ez), 0.5, dt)
 		cry = applyDamping(cry, try, 0.6, dt)
-		cfov = applyDamping(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.8, dt)
+		cfov = applyDamping(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
 
 		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov }
 	end
