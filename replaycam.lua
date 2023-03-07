@@ -546,21 +546,23 @@ local camDiagMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSi
 local initialCameraState, display, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
-local function removeEvent(event)
-	if event == headEvent then
-		headEvent = event.previous
+-- Removes element from linked list and returns new head/tail.
+local function removeElement(element, head, tail)
+	if element == head then
+		head = element.previous
 	end
-	if event == tailEvent then
-		tailEvent = event.next
+	if element == tail then
+		tail = element.next
 	end
-	if event.previous then
-		event.previous.next = event.next
+	if element.previous then
+		element.previous.next = element.next
 	end
-	if event.next then
-		event.next.previous = event.previous
+	if element.next then
+		element.next.previous = element.previous
 	end
-	event.previous = nil
-	event.next = nil
+	element.previous = nil
+	element.next = nil
+	return head, tail
 end
 
 -- deferFunc - Optional function taking the event as a parameter.
@@ -588,7 +590,7 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 		local importanceAtFrame = event:importanceAtFrame(frame)
 		if importanceAtFrame <= 0 then
 			-- Just remove the event forever.
-			removeEvent(event)
+			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 		elseif event.type == type and event.sbj == sbj and distance(event.location, location) < eventMergeRange then
 			-- Merge new event into old.
 			event.importance = importanceAtFrame + importance
@@ -604,7 +606,7 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 			end
 
 			-- Remove it and attach at head later.
-			removeEvent(event)
+			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 
 			-- We merged, so break.
 			break
@@ -652,7 +654,7 @@ local function purgeEventsOfUnit(unitID)
 		if event.type ~= unitDestroyedEventType then
 			event:removeUnit(unitID)
 			if event:unitCount() == 0 then
-				removeEvent(event)
+				headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 			end
 		end
 		event = nextEvent
@@ -676,7 +678,7 @@ local function _processEvent(currentFrame, event)
 		-- TODO: Check if event in command queue, if not then remove it.
 		local defer, abort = event.deferFunc(event)
 		if abort or event.deferredFrom - currentFrame > framesPerSecond * 8 then
-			removeEvent(event)
+			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 			return
 		elseif defer then
 			-- Try it again later.
@@ -687,7 +689,7 @@ local function _processEvent(currentFrame, event)
 	end
 	local percentile = _getEventPercentile(currentFrame, event)
 	if not percentile then
-		removeEvent(event)
+		headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 	end
 	return percentile
 end
@@ -880,7 +882,7 @@ function widget:GameFrame(frame)
 	if newEvent and newEvent ~= showingEvent then
 		-- Avoid coming back to the previous event
 		if showingEvent then
-			removeEvent(showingEvent)
+			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
 		end
 
 		-- Set a standard decay so that we don't show the event for too long.
