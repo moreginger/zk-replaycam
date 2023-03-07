@@ -536,16 +536,6 @@ local eventStatistics = EventStatistics:new({
 
 local tailEvent, headEvent, showingEvent
 
--- EVENT DISPLAY
-
-local function initCamera(cx, cy, cz, rx, ry)
-	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov }
-end
-
-local camDiagMin, cameraAccel, maxPanDistance, mapEdgeBorder = 1000, worldGridSize * 1.2, worldGridSize * 3, worldGridSize * 0.5
-local initialCameraState, display, camera
-local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
-
 -- Removes element from linked list and returns new head/tail.
 local function removeElement(element, head, tail)
 	if element == head then
@@ -713,7 +703,23 @@ local function selectMostImportantEvent()
 	return mie
 end
 
-local function toDisplayInfo(event, frame)
+-- EVENT DISPLAY
+
+local camDiagMin = 1000
+local cameraAccel = worldGridSize * 1.2
+local maxPanDistance = worldGridSize * 3
+local mapEdgeBorder = worldGridSize * 0.5
+local keepTrackingRange = worldGridSize * 1.5
+
+local display = { camAngle = defaultRx, commentary = "The quiet before the storm", location = nil, tracking = nil }
+local initialCameraState, camera
+local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
+
+local function initCamera(cx, cy, cz, rx, ry)
+	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov }
+end
+
+local function updateDisplay(event)
 	local camAngle, commentary = defaultRx, nil
 	local actorID = pairs(event.actors)(event.actors)
 
@@ -747,11 +753,27 @@ local function toDisplayInfo(event, frame)
 		commentary = event.sbj .. " captured by " .. actorName
 	end
 
-	local tracking = {}
+	display.camAngle = camAngle
+	display.commentary = commentary
+	display.location = event.location
+
+	-- We use keepPrevious to keep runs of track infos from the same event
+	local keepPrevious = false
 	for k, v in pairs(event._units) do
-		tracking[k] = v
+		display.tracking = { unitID = k, location = v, previous = display.tracking, keepPrevious = keepPrevious }
+		keepPrevious = true
 	end
-	return { camAngle = camAngle, commentary = commentary, location = event.location, shownAt = frame, tracking = tracking }
+
+	-- Remove duplicates from tracking
+	local tracked, trackInfo = {}, display.tracking
+	while trackInfo do
+		if tracked[trackInfo.unitID] then
+			_, display.tracking = removeElement(trackInfo, nil, display.tracking)
+		else
+			tracked[trackInfo.unitID] = true
+		end
+		trackInfo = trackInfo.previous
+	end
 end
 
 local function setupPanels()
@@ -857,7 +879,7 @@ function widget:GameFrame(frame)
 		return
 	end
 
-	if display then
+	if display.location then
 		local x, _, z = unpack(display.location)
 		interestGrid:setWatching(x, z)
 	end
@@ -885,13 +907,10 @@ function widget:GameFrame(frame)
 			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
 		end
 
-		-- Set a standard decay so that we don't show the event for too long.
-		newEvent.decay = 0.20
-		newEvent.started = frame
-
-		display = toDisplayInfo(newEvent, frame)
-
+		updateDisplay(newEvent, frame)
 		commentary_cpl:SetText(display.commentary)
+		-- Set a standard decay so that we don't show the event for too long.
+		newEvent.decay, newEvent.started = 0.20, frame
 
 		showingEvent = newEvent
 	end
@@ -1068,28 +1087,37 @@ local function updateCamera(dt)
 		return
 	end
 
-	local tracking = display.tracking
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
-	for unit, location in pairs(tracking) do
+	local trackInfo, nextTrackInfo = display.tracking, nil
+	while trackInfo do
 		local x, y, z
-		if unit > 0 then
-			x, y, z = spGetUnitPosition(unit)
-			local xv, yv, zv = spGetUnitVelocity(unit)
+		if not trackInfo.isDead then
+			x, y, z = spGetUnitPosition(trackInfo.unitID)
+			local xv, yv, zv = spGetUnitVelocity(trackInfo.unitID)
 			if x and y and z and xv and yv and zv then
 				xvSum, yvSum, zvSum = xvSum + xv, yvSum + yv, zvSum + zv
-				tracking[unit] = { x, y, z }
+				trackInfo.location = { x, y, z }
 			else
-				x, y, z = unpack(location)
-				tracking[-unit] = location
-				tracking[unit] = nil
+				trackInfo.isDead = true
+				x, y, z = unpack(trackInfo.location)
 			end
 		else
-			x, y, z = unpack(location)
+			x, y, z = unpack(trackInfo.location)
 		end
-		xMin, xMax, zMin, zMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
-		xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
-		trackedLocationCount = trackedLocationCount + 1
+
+		-- Accumulate tracking info if not too distant
+		local nxMin, nxMax, nzMin, nzMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
+		if nextTrackInfo and nextTrackInfo.keepPrevious or distance({ nxMin, nil, nzMin }, { nxMax, nil, nzMax }) <= keepTrackingRange then
+			xMin, xMax, zMin, zMax = nxMin, nxMax, nzMin, nzMax
+			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
+			trackedLocationCount = trackedLocationCount + 1
+			nextTrackInfo = trackInfo
+			trackInfo = trackInfo.previous
+		else
+			nextTrackInfo.previous = nil
+			trackInfo = nil
+		end
 	end
 
 	local boundingDiagLength = camDiagMin
