@@ -888,9 +888,10 @@ function widget:GameFrame(frame)
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
 		if #units > 0 then
-			local event = addEvent(nil, 10 * igMax, { igX, 0, igZ }, nil, hotspotEventType, nil, nil)
+			local event = addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, nil, nil)
 			for _, unitID in pairs(units) do
-				event:addUnit(unitID, { igX, 0, igZ })
+				local x, y, z = unitInfo:get(unitID)
+				event:addUnit(unitID, { x, y, z })
 			end
 		end
 	end
