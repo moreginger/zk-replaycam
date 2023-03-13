@@ -717,8 +717,7 @@ local maxPanDistance = worldGridSize * 3
 local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 1.5
 
-local display = { camAngle = defaultRx, camType = camTypeTracking, location = nil, tracking = nil }
-local initialCameraState, camera
+local display, initialCameraState, camera = {}, nil, nil
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
 local function initCamera(cx, cy, cz, rx, ry, type)
@@ -1092,10 +1091,6 @@ local function calcCamRange(diag, fov)
 end
 
 local function updateCamera(dt)
-	if not display then
-		return
-	end
-
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	local trackInfo, nextTrackInfo = display.tracking, nil
@@ -1162,10 +1157,10 @@ local function updateCamera(dt)
 	local tcDist2d = tcDist * cos(-display.camAngle)
 	local tcx, tcy, tcz = ex + tcDist2d * cos(try - pi / 2), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * sin(try - pi / 2)
 
-	if (length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance) then
+	if camera.type == camTypeOverview or length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance then
 		tcx, tcy, tcz = ex + tcDist2d * cos(defaultRy - pi / 2), tcy, ez + tcDist2d * sin(defaultRy - pi / 2)
 		camera = initCamera(tcx, tcy, tcz, display.camAngle, defaultRy, display.camType)
-	elseif camera.type ~= camTypeOverview then
+	else
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
 		local px, py, pz = cx, cy, cz
