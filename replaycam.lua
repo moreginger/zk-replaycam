@@ -65,7 +65,7 @@ local framesPerSecond = 30
 
 local debug = true
 local updateIntervalFrames = framesPerSecond
-local defaultFov, defaultRx, defaultRy = 45, -1.2, pi
+local defaultFov, defaultRx, defaultRy, maxCamRPerSecond = 45, -1.0, pi, pi / 16
 
 -- UTILITY FUNCTIONS
 
@@ -1151,14 +1151,13 @@ local function updateCamera(dt)
 	-- Where do we *want* the camera to be ie: (t)arget
 	local tcDist = calcCamRange(boundingDiagLength, defaultFov)
 	local try = atan2(cx - ex, cz - ez) + pi
-	-- Limit how much we rotate based on how far we are from the event
-	try = cry + (try - cry) * min(1, 0.25 * length(ex - cx, ey - cy, ez - cz) / tcDist)
+	try = symmetricBound(try, cry, maxCamRPerSecond * dt)
 	-- Calculate target position
 	local tcDist2d = tcDist * cos(-display.camAngle)
-	local tcx, tcy, tcz = ex + tcDist2d * cos(try - pi / 2), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * sin(try - pi / 2)
+	local tcx, tcy, tcz = ex + tcDist2d * sin(try - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(try - pi)
 
 	if camera.type == camTypeOverview or length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance then
-		tcx, tcy, tcz = ex + tcDist2d * cos(defaultRy - pi / 2), tcy, ez + tcDist2d * sin(defaultRy - pi / 2)
+		tcx, tcy, tcz = ex + tcDist2d * sin(defaultRy - pi), tcy, ez + tcDist2d * cos(defaultRy - pi)
 		camera = initCamera(tcx, tcy, tcz, display.camAngle, defaultRy, display.camType)
 	else
 		-- Project out current vector
@@ -1193,9 +1192,8 @@ local function updateCamera(dt)
 		cz = cz + dt * czv
 
 		-- Rotate and zoom camera
-		local maxRyPerSecond = pi / 18
-		crx = applyDamping(crx, -atan2(cy - ey, cz - ez), 0.5, dt)
-		cry = symmetricBound(applyDamping(cry, try, 0.6, dt), cry, maxRyPerSecond * dt)
+		crx = symmetricBound(applyDamping(crx, -atan2(cy - ey, length(cx - ex, cz - ez)), 0.5, dt), crx, maxCamRPerSecond * dt)
+		cry = try
 		cfov = applyDamping(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
 
 		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov }
