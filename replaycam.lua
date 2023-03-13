@@ -709,22 +709,24 @@ end
 
 -- EVENT DISPLAY
 
+local camTypeTracking = 'tracking'
+local camTypeOverview = 'overview'
 local camDiagMin = 1000
 local cameraAccel = worldGridSize * 1.2
 local maxPanDistance = worldGridSize * 3
 local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 1.5
 
-local display = { camAngle = defaultRx, commentary = "The quiet before the storm", location = nil, tracking = nil }
+local display = { camAngle = defaultRx, camType = camTypeTracking, location = nil, tracking = nil }
 local initialCameraState, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
-local function initCamera(cx, cy, cz, rx, ry)
-	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov }
+local function initCamera(cx, cy, cz, rx, ry, type)
+	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov, type = type }
 end
 
 local function updateDisplay(event)
-	local camAngle, commentary = defaultRx, nil
+	local camAngle, camType, commentary = defaultRx, camTypeTracking, nil
 	local actorID = pairs(event.actors)(event.actors)
 
 	local actorName = "unknown"
@@ -738,6 +740,7 @@ local function updateDisplay(event)
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
 		camAngle = - pi / 2
+		camType = camTypeOverview
 		commentary = "Let's get an overview of the battlefield"
 	elseif event.type == unitBuiltEventType then
 		commentary = event.sbj .. " built by " .. actorName
@@ -758,7 +761,7 @@ local function updateDisplay(event)
 	end
 
 	display.camAngle = camAngle
-	display.commentary = commentary
+	display.camType = camType
 	display.location = event.location
 
 	-- We use keepPrevious to keep runs of track infos from the same event
@@ -778,6 +781,8 @@ local function updateDisplay(event)
 		end
 		trackInfo = trackInfo.previous
 	end
+
+	commentary_cpl:SetText(commentary)
 end
 
 local function setupPanels()
@@ -873,7 +878,7 @@ function widget:Initialize()
 	initialCameraState = spGetCameraState()
 
 	local cx, cy, cz = spGetCameraPosition()
-	camera = initCamera(cx, cy, cz, defaultRx, defaultRy)
+	camera = initCamera(cx, cy, cz, defaultRx, defaultRy, camTypeTracking)
 end
 
 function widget:GameFrame(frame)
@@ -912,8 +917,7 @@ function widget:GameFrame(frame)
 			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
 		end
 
-		updateDisplay(newEvent, frame)
-		commentary_cpl:SetText(display.commentary)
+		updateDisplay(newEvent)
 		-- Set a standard decay so that we don't show the event for too long.
 		newEvent.decay, newEvent.started = 0.20, frame
 
@@ -1160,8 +1164,8 @@ local function updateCamera(dt)
 
 	if (length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance) then
 		tcx, tcy, tcz = ex + tcDist2d * cos(defaultRy - pi / 2), tcy, ez + tcDist2d * sin(defaultRy - pi / 2)
-		camera = initCamera(tcx, tcy, tcz, display.camAngle, defaultRy)
-	else
+		camera = initCamera(tcx, tcy, tcz, display.camAngle, defaultRy, display.camType)
+	elseif camera.type ~= camTypeOverview then
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
 		local px, py, pz = cx, cy, cz
