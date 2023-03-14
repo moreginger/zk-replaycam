@@ -41,6 +41,7 @@ local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
 local spGetUnitDefID = Spring.GetUnitDefID
 local spGetUnitHealth = Spring.GetUnitHealth
+local spGetUnitNoDraw = Spring.GetUnitNoDraw
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spGetUnitsInRectangle = Spring.GetUnitsInRectangle
@@ -338,15 +339,25 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 		end
 		return false
 	end
+
+	local noDraw = spGetUnitNoDraw(unitID)
+	if noDraw then
+		-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
+		-- Don't update or ping in this state. Return true unless we have nothing cached
+		return cacheObject[4] and cacheObject[5] and cacheObject[6] and cacheObject[7]
+	end
+
 	local v = length(xv, zv)
 	cacheObject[4] = x
 	cacheObject[5] = y
 	cacheObject[6] = z
 	cacheObject[7] = v
+
 	if self.locationListener then
 		local isMoving = v > 0.1
 		self.locationListener(x, y, z, cacheObject[1], isMoving)
 	end
+
 	return true
 end
 
@@ -356,7 +367,9 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 		unitDefID = spGetUnitDefID(unitID)
 	end
 	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, 0 }
-	self:_updatePosition(unitID, cacheObject)
+	if not self:_updatePosition(unitID, cacheObject) then
+		return
+	end
 	self.cache[unitID] = cacheObject
 	return self:get(unitID)
 end
@@ -1046,13 +1059,18 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	local x, y, z, importance = unitInfo:forget(unitID)
 	purgeEventsOfUnit(unitID)
 
-	if (not attackerTeam) then
+	if not x or not y or not z or not importance then
+		-- Might happen if an uncached unit is destroyed and fails to retrieve current location
+		return
+	end
+
+	if not attackerTeam then
 		-- Attempt to ignore cancelled builds and other similar things like comm upgrade
 		return
 	end
 
 	local unitDef = UnitDefs[unitDefID]
-	if (unitDef.customParams.dontcount) then
+	if unitDef.customParams.dontcount then
 		-- Ignore dontcount units e.g. terraunit
 		return
 	end
@@ -1095,21 +1113,21 @@ local function updateCamera(dt)
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	local trackInfo, nextTrackInfo = display.tracking, nil
 	while trackInfo do
-		local x, y, z
 		if not trackInfo.isDead then
-			x, y, z = spGetUnitPosition(trackInfo.unitID)
+			-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
+			local noDraw = spGetUnitNoDraw(trackInfo.unitID)
+			local x, y, z = spGetUnitPosition(trackInfo.unitID)
 			local xv, yv, zv = spGetUnitVelocity(trackInfo.unitID)
-			if x and y and z and xv and yv and zv then
+			if not x or not y or not z or not xv or not yv or not zv then
+				trackInfo.isDead = true
+			elseif not noDraw then
 				xvSum, yvSum, zvSum = xvSum + xv, yvSum + yv, zvSum + zv
 				trackInfo.location = { x, y, z }
-			else
-				trackInfo.isDead = true
-				x, y, z = unpack(trackInfo.location)
 			end
-		else
-			x, y, z = unpack(trackInfo.location)
 		end
 
+		local x, y, z = unpack(trackInfo.location)
+		
 		-- Accumulate tracking info if not too distant
 		local nxMin, nxMax, nzMin, nzMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
 		if nextTrackInfo and nextTrackInfo.keepPrevious or distance({ nxMin, nil, nzMin }, { nxMax, nil, nzMax }) <= keepTrackingRange then
