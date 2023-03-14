@@ -1192,11 +1192,10 @@ local function updateCamera(dt)
 		cz = cz + dt * czv
 
 		-- Rotate and zoom camera
-		crx = symmetricBound(applyDamping(crx, -atan2(cy - ey, length(cx - ex, cz - ez)), 0.5, dt), crx, maxCamRPerSecond * dt)
-		cry = try
+		crx = symmetricBound(-atan2(cy - ey, length(cx - ex, cz - ez)), crx, maxCamRPerSecond * dt)
 		cfov = applyDamping(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
 
-		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov }
+		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = try, fov = cfov }
 	end
 
 	local cameraState = spGetCameraState()
