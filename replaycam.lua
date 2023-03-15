@@ -579,7 +579,7 @@ end
 local function addEvent(actor, importance, location, meta, type, unit, unitDef, deferFunc)
 	local frame = spGetGameFrame()
 	local sbj = {}
-	if unit then
+	if unit and unitDef then
 		sbj = spGetHumanName(UnitDefs[unitDef], unit)
 	end
 	local decay = decayPerSecond[type]
@@ -651,6 +651,15 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 	end
 
 	return event
+end
+
+local function addOverviewEvent(importance)
+	local overviewY = spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2)
+	local overviewEvent = addEvent(nil, importance, { mapSizeX / 2, overviewY, mapSizeZ / 2 }, nil, overviewEventType, -1, nil)
+	-- Set two "units" at the corners so that we calculate the correct camera range
+	overviewEvent:addUnit(-2, { 0, overviewY, 0})
+	overviewEvent:addUnit(-3, { mapSizeX, overviewY, mapSizeZ})
+	return overviewEvent
 end
 
 local function purgeEventsOfUnit(unitID)
@@ -730,7 +739,7 @@ local maxPanDistance = worldGridSize * 3
 local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 1.5
 
-local display, initialCameraState, camera = {}, nil, nil
+local display, initialCameraState, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
 local function initCamera(cx, cy, cz, rx, ry, type)
@@ -774,7 +783,6 @@ local function updateDisplay(event)
 
 	display.camAngle = camAngle
 	display.camType = camType
-	display.location = event.location
 
 	-- We use keepPrevious to keep runs of track infos from the same event
 	local keepPrevious = false
@@ -890,6 +898,11 @@ function widget:Initialize()
 	initialCameraState = spGetCameraState()
 
 	local cx, cy, cz = spGetCameraPosition()
+	display = {
+		location = { -10000, -10000, -10000 },
+		velocity = { 0, 0, 0 }
+	}
+	updateDisplay(addOverviewEvent(1))
 	camera = initCamera(cx, cy, cz, defaultRx, defaultRy, camTypeTracking)
 end
 
@@ -900,27 +913,22 @@ function widget:GameFrame(frame)
 		return
 	end
 
-	if display.location then
-		local x, _, z = unpack(display.location)
-		interestGrid:setWatching(x, z)
-	end
+	local x, _, z = unpack(display.location)
+	interestGrid:setWatching(x, z)
 
 	local _, igMax, igX, igZ = interestGrid:statistics()
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
 		if #units > 0 then
-			local event = addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, nil, nil)
+			local hotspotEvent = addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, -1, nil)
 			for _, unitID in pairs(units) do
 				local x, y, z = unitInfo:get(unitID)
-				event:addUnit(unitID, { x, y, z })
+				hotspotEvent:addUnit(unitID, { x, y, z })
 			end
 		end
 	end
-	local overviewY = spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2)
-	local overviewEvent = addEvent(nil, 100 / igMax, { mapSizeX / 2, overviewY, mapSizeZ / 2 }, nil, overviewEventType, nil, nil)
-	-- Set two "units" at the corners so that we calculate the correct camera range
-	overviewEvent:addUnit(-1, { 0, overviewY, 0})
-	overviewEvent:addUnit(-2, { mapSizeX, overviewY, mapSizeZ})
+
+	addOverviewEvent(100 / igMax)
 
 	local newEvent = selectMostImportantEvent()
 	if newEvent and newEvent ~= showingEvent then
@@ -1145,18 +1153,24 @@ local function updateCamera(dt)
 	local boundingDiagLength = camDiagMin
 	if trackedLocationCount > 0 then
 		local ox, oy, oz = unpack(display.location)
-		local nx = xSum / trackedLocationCount + xvSum / trackedLocationCount * framesPerSecond
-		local ny = ySum / trackedLocationCount + yvSum / trackedLocationCount * framesPerSecond
-		local nz = zSum / trackedLocationCount + zvSum / trackedLocationCount * framesPerSecond
-		display.location = { applyDamping(ox, nx, 0.5, dt), applyDamping(oy, ny, 0.5, dt), applyDamping(oz, nz, 0.5, dt) }
+		local oxv, oyv, ozv = unpack(display.velocity)
+		local nx = xSum / trackedLocationCount
+		local ny = ySum / trackedLocationCount
+		local nz = zSum / trackedLocationCount
+		-- Apply damping to location if relatively close, to avoid overly twitchy camera
+		if length(ox - nx, oy - ny, oz - nz) < eventMergeRange then
+			display.location = { applyDamping(ox, nx, 0.8, dt), applyDamping(oy, ny, 0.8, dt), applyDamping(oz, nz, 0.8, dt) }
+		else
+		  display.location = { nx, ny, nz }
+		end
+		local nxv = xvSum / trackedLocationCount * framesPerSecond
+		local nyv = yvSum / trackedLocationCount * framesPerSecond
+		local nzv = zvSum / trackedLocationCount * framesPerSecond
+		display.velocity = { applyDamping(oxv, nxv, 0.8, dt), applyDamping(oyv, nyv, 0.8, dt), applyDamping(ozv, nzv, 0.8, dt)}
 		boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
 		-- Smoothly grade from camDiagMin to the boundingDiagLength when the latter is 2x the former
 		boundingDiagLength = boundingDiagLength + max(0, camDiagMin - boundingDiagLength * 0.5)
 		boundingDiagLength = max(camDiagMin, boundingDiagLength)
-	end
-
-	if userCameraOverrideFrame >= spGetGameFrame() then
-		return
 	end
 
 	-- Smoothly move to the location of the event.
@@ -1165,6 +1179,8 @@ local function updateCamera(dt)
 	local crx, cry, cfov = camera.rx, camera.ry, camera.fov
 	-- Event location
 	local ex, ey, ez = unpack(display.location)
+	local exv, eyv, ezv = unpack(display.velocity)
+	ex, ey, ez = ex + exv, ey + eyv, ez + ezv
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Where do we *want* the camera to be ie: (t)arget
 	local tcDist = calcCamRange(boundingDiagLength, defaultFov)
@@ -1225,6 +1241,10 @@ local function updateCamera(dt)
 	cameraState.ry = camera.ry
 	cameraState.rz = 0
 	cameraState.fov = camera.fov
+
+	if userCameraOverrideFrame >= spGetGameFrame() then
+		return
+	end
 
 	spSetCameraState(cameraState)
 end
