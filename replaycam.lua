@@ -541,7 +541,7 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		attack = 1.3,
-		hotspot = 0.5,
+		hotspot = 0.7,
 		overview = 4.4,
 		unitBuilt = 4.2,
 		unitDamaged = 0.7,
@@ -639,8 +639,6 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 		end
 	end
 
-	eventStatistics:logEvent(type, importance * interestGrid:getScore(location[1], location[3]))
-
 	if (headEvent == nil) then
 		tailEvent = event
 		headEvent = event
@@ -710,10 +708,22 @@ local function _processEvent(currentFrame, event)
 	return percentile
 end
 
-local function selectMostImportantEvent()
-	local currentFrame = spGetGameFrame()
+local function selectMostInterestingEvent(currentFrame)
+	local event = tailEvent
+	-- Update event statistics with current interest grid
+	while event ~= nil do
+		local x, _, z = unpack(event.location)
+		eventStatistics:logEvent(event.type, event.importance * interestGrid:getScore(x, z))
+		event = event.next
+	end
 	-- Make sure we always include current event even if it's not in the list.
-	local mie, mostPercentile, event = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent) or 0, tailEvent
+	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent) or 0
+	-- It's fine to let other event types be rapidly replaced as the location is sticky,
+	-- but for overview we need to force a minimum view time or it looks bad
+	if mie and mie.type == overviewEventType and currentFrame - mie.started < framesPerSecond * 4 then
+		mostPercentile = 1
+	end
+	event = tailEvent
 	while event ~= nil do
 		-- Get next event before we process the current one, as this may nil out .next.
 		local nextEvent = event.next
@@ -930,18 +940,18 @@ function widget:GameFrame(frame)
 
 	addOverviewEvent(100 / igMax)
 
-	local newEvent = selectMostImportantEvent()
-	if newEvent and newEvent ~= showingEvent then
+	local mie = selectMostInterestingEvent(frame)
+	if mie and mie ~= showingEvent then
 		-- Avoid coming back to the previous event
 		if showingEvent then
 			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
 		end
 
-		updateDisplay(newEvent)
+		updateDisplay(mie)
 		-- Set a standard decay so that we don't show the event for too long.
-		newEvent.decay, newEvent.started = 0.20, frame
+		mie.decay, mie.started = 0.20, frame
 
-		showingEvent = newEvent
+		showingEvent = mie
 	end
 
 	interestGrid:reset()
