@@ -1167,16 +1167,17 @@ local function updateCamera(dt)
 		local nx = xSum / trackedLocationCount
 		local ny = ySum / trackedLocationCount
 		local nz = zSum / trackedLocationCount
-		-- Apply damping to location if relatively close, to avoid overly twitchy camera
-		if length(ox - nx, oy - ny, oz - nz) < eventMergeRange then
-			display.location = { applyDamping(ox, nx, 0.8, dt), applyDamping(oy, ny, 0.8, dt), applyDamping(oz, nz, 0.8, dt) }
-		else
-		  display.location = { nx, ny, nz }
-		end
 		local nxv = xvSum / trackedLocationCount * framesPerSecond
 		local nyv = yvSum / trackedLocationCount * framesPerSecond
 		local nzv = zvSum / trackedLocationCount * framesPerSecond
-		display.velocity = { applyDamping(oxv, nxv, 0.8, dt), applyDamping(oyv, nyv, 0.8, dt), applyDamping(ozv, nzv, 0.8, dt)}
+		-- Apply damping to location if relatively close, to avoid overly twitchy camera
+		if length(ox - nx, oy - ny, oz - nz) < eventMergeRange then
+			display.location = { applyDamping(ox, nx, 0.8, dt), applyDamping(oy, ny, 0.8, dt), applyDamping(oz, nz, 0.8, dt) }
+			display.velocity = { applyDamping(oxv, nxv, 0.8, dt), applyDamping(oyv, nyv, 0.8, dt), applyDamping(ozv, nzv, 0.8, dt)}
+		else
+		  display.location = { nx, ny, nz }
+			display.velocity = { nxv, nyv, nzv }
+		end
 		boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
 		-- Smoothly grade from camDiagMin to the boundingDiagLength when the latter is 2x the former
 		boundingDiagLength = boundingDiagLength + max(0, camDiagMin - boundingDiagLength * 0.5)
