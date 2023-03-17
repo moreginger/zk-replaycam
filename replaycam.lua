@@ -718,11 +718,6 @@ local function selectMostInterestingEvent(currentFrame)
 	end
 	-- Make sure we always include current event even if it's not in the list.
 	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent) or 0
-	-- It's fine to let other event types be rapidly replaced as the location is sticky,
-	-- but for overview we need to force a minimum view time or it looks bad
-	if mie and mie.type == overviewEventType and currentFrame - mie.started < framesPerSecond * 4 then
-		mostPercentile = 1
-	end
 	event = tailEvent
 	while event ~= nil do
 		-- Get next event before we process the current one, as this may nil out .next.
@@ -756,7 +751,11 @@ local function initCamera(cx, cy, cz, rx, ry, type)
 	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov, type = type }
 end
 
-local function updateDisplay(event)
+local function updateDisplay(event, frame)
+	if display.noUpdateBeforeFrame > frame then
+		return false
+	end
+
 	local camAngle, camType, commentary = defaultRx, camTypeTracking, nil
 	local actorID = pairs(event.actors)(event.actors)
 
@@ -792,6 +791,10 @@ local function updateDisplay(event)
 	end
 
 	display.camAngle = camAngle
+	if display.camType ~= camType then
+		-- It looks especially naff if we flip between camera types every second
+		display.noUpdateBeforeFrame = frame + framesPerSecond * 4
+	end
 	display.camType = camType
 
 	-- We use keepPrevious to keep runs of track infos from the same event
@@ -910,9 +913,10 @@ function widget:Initialize()
 	local cx, cy, cz = spGetCameraPosition()
 	display = {
 		location = { -10000, -10000, -10000 },
+		noUpdateBeforeFrame = 0,
 		velocity = { 0, 0, 0 }
 	}
-	updateDisplay(addOverviewEvent(1))
+	updateDisplay(addOverviewEvent(1), 0)
 	camera = initCamera(cx, cy, cz, defaultRx, defaultRy, camTypeTracking)
 end
 
@@ -941,16 +945,14 @@ function widget:GameFrame(frame)
 	addOverviewEvent(100 / igMax)
 
 	local mie = selectMostInterestingEvent(frame)
-	if mie and mie ~= showingEvent then
-		-- Avoid coming back to the previous event
+	if mie and mie ~= showingEvent and updateDisplay(mie, frame) then
 		if showingEvent then
+			-- Avoid showing it again
 			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
 		end
 
-		updateDisplay(mie)
 		-- Set a standard decay so that we don't show the event for too long.
 		mie.decay, mie.started = 0.20, frame
-
 		showingEvent = mie
 	end
 
