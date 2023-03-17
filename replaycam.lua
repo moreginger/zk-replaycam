@@ -763,7 +763,7 @@ local function selectMostInterestingEvent(currentFrame)
 		event = nextEvent
 	end
 	if debug and mie then
-		spEcho('mie:', mie.type, mie.sbj, mostPercentile)
+		spEcho('mie:', mie.type, mie.sbj, mostPercentile, currentFrame)
 	end
 	return mie
 end
@@ -1171,6 +1171,10 @@ local function calcCamRange(diag, fov)
 end
 
 local function updateCamera(dt)
+	if debug and dt > 0.05 then
+		spEcho('slow camera update', dt, spGetGameFrame())
+	end
+
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
 	local trackInfo, nextTrackInfo = display.tracking, nil
