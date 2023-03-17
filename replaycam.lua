@@ -855,7 +855,7 @@ function widget:Shutdown()
 end
 
 function widget:Initialize()
-	if not WG.Chili or not (spIsReplay() and spGetSpectatingState()) then
+	if not WG.Chili or not (spIsReplay() or spGetSpectatingState()) then
 		spEcho("DEACTIVATING " .. widget:GetInfo().name .. " as not spec")
 		widgetHandler:RemoveWidget()
 		return
