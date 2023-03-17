@@ -426,13 +426,15 @@ function Event:new(o)
 	setmetatable(o, self)
 	self.__index = self
 
+	o._excludes = {}
 	o._unitCount = 0
   o._units = {}
 	return o
 end
 
-function Event:importanceAtFrame(frame)
-  return self.importance * (1 - self.decay * (frame - self.started) / framesPerSecond)
+-- This event, if shown, excludes the other from being shown
+function Event:addExcludes(other)
+	self._excludes[other.id] = true
 end
 
 function Event:addUnit(unitID, location)
@@ -442,6 +444,14 @@ function Event:addUnit(unitID, location)
 		end
 		self._units[unitID] = location
 	end
+end
+
+function Event:excludes(other)
+	return self._excludes[other.id]
+end
+
+function Event:importanceAtFrame(frame)
+  return self.importance * (1 - self.decay * (frame - self.started) / framesPerSecond)
 end
 
 function Event:removeUnit(unitID)
@@ -515,6 +525,7 @@ local overviewEventType = "overview"
 local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
+local unitDestroyerEventType = "unitDestroyer"
 local unitMovingEventType = "unitMoving"
 local unitTakenEventType = "unitTaken"
 local eventTypes = {
@@ -524,6 +535,7 @@ local eventTypes = {
 	unitBuiltEventType,
 	unitDamagedEventType,
 	unitDestroyedEventType,
+	unitDestroyerEventType,
 	unitMovingEventType,
 	unitTakenEventType
 }
@@ -538,6 +550,7 @@ local decayPerSecond = {
 	unitBuilt = 0.05,
 	unitDamaged = 0.4,
 	unitDestroyed = 0.1,
+	unitDestroyer = 0.1,
 	unitMoving = 0.4,
 	unitTaken = 0.1,
 }
@@ -553,11 +566,13 @@ local eventStatistics = EventStatistics:new({
 		unitBuilt = 4.2,
 		unitDamaged = 0.7,
 		unitDestroyed = 0.6,
+		unitDestroyer = 1.0,
 		unitMoving = 2.0,
 		unitTaken = 0.2,
 	}
 }, eventTypes)
 
+local lastEventId = 0
 local tailEvent, headEvent, showingEvent
 
 -- Removes element from linked list and returns new head/tail.
@@ -629,12 +644,14 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 	end
 
 	if not event then
+		lastEventId = lastEventId + 1
 		event = Event:new({
 			actorCount = 1,
 			actors = initTable(actor, true),
-			deferFunc = deferFunc,
-			importance = importance,
 			decay = decay,
+			deferFunc = deferFunc,
+			id = lastEventId,
+			importance = importance,
 			location = location,
 			meta = meta,
 			sbj = sbj,
@@ -671,12 +688,22 @@ local function purgeEventsOfUnit(unitID)
 	local event = tailEvent
 	while event ~= nil do
 		local nextEvent = event.next
-		-- Keep unit if it was destroyed as we'll track its destroyed location.
 		if event.type ~= unitDestroyedEventType then
 			event:removeUnit(unitID)
 			if event:unitCount() == 0 then
 				headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 			end
+		end
+		event = nextEvent
+	end
+end
+
+local function purgeExcludedEvents(excluder)
+	local event = tailEvent
+	while event ~= nil do
+		local nextEvent = event.next
+		if excluder:excludes(event) then
+			removeElement(event, headEvent, tailEvent)
 		end
 		event = nextEvent
 	end
@@ -764,12 +791,12 @@ local function updateDisplay(event, frame)
 	end
 
 	local camAngle, camType, commentary = defaultRx, camTypeTracking, nil
-	local actorID = pairs(event.actors)(event.actors)
 
-	local actorName = "unknown"
-	if (actorID) then
-		actorName = teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeamName .. ")"
+	local actorName
+	for actorID, _ in pairs(event.actors) do
+		actorName = (actorName and "multiple") or teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeamName .. ")"
 	end
+	actorName = actorName or "unknown"
 
 	if event.type == attackEventType then
 		commentary = event.sbj .. " is attacking"
@@ -785,6 +812,8 @@ local function updateDisplay(event, frame)
 		commentary = event.sbj .. " under attack"
 	elseif event.type == unitDestroyedEventType then
 		commentary = event.sbj .. " destroyed by " .. actorName
+	elseif event.type == unitDestroyerEventType then
+		commentary = event.sbj .. " on a rampage"
 	elseif event.type == unitMovingEventType then
 		local quantityPrefix, unitCount = " ", event:unitCount()
 		if unitCount > 5 then
@@ -957,7 +986,7 @@ function widget:GameFrame(frame)
 			-- Avoid showing it again
 			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
 		end
-
+		purgeExcludedEvents(mie)
 		-- Set a standard decay so that we don't show the event for too long.
 		mie.decay, mie.started = 0.20, frame
 		showingEvent = mie
@@ -1102,9 +1131,15 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		return
 	end
 
-	local event = addEvent(attackerTeam, importance, { x, y, z }, nil, unitDestroyedEventType, unitID, unitDefID)
 	local ax, ay, az = unitInfo:get(attackerID)
-	event:addUnit(attackerID, { ax, ay, az })
+	local destroyedEvent = addEvent(attackerTeam, importance, { x, y, z }, nil, unitDestroyedEventType, unitID, unitDefID)
+	destroyedEvent:addUnit(attackerID, { ax, ay, az })
+	local destroyerEvent = addEvent(unitTeam, importance, { ax, ay, az}, nil, unitDestroyerEventType, attackerID, attackerDefID)
+	destroyerEvent:addUnit(unitID, { x, y, z })
+	-- It would be naff to show both
+	destroyedEvent:addExcludes(destroyerEvent)
+  destroyerEvent:addExcludes(destroyedEvent)
+
 	-- Areas where units are being destroyed are particularly interesting, and
 	-- also the destroyed unit will no longer count, so add some extra interest
 	-- here.
