@@ -116,6 +116,13 @@ local function applyDamping(old, new, rollingFraction, dt)
 	return (1 - newFraction) * old + newFraction * new
 end
 
+-- SPRING UTILS
+
+local function getUnitLocation(unitID)
+	local x, y, z = spGetUnitPosition(unitID)
+	return x and y and z and { x, y, z }
+end
+
 -- WORLD GRID CLASS
 -- Translates world coordinates into operations on a grid.
 
@@ -1095,9 +1102,9 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		return
 	end
 
-	local event = addEvent(attackerTeam, importance or unitDef.metalCost, { x, y, z }, nil, unitDestroyedEventType, unitID, unitDefID)
-	x, y, z = spGetUnitPosition(attackerID)
-	event:addUnit(attackerID, { x, y, z })
+	local event = addEvent(attackerTeam, importance, { x, y, z }, nil, unitDestroyedEventType, unitID, unitDefID)
+	local ax, ay, az = unitInfo:get(attackerID)
+	event:addUnit(attackerID, { ax, ay, az })
 	-- Areas where units are being destroyed are particularly interesting, and
 	-- also the destroyed unit will no longer count, so add some extra interest
 	-- here.
@@ -1136,13 +1143,13 @@ local function updateCamera(dt)
 		if not trackInfo.isDead then
 			-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
 			local noDraw = spGetUnitNoDraw(trackInfo.unitID)
-			local x, y, z = spGetUnitPosition(trackInfo.unitID)
+			local location = getUnitLocation(trackInfo.unitID)
 			local xv, yv, zv = spGetUnitVelocity(trackInfo.unitID)
-			if not x or not y or not z or not xv or not yv or not zv then
+			if not location or not xv or not yv or not zv then
 				trackInfo.isDead = true
 			elseif not noDraw then
 				xvSum, yvSum, zvSum = xvSum + xv, yvSum + yv, zvSum + zv
-				trackInfo.location = { x, y, z }
+				trackInfo.location = location
 			end
 		end
 
