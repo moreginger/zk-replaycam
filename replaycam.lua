@@ -794,7 +794,7 @@ local function selectMostInterestingEvent(currentFrame)
 		event = nextEvent
 	end
 	if debug and mie then
-		spEcho('mie:', mie.type, mie.sbj, mostPercentile, currentFrame)
+		spEcho('mie:', mie.type, mie.sbj, mostPercentile, mie.started)
 	end
 	return mie
 end
@@ -883,6 +883,8 @@ local function updateDisplay(event, frame)
 	end
 
 	commentary_cpl:SetText(commentary)
+
+	return true
 end
 
 local function setupPanels()
@@ -1203,7 +1205,7 @@ end
 
 local function updateCamera(dt)
 	if debug and dt > 0.05 then
-		spEcho('slow camera update', dt, spGetGameFrame())
+		spEcho('slow camera update', dt)
 	end
 
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
