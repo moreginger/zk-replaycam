@@ -1337,7 +1337,7 @@ local function updateCamera(dt)
 	cameraState.fov = camera.fov
 
 	if userCameraOverrideFrame >= spGetGameFrame() then
-		-- return
+		return
 	end
 
 	spSetCameraState(cameraState, 0)
