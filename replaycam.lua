@@ -676,11 +676,13 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 end
 
 local function addOverviewEvent(importance)
-	local overviewY = spGetGroundHeight(mapSizeX / 2, mapSizeZ / 2)
-	local overviewEvent = addEvent(nil, importance, { mapSizeX / 2, overviewY, mapSizeZ / 2 }, nil, overviewEventType, -1, nil)
-	-- Set two "units" at the corners so that we calculate the correct camera range
-	overviewEvent:addUnit(-2, { 0, overviewY, 0})
-	overviewEvent:addUnit(-3, { mapSizeX, overviewY, mapSizeZ})
+	local x, z = mapSizeX / 2, mapSizeZ / 2
+	local overviewY = spGetGroundHeight(x, z)
+	local overviewEvent = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, -1, nil)
+	-- Assuming monitor is not in portrait, add fake units slightly staggered from center
+	local xd = mapSizeZ / 4
+	overviewEvent:addUnit(-2, { x - xd, overviewY, 0})
+	overviewEvent:addUnit(-3, { x + xd, overviewY, mapSizeZ})
 	return overviewEvent
 end
 
