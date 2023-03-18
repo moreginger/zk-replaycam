@@ -236,6 +236,10 @@ function WorldGrid:add(x, y, allyTeam, interest, radius)
 	return self:_addInternal(x, y, radius, { allyTeam = allyTeam, interest = interest }, _addInterest)
 end
 
+function WorldGrid:addLoc(location, allyTeam, interest, radius)
+	return self:add(location[1], location[2], allyTeam, interest, radius)
+end
+
 -- Call this exactly once between each reset.
 -- When watching an area we apply a fixed boost to make things sticky,
 -- but a longer-term negative factor (passe) to encourage moving.
@@ -307,10 +311,8 @@ function UnitInfoCache:new(o)
 	-- 1 - allyTeam
 	-- 2 - unitDefID
 	-- 3 - lastUpdatedFrame
-	-- 4 - last known x
-	-- 5 - last known y
-	-- 6 - last known z
-	-- 7 - last known velocity
+	-- 4 - last known { x, y, z }
+	-- 5 - last known velocity
 	o.cache = o.cache or {}
 	o.locationListener = o.locationListener or nil
 	return o
@@ -374,10 +376,8 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	end
 
 	local v = length(xv, zv)
-	cacheObject[4] = x
-	cacheObject[5] = y
-	cacheObject[6] = z
-	cacheObject[7] = v
+	cacheObject[4] = { x, y, z }
+	cacheObject[5] = v
 
 	if self.locationListener then
 		local isMoving = v > 0.1
@@ -404,9 +404,9 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local _, unitDefID, _, x, y, z, v = unpack(cacheObject)
+		local _, unitDefID, _, location, v = unpack(cacheObject)
 		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(unitDefID)
-		return x, y, z, v, importance, isStatic, weaponImportance, weaponRange
+		return location, v, importance, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -418,9 +418,9 @@ function UnitInfoCache:get(unitID)
 end
 
 function UnitInfoCache:forget(unitID)
-	local x, y, z, v, importance, isStatic = self:get(unitID)
+	local location, v, importance, isStatic = self:get(unitID)
 	self.cache[unitID] = nil
-	return x, y, z, v, importance, isStatic
+	return location, v, importance, isStatic
 end
 
 function UnitInfoCache:update(currentFrame)
@@ -1005,8 +1005,8 @@ function widget:GameFrame(frame)
 		if #units > 0 then
 			local hotspotEvent = addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, -1, nil)
 			for _, unitID in pairs(units) do
-				local x, y, z = unitInfo:get(unitID)
-				hotspotEvent:addUnit(unitID, { x, y, z })
+				local location = unitInfo:get(unitID)
+				hotspotEvent:addUnit(unitID, location)
 			end
 		end
 	end
@@ -1052,11 +1052,11 @@ end
 local function _deferCommandEvent(event)
 	local meta = event.meta
 	local sbjUnitID = meta.sbjUnitID
-	local sbjx, sbjy, sbjz, sbjv = unitInfo:get(sbjUnitID)
-	if not sbjx or not sbjy or not sbjz or not sbjv then
+	local sbjLocation, sbjv = unitInfo:get(sbjUnitID)
+	if not sbjLocation or not sbjv then
 		return false, true
 	end
-	local defer = distance(event.location, { sbjx, sbjy, sbjz }) > meta.deferRange + sbjv * framesPerSecond * 2.5
+	local defer = distance(event.location, sbjLocation) > meta.deferRange + sbjv * framesPerSecond * 2.5
 	if not defer then
 		local vctx, _, vctz = unpack(event.location)
 		interestGrid:add(vctx, vctz, meta.sbjAllyTeam, 1)
@@ -1080,13 +1080,12 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 	if cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE then
 		-- Process move event.
 
-		local x, y, z, _, importance, isStatic = unitInfo:get(unitID)
+		local sbjLocation, _, importance, isStatic = unitInfo:get(unitID)
 		if isStatic then
 			-- Not interested in move commands given to static buildings e.g. factories
 			return
 		end
 
-		local sbjLocation = { x, y, z }
 		local trgx, trgy, trgz = unpack(cmdParams)
 		local trgLocation = { trgx, trgy, trgz }
 
@@ -1102,24 +1101,23 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		event:addUnit(-unitID, trgLocation)
 	elseif cmdID == CMD_ATTACK then
 		-- Process attack event
-		local trgx, trgy, trgz, attackedUnitID
+		local trgLocation, attackedUnitID
 		-- Find the location / unit being attacked.
 		if #cmdParams == 1 then
 			attackedUnitID = cmdParams[1]
-			trgx, trgy, trgz = unitInfo:get(attackedUnitID)
+			trgLocation = unitInfo:get(attackedUnitID)
 		else
-			trgx, trgy, trgz = unpack(cmdParams)
+			trgLocation = cmdParams
 		end
-		if not trgx or not trgy or not trgz then
+		if not trgLocation then
 			return
 		end
-		local trgLocation = { trgx, trgy, trgz }
-		local x, y, z, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
+		local sbjLocation, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
 		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
 		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
-		local event = addEvent(unitTeam, weaponImportance, { x, y, z }, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
+		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
 		-- Hack: we want the subject to be the "actor" but the event location to be the target.
 		event.location = trgLocation
 		event:addUnit(attackedUnitID or -unitID, trgLocation)
@@ -1131,7 +1129,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage
 		damage = damage / 2
 	end
-	local x, y, z, _, unitImportance = unitInfo:get(unitID)
+	local sbjLocation, _, unitImportance = unitInfo:get(unitID)
 	local currentHealth, maxHealth, _, _, buildProgress = spGetUnitHealth(unitID)
 	-- currentHealth can be 0, also avoid skewing the score overly much
 	currentHealth = max(currentHealth, maxHealth / 16)
@@ -1140,15 +1138,15 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	-- Multiply by unit importance factor
 	importance = importance * unitImportance * buildProgress
 
-	addEvent(attackerTeam, importance, { x, y, z }, nil, unitDamagedEventType, unitID, unitDefID)
-	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 0.2)
+	addEvent(attackerTeam, importance, sbjLocation, nil, unitDamagedEventType, unitID, unitDefID)
+	interestGrid:addLoc(sbjLocation, teamInfo[unitTeam].allyTeam, 0.2)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-	local x, y, z, importance = unitInfo:forget(unitID)
+	local destroyedLocation, importance = unitInfo:forget(unitID)
 	purgeEventsOfUnit(unitID)
 
-	if not x or not y or not z or not importance then
+	if not destroyedLocation or not importance then
 		-- Might happen if an uncached unit is destroyed and fails to retrieve current location
 		return
 	end
@@ -1164,11 +1162,11 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		return
 	end
 
-	local ax, ay, az = unitInfo:get(attackerID)
-	local destroyedEvent = addEvent(attackerTeam, importance, { x, y, z }, nil, unitDestroyedEventType, unitID, unitDefID)
-	destroyedEvent:addUnit(attackerID, { ax, ay, az })
-	local destroyerEvent = addEvent(unitTeam, importance, { ax, ay, az}, nil, unitDestroyerEventType, attackerID, attackerDefID)
-	destroyerEvent:addUnit(unitID, { x, y, z })
+	local destroyerLocation = unitInfo:get(attackerID)
+	local destroyedEvent = addEvent(attackerTeam, importance, destroyedLocation, nil, unitDestroyedEventType, unitID, unitDefID)
+	destroyedEvent:addUnit(attackerID, destroyerLocation)
+	local destroyerEvent = addEvent(unitTeam, importance, destroyerLocation, nil, unitDestroyerEventType, attackerID, attackerDefID)
+	destroyerEvent:addUnit(unitID, destroyedLocation)
 	-- It would be naff to show both
 	destroyedEvent:addExcludes(destroyerEvent)
   destroyerEvent:addExcludes(destroyedEvent)
@@ -1176,14 +1174,14 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	-- Areas where units are being destroyed are particularly interesting, and
 	-- also the destroyed unit will no longer count, so add some extra interest
 	-- here.
-	interestGrid:add(x, z, teamInfo[unitTeam].allyTeam, 1)
-	interestGrid:add(x, z, teamInfo[attackerTeam].allyTeam, 1)
+	interestGrid:addLoc(destroyedLocation, teamInfo[unitTeam].allyTeam, 1)
+	interestGrid:addLoc(destroyedLocation, teamInfo[attackerTeam].allyTeam, 1)
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local allyTeam = teamInfo[unitTeam].allyTeam
-	local x, y, z, _, importance = unitInfo:watch(unitID, allyTeam, unitDefID)
-	addEvent(unitTeam, importance, { x, y, z }, nil, unitBuiltEventType, unitID, unitDefID)
+	local sbjLocation, _, importance = unitInfo:watch(unitID, allyTeam, unitDefID)
+	addEvent(unitTeam, importance, sbjLocation, nil, unitBuiltEventType, unitID, unitDefID)
 end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
@@ -1193,10 +1191,10 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 		return
 	end
 
-	local x, y, z, _, importance = unitInfo:get(unitID)
-	local event = addEvent(newTeam, importance, { x, y, z}, nil, unitTakenEventType, unitID, unitDefID)
-	x, y, z =  unitInfo:get(captureController)
-	event:addUnit(captureController, { x, y, z })
+	local sbjLocation, _, importance = unitInfo:get(unitID)
+	local event = addEvent(newTeam, importance, sbjLocation, nil, unitTakenEventType, unitID, unitDefID)
+	local capturerLocation =  unitInfo:get(captureController)
+	event:addUnit(captureController, capturerLocation)
 end
 
 local function calcCamRange(diag, fov)
