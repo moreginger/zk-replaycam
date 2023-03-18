@@ -1002,10 +1002,11 @@ function widget:GameFrame(frame)
 	local _, igMax, igX, igZ = interestGrid:statistics()
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
-		if #units > 0 then
-			local hotspotEvent = addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, -1, nil)
-			for _, unitID in pairs(units) do
-				local location = unitInfo:get(unitID)
+		local hotspotEvent
+		for _, unitID in pairs(units) do
+			local location, _, _, isStatic = unitInfo:get(unitID)
+			if not isStatic then
+				hotspotEvent = hotspotEvent or addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, -1, nil)
 				hotspotEvent:addUnit(unitID, location)
 			end
 		end
