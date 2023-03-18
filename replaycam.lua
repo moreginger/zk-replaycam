@@ -154,13 +154,25 @@ function WorldGrid:__toGridCoords(x, y)
 	return x, y
 end
 
+-- Return the center of the grid in world coordinates
+function WorldGrid:__toWorldCoords(gx, gy)
+	local halfGrid = self.gridSize / 2
+	return gx * self.gridSize - halfGrid, gy * self.gridSize - halfGrid
+end
+
 function WorldGrid:_getScoreGridCoords(x, y)
 	local interest, allyTeams, passe = unpack(self.data[x][y])
 	local allyTeamCount = 0
 	for _, _ in pairs(allyTeams) do
 		allyTeamCount = allyTeamCount + 1
 	end
-	return interest * max(1, allyTeamCount * allyTeamCount) * (1 - passe)
+	local allyTeamsMult = max(1, allyTeamCount * allyTeamCount)
+	-- We want passe to kick in slowly then get strong after 10s or so;
+	-- use logistic function
+	-- Shift the function to the right given min passe is 0
+	passe = passe - 6
+	local passeMult = 1 - (1 / (1 + exp(-0.5 * passe)))
+	return interest * allyTeamsMult * passeMult
 end
 
 function WorldGrid:getScore(x, y)
@@ -229,8 +241,12 @@ end
 -- but a longer-term negative factor (passe) to encourage moving.
 function WorldGrid:setWatching(x, y)
 	-- Note: boost is spread over a 2x2 grid.
-	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
-	self:_addInternal(x, y, self.gridSize, { passe = 0.1 }, _addPasse)
+	self:_addInternal(x, y, self.gridSize * 2, { boost = 8 }, _boostInterest)
+	-- passe will be decreased by 1 in each grid square in reset, therefore:
+	-- 1. Make sure it all goes into one grid square instead of being shared
+	-- 2. Increase by 2 in anticipation of decreasing by 1 later
+	x, y =  self:__toWorldCoords(self:__toGridCoords(x, y))
+	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 2 }, _addPasse)
 end
 
 function WorldGrid:_intersectArea(x1, y1, x2, y2, x3, y3, x4, y4)
@@ -247,7 +263,8 @@ function WorldGrid:reset()
 			local data = self.data[x][y]
 			data[1] = 1
 			data[2] = {}
-			data[3] = data[3] * 0.9
+			-- Reduce passe to min of 0
+			data[3] = max(0, data[3] - 1)
 		end
 	end
 end
