@@ -170,8 +170,8 @@ function WorldGrid:_getScoreGridCoords(x, y)
 	-- We want passe to kick in slowly then get strong after 10s or so;
 	-- use logistic function
 	-- Shift the function to the right given min passe is 0
-	passe = passe - 6
-	local passeMult = 1 - (1 / (1 + exp(-0.5 * passe)))
+	passe = passe - 8
+	local passeMult = 1 - (1 / (1 + exp(-0.4 * passe)))
 	return interest * allyTeamsMult * passeMult
 end
 
@@ -241,7 +241,7 @@ end
 -- but a longer-term negative factor (passe) to encourage moving.
 function WorldGrid:setWatching(x, y)
 	-- Note: boost is spread over a 2x2 grid.
-	self:_addInternal(x, y, self.gridSize * 2, { boost = 8 }, _boostInterest)
+	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
 	-- passe will be decreased by 1 in each grid square in reset, therefore:
 	-- 1. Make sure it all goes into one grid square instead of being shared
 	-- 2. Increase by 2 in anticipation of decreasing by 1 later
@@ -1337,7 +1337,7 @@ local function updateCamera(dt)
 	cameraState.fov = camera.fov
 
 	if userCameraOverrideFrame >= spGetGameFrame() then
-		return
+		-- return
 	end
 
 	spSetCameraState(cameraState, 0)
