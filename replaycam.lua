@@ -1178,7 +1178,7 @@ local function updateCamera(dt)
 	end
 
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
-	local xMin, xMax, zMin, zMax = mapSizeX, 0, mapSizeZ, 0
+	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
 	local trackInfo, nextTrackInfo = display.tracking, nil
 	while trackInfo do
 		if not trackInfo.isDead then
@@ -1198,14 +1198,16 @@ local function updateCamera(dt)
 		
 		-- Accumulate tracking info if not too distant
 		local nxMin, nxMax, nzMin, nzMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
-		if nextTrackInfo and nextTrackInfo.keepPrevious or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
+		if (nextTrackInfo and nextTrackInfo.keepPrevious) or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
 			xMin, xMax, zMin, zMax = nxMin, nxMax, nzMin, nzMax
 			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
 			trackedLocationCount = trackedLocationCount + 1
 			nextTrackInfo = trackInfo
 			trackInfo = trackInfo.previous
 		else
-			nextTrackInfo.previous = nil
+			if nextTrackInfo then
+				nextTrackInfo.previous = nil
+			end
 			trackInfo = nil
 		end
 	end
