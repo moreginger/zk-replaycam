@@ -1309,7 +1309,7 @@ local function updateCamera(dt)
 		return
 	end
 
-	spSetCameraState(cameraState)
+	spSetCameraState(cameraState, 0)
 end
 
 function widget:Update(dt)
