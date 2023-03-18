@@ -1196,7 +1196,7 @@ local function updateCamera(dt)
 		
 		-- Accumulate tracking info if not too distant
 		local nxMin, nxMax, nzMin, nzMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
-		if nextTrackInfo and nextTrackInfo.keepPrevious or distance({ nxMin, nil, nzMin }, { nxMax, nil, nzMax }) <= keepTrackingRange then
+		if nextTrackInfo and nextTrackInfo.keepPrevious or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
 			xMin, xMax, zMin, zMax = nxMin, nxMax, nzMin, nzMax
 			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
 			trackedLocationCount = trackedLocationCount + 1
