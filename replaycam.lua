@@ -16,6 +16,7 @@ local cos = math.cos
 local deg = math.deg
 local exp = math.exp
 local floor = math.floor
+local huge = math.huge
 local max = math.max
 local min = math.min
 local pi = math.pi
@@ -47,6 +48,7 @@ local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spGetUnitsInRectangle = Spring.GetUnitsInRectangle
 local spGetUnitTeam = Spring.GetUnitTeam
 local spGetUnitVelocity = Spring.GetUnitVelocity
+local spGetViewGeometry = Spring.GetViewGeometry
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
 local spTableEcho = Spring.Utilities.TableEcho
@@ -679,14 +681,24 @@ local function addOverviewEvent(importance)
 	local x, z = mapSizeX / 2, mapSizeZ / 2
 	local overviewY = spGetGroundHeight(x, z)
 	local overviewEvent = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, -1, nil)
-	-- Assuming monitor is not in portrait, add fake units slightly staggered from center
-	local xd = mapSizeZ / 4
-	overviewEvent:addUnit(-2, { x - xd, overviewY, 0})
-	overviewEvent:addUnit(-3, { x + xd, overviewY, mapSizeZ})
+
+	-- Add two fake units to get the right zoom level
+	local sx, sy = spGetViewGeometry()
+	local sratio = sx / sy
+	local mratio = mapSizeX / mapSizeZ
+	local zfit = 0.8
+	if sratio < mratio then
+		zfit = zfit * sratio / mratio
+	end
+	local zoffset = mapSizeZ * (1 - zfit) / 2
+	overviewEvent:addUnit(-2, { x, overviewY, -zoffset })
+	overviewEvent:addUnit(-3, { x, overviewY, mapSizeZ + zoffset })
+
 	return overviewEvent
 end
 
 local function purgeEventsOfUnit(unitID)
+	-- FIXME: Remove event if no subjects.
 	local event = tailEvent
 	while event ~= nil do
 		local nextEvent = event.next
