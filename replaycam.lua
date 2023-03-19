@@ -1311,7 +1311,7 @@ local function updateCamera(dt)
 	cry = (deferRotationRenderFrames == 0 and try) or symmetricBound(try, cry, maxCamRPerSecond * dt)
 	-- Calculate target position
 	local tcDist2d = tcDist * cos(-display.camAngle)
-	local tcx, tcy, tcz = ex + tcDist2d * sin(try - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(try - pi)
+	local tcx, tcy, tcz = ex + tcDist2d * sin(cry - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(cry - pi)
 
 	local doInstantTransition = length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance
 	if doInstantTransition or display.camType == camTypeOverview then
