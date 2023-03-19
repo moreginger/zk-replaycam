@@ -1278,14 +1278,25 @@ local function updateCamera(dt)
 	-- Where do we *want* the camera to be ie: (t)arget
 	local tcDist = calcCamRange(boundingDiagLength, defaultFov)
 	local try = atan2(cx - ex, cz - ez) + pi
-	try = symmetricBound(try, cry, maxCamRPerSecond * dt)
+	-- HACK: It appears that translation occurs 1 render frame later than rotation,
+	-- this is used to defer rotation by a frame when reorienting
+	local deferRotationRenderFrames = camera.deferRotationRenderFrames and camera.deferRotationRenderFrames - 1
+	cry = (deferRotationRenderFrames == 0 and try) or symmetricBound(try, cry, maxCamRPerSecond * dt)
 	-- Calculate target position
 	local tcDist2d = tcDist * cos(-display.camAngle)
 	local tcx, tcy, tcz = ex + tcDist2d * sin(try - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(try - pi)
 
-	if camera.type == camTypeOverview or length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance then
-		tcx, tcy, tcz = ex + tcDist2d * sin(defaultRy - pi), tcy, ez + tcDist2d * cos(defaultRy - pi)
-		camera = initCamera(tcx, tcy, tcz, display.camAngle, defaultRy, display.camType)
+	local doInstantTransition = length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance
+	if doInstantTransition or display.camType == camTypeOverview then
+		cx, cy, cz = ex + tcDist2d * sin(defaultRy - pi), tcy, ez + tcDist2d * cos(defaultRy - pi)
+		cxv, cyv, czv = 0, 0, 0
+		if doInstantTransition then
+			-- HACK: Need to defer rotation by 1 frame, see earlier
+			deferRotationRenderFrames = 1
+		else
+			-- FIXME: Simplify this else case (for overview) somehow
+			crx, cry, cfov = display.camAngle, defaultRy, defaultFov
+		end
 	else
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
@@ -1319,11 +1330,12 @@ local function updateCamera(dt)
 		cz = cz + dt * czv
 
 		-- Rotate and zoom camera
-		crx = symmetricBound(-atan2(cy - ey, length(cx - ex, cz - ez)), crx, maxCamRPerSecond * dt)
+		local trx = -atan2(cy - ey, length(cx - ex, cz - ez))
+		crx = (deferRotationRenderFrames == 0 and display.camAngle) or symmetricBound(trx, crx, maxCamRPerSecond * dt)
 		cfov = applyDamping(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
-
-		camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = try, fov = cfov }
 	end
+
+	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames }
 
 	local cameraState = spGetCameraState()
 	cameraState.mode = 4
