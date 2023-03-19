@@ -650,7 +650,7 @@ local function addEvent(actor, importance, location, meta, type, unitID, unitDef
 		if importanceAtFrame <= 0 then
 			-- Just remove the event forever.
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif event:shouldMerge(type, sbj, location) then
+		elseif event:shouldMerge(type, unitID, location) then
 			-- Merge new event into old.
 			event.importance = importanceAtFrame + importance
 			event.decay = decay
