@@ -822,6 +822,24 @@ local function initCamera(cx, cy, cz, rx, ry, type)
 	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov, type = type }
 end
 
+local function __pluralize(noun)
+	-- FIXME: Better logic!
+	return noun .. "s"
+end
+
+local function __getUnitsNameString(units)
+	local unitNames = {}
+	for unitID, _ in pairs(units) do
+		local _, _, _, name = unitInfo:get(unitID)
+		unitNames[name] = (unitNames[name] and unitNames[name] + 1) or 1
+	end
+	local result
+	for unitName, count in pairs(unitNames) do
+		result = (result and "squad") or (count > 1 and __pluralize(unitName)) or unitName
+	end
+	return result or "unknown"
+end
+
 local function updateDisplay(event, frame)
 	if display.noUpdateBeforeFrame > frame then
 		return false
@@ -846,19 +864,15 @@ local function updateDisplay(event, frame)
 	elseif event.type == unitBuiltEventType then
 		commentary = event.sbj .. " built by " .. actorName
 	elseif event.type == unitDamagedEventType then
-		commentary = event.sbj .. " under attack"
+		commentary = event.sbj .. " under attack by " .. actorName
 	elseif event.type == unitDestroyedEventType then
-		commentary = event.sbj .. " destroyed by " .. actorName
+		local destroyer = __getUnitsNameString(event._objUnits)
+		commentary = event.sbj .. " destroyed by " .. destroyer .. " of " .. actorName
 	elseif event.type == unitDestroyerEventType then
 		commentary = event.sbj .. " on a rampage"
 	elseif event.type == unitMovingEventType then
-		local quantityPrefix, unitCount = " ", event:subjectCount()
-		if unitCount > 5 then
-			quantityPrefix = " batallion "
-		elseif unitCount > 2 then
-			quantityPrefix = " team "
-		end
-		commentary = event.sbj .. quantityPrefix .. "moving"
+		local movers = __getUnitsNameString(event._sbjUnits)
+		commentary = movers .. " moving"
 	elseif event.type == unitTakenEventType then
 		commentary = event.sbj .. " captured by " .. actorName
 	end
