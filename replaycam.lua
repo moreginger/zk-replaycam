@@ -766,9 +766,8 @@ local function _processEvent(currentFrame, event)
 	if event.deferFunc then
 	  event.deferredFrom = event.deferredFrom or event.started
 		event.started = currentFrame
-		-- TODO: Check if event in command queue, if not then remove it.
 		local defer, abort = event.deferFunc(event)
-		if abort or event.deferredFrom - currentFrame > framesPerSecond * 8 then
+		if abort or event.deferredFrom - currentFrame > framesPerSecond * 16 then
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 			return
 		elseif defer then
