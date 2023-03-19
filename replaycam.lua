@@ -387,7 +387,8 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	if not unitDefID then
 		unitDefID = spGetUnitDefID(unitID)
 	end
-	local name = spGetHumanName(UnitDefs[unitDefID], unitID)
+	local unitDef = UnitDefs[unitDefID]
+	local name = spGetHumanName(unitDef, unitID)
 	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, lastUpdatedFrame = currentFrame }
 	if not self:_updatePosition(unitID, cacheObject) then
 		return
@@ -413,15 +414,19 @@ function UnitInfoCache:get(unitID)
 end
 
 function UnitInfoCache:forget(unitID)
-	local location, v, importance, name, isStatic, weaponImportance, weaponRange = self:get(unitID)
-	self.cache[unitID] = nil
-	return location, v, importance, name, isStatic, weaponImportance, weaponRange
+	if self.cache[unitID] then
+		-- Don't remove immediately as we may need to get information for event display
+		self.cache[unitID].removeAfterFrame = spGetGameFrame() + framesPerSecond * 30
+	end
 end
 
 function UnitInfoCache:update(currentFrame)
 	for unitID, cacheObject in pairs(self.cache) do
-		local lastUpdated = cacheObject.lastUpdatedFrame
-		if (currentFrame - lastUpdated) > unitInfoCacheFrames then
+		if cacheObject.removeAfterFrame then
+			if currentFrame > cacheObject.removeAfterFrame then
+				self.cache[unitID] = nil
+			end
+		elseif currentFrame - cacheObject.lastUpdatedFrame > unitInfoCacheFrames then
 			cacheObject.lastUpdatedFrame = currentFrame
 			if not self:_updatePosition(unitID, cacheObject) then
 				-- Something went wrong, drop from cache.
@@ -1171,7 +1176,8 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-	local destroyedLocation, _, importance = unitInfo:forget(unitID)
+	local destroyedLocation, _, importance = unitInfo:get(unitID)
+	unitInfo:forget(unitID)
 	purgeEvents(__purgeSubject, { unitID = unitID })
 
 	if not destroyedLocation or not importance then
