@@ -438,6 +438,8 @@ end
 
 -- EVENT
 
+local eventMergeRange = 256
+
 Event = {}
 
 function Event:new(o)
@@ -446,8 +448,8 @@ function Event:new(o)
 	self.__index = self
 
 	o._excludes = {}
-	o._unitCount = 0
-  o._units = {}
+  o._objUnits = {}
+	o._sbjUnits = {}
 	return o
 end
 
@@ -456,13 +458,14 @@ function Event:addExcludes(other)
 	self._excludes[other.id] = true
 end
 
-function Event:addUnit(unitID, location)
-	if not self._units[unitID] then
-		if unitID > 0 then
-			self._unitCount = self._unitCount + 1
-		end
-		self._units[unitID] = location
-	end
+-- Add an object unit i.e. the unit being done to
+function Event:addObject(unitID, location)
+	self._objUnits[unitID] = location
+end
+
+-- Add a subject unit i.e. the unit doing the thing
+function Event:addSubject(unitID, location)
+	self._sbjUnits[unitID] = location
 end
 
 function Event:excludes(other)
@@ -473,15 +476,25 @@ function Event:importanceAtFrame(frame)
   return self.importance * (1 - self.decay * (frame - self.started) / framesPerSecond)
 end
 
-function Event:removeUnit(unitID)
-	if self._units[unitID] then
-		self._unitCount = self._unitCount - 1
-		self._units[unitID] = nil
+-- return - true if there are no more subjects
+function Event:removeSubject(unitID)
+	self._sbjUnits[unitID] = nil
+	for _, _ in pairs(self._sbjUnits) do
+		return false
 	end
+	return true
 end
 
-function Event:unitCount()
-	return self._unitCount
+function Event:shouldMerge(type, sbj, location)
+	return self.type == type and self._sbjUnits[sbj] and distance(self.location, location) < eventMergeRange
+end
+
+function Event:subjectCount()
+	local count = 0
+	for _, _ in pairs(self._sbjUnits) do
+		count = count + 1
+	end
+	return count
 end
 
 -- EVENT STATISTICS
@@ -559,8 +572,6 @@ local eventTypes = {
 	unitTakenEventType
 }
 
-local eventMergeRange = 256
-
 -- Linear decay rate
 local decayPerSecond = {
 	attack = 1,
@@ -617,11 +628,11 @@ end
 --             Useful for command events that may become interesting e.g. when units close range.
 -- returns event {}
 -- - units Contains unit IDs and their current locations. May contain negative unit IDs e.g. for dead units.
-local function addEvent(actor, importance, location, meta, type, unit, unitDef, deferFunc)
+local function addEvent(actor, importance, location, meta, type, unitID, unitDef, deferFunc)
 	local frame = spGetGameFrame()
 	local sbj = {}
-	if unit and unitDef then
-		sbj = spGetHumanName(UnitDefs[unitDef], unit)
+	if unitID and unitDef then
+		sbj = spGetHumanName(UnitDefs[unitDef], unitID)
 	end
 	local decay = decayPerSecond[type]
 
@@ -639,7 +650,7 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 		if importanceAtFrame <= 0 then
 			-- Just remove the event forever.
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif event.type == type and event.sbj == sbj and distance(event.location, location) < eventMergeRange then
+		elseif event:shouldMerge(type, sbj, location) then
 			-- Merge new event into old.
 			event.importance = importanceAtFrame + importance
 			event.decay = decay
@@ -649,8 +660,8 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 				event.actorCount = event.actorCount + 1
 				event.actors[actor] = actor
 			end
-			if unit then
-				event:addUnit(unit, location)
+			if unitID then
+				event:addSubject(unitID, location)
 			end
 
 			-- Remove it and attach at head later.
@@ -677,8 +688,8 @@ local function addEvent(actor, importance, location, meta, type, unit, unitDef, 
 			started = frame,
 			type = type
 		})
-		if unit then
-		  event:addUnit(unit, location)
+		if unitID then
+		  event:addSubject(unitID, location)
 		end
 	end
 
@@ -708,17 +719,14 @@ local function addOverviewEvent(importance)
 		zfit = zfit * sratio / mratio
 	end
 	local zoffset = mapSizeZ * (1 - zfit) / 2
-	overviewEvent:addUnit(-2, { x, overviewY, -zoffset })
-	overviewEvent:addUnit(-3, { x, overviewY, mapSizeZ + zoffset })
+	overviewEvent:addSubject(-2, { x, overviewY, -zoffset })
+	overviewEvent:addSubject(-3, { x, overviewY, mapSizeZ + zoffset })
 
 	return overviewEvent
 end
 
-
 local function __purgeSubject(event, opts)
-	-- FIXME: Separate units into subjects / objects
-  event:removeUnit(opts.unitID)
-	return event:unitCount() == 0
+  return event:removeSubject(opts.unitID)
 end
 
 local function __purgeExcludes(event, opts)
@@ -843,7 +851,7 @@ local function updateDisplay(event, frame)
 	elseif event.type == unitDestroyerEventType then
 		commentary = event.sbj .. " on a rampage"
 	elseif event.type == unitMovingEventType then
-		local quantityPrefix, unitCount = " ", event:unitCount()
+		local quantityPrefix, unitCount = " ", event:subjectCount()
 		if unitCount > 5 then
 			quantityPrefix = " batallion "
 		elseif unitCount > 2 then
@@ -863,7 +871,11 @@ local function updateDisplay(event, frame)
 
 	-- We use keepPrevious to keep runs of track infos from the same event
 	local keepPrevious = false
-	for k, v in pairs(event._units) do
+	for k, v in pairs(event._sbjUnits) do
+		display.tracking = { unitID = k, location = v, previous = display.tracking, keepPrevious = keepPrevious }
+		keepPrevious = true
+	end
+	for k, v in pairs(event._objUnits) do
 		display.tracking = { unitID = k, location = v, previous = display.tracking, keepPrevious = keepPrevious }
 		keepPrevious = true
 	end
@@ -1004,7 +1016,7 @@ function widget:GameFrame(frame)
 			local location, _, _, isStatic = unitInfo:get(unitID)
 			if not isStatic then
 				hotspotEvent = hotspotEvent or addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, -1, nil)
-				hotspotEvent:addUnit(unitID, location)
+				hotspotEvent:addSubject(unitID, location)
 			end
 		end
 	end
@@ -1094,9 +1106,9 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		end
 		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
 		local event = addEvent(unitTeam, importance, sbjLocation, meta, unitMovingEventType, unitID, unitDefID, _deferCommandEvent)
-		-- HACK: we want the subject to be the "actor" but the event location to be the target.
+		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
-		event:addUnit(-unitID, trgLocation)
+		event:addObject(-unitID, trgLocation)
 	elseif cmdID == CMD_ATTACK then
 		-- Process attack event
 		local trgLocation, attackedUnitID
@@ -1116,9 +1128,9 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
 		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
 		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
-		-- HACK: we want the subject to be the "actor" but the event location to be the target.
+		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
-		event:addUnit(attackedUnitID or -unitID, trgLocation)
+		event:addObject(attackedUnitID or -unitID, trgLocation)
 	end
 end
 
@@ -1162,9 +1174,9 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 
 	local destroyerLocation = unitInfo:get(attackerID)
 	local destroyedEvent = addEvent(attackerTeam, importance, destroyedLocation, nil, unitDestroyedEventType, unitID, unitDefID)
-	destroyedEvent:addUnit(attackerID, destroyerLocation)
+	destroyedEvent:addObject(attackerID, destroyerLocation)
 	local destroyerEvent = addEvent(unitTeam, importance, destroyerLocation, nil, unitDestroyerEventType, attackerID, attackerDefID)
-	destroyerEvent:addUnit(unitID, destroyedLocation)
+	destroyerEvent:addObject(unitID, destroyedLocation)
 	-- It would be naff to show both
 	destroyedEvent:addExcludes(destroyerEvent)
   destroyerEvent:addExcludes(destroyedEvent)
@@ -1192,7 +1204,7 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	local sbjLocation, _, importance = unitInfo:get(unitID)
 	local event = addEvent(newTeam, importance, sbjLocation, nil, unitTakenEventType, unitID, unitDefID)
 	local capturerLocation =  unitInfo:get(captureController)
-	event:addUnit(captureController, capturerLocation)
+	event:addObject(captureController, capturerLocation)
 end
 
 local function calcCamRange(diag, fov)
