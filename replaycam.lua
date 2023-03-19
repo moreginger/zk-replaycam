@@ -307,12 +307,7 @@ function UnitInfoCache:new(o)
 	-- 3 - weapon importance
 	-- 4 - weapon range
 	o._unitStatsCache = {}
-	-- cacheObject {}
-	-- 1 - allyTeam
-	-- 2 - unitDefID
-	-- 3 - lastUpdatedFrame
-	-- 4 - last known { x, y, z }
-	-- 5 - last known velocity
+	-- cacheObject { name, allyTeam, unitDefID, lastUpdatedFrame, location, velocity }
 	o.cache = o.cache or {}
 	o.locationListener = o.locationListener or nil
 	return o
@@ -360,10 +355,10 @@ end
 
 function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local x, y, z = spGetUnitPosition(unitID)
-	local xv, _, zv = spGetUnitVelocity(unitID)
-	if not x or not y or not z or not xv or not zv then
+	local xv, yv, zv = spGetUnitVelocity(unitID)
+	if not x or not y or not z or not xv or not yv or not zv then
 		if debug then
-			spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, UnitDefs[cacheObject[2]].name)
+			spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, cacheObject.name)
 		end
 		return false
 	end
@@ -372,16 +367,16 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	if noDraw then
 		-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
 		-- Don't update or ping in this state. Return true unless we have nothing cached
-		return cacheObject[4] and cacheObject[5] and cacheObject[6] and cacheObject[7]
+		return cacheObject.location and cacheObject.velocity
 	end
 
-	local v = length(xv, zv)
-	cacheObject[4] = { x, y, z }
-	cacheObject[5] = v
+	local v = length(xv, yv, zv)
+	cacheObject.location = { x, y, z }
+	cacheObject.velocity = v
 
 	if self.locationListener then
 		local isMoving = v > 0.1
-		self.locationListener(x, y, z, cacheObject[1], isMoving)
+		self.locationListener(x, y, z, cacheObject.allyTeam, isMoving)
 	end
 
 	return true
@@ -392,7 +387,8 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	if not unitDefID then
 		unitDefID = spGetUnitDefID(unitID)
 	end
-	local cacheObject = { allyTeam, unitDefID, currentFrame, 0, 0, 0, 0 }
+	local name = spGetHumanName(UnitDefs[unitDefID], unitID)
+	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, lastUpdatedFrame = currentFrame }
 	if not self:_updatePosition(unitID, cacheObject) then
 		return
 	end
@@ -404,9 +400,8 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local _, unitDefID, _, location, v = unpack(cacheObject)
-		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(unitDefID)
-		return location, v, importance, isStatic, weaponImportance, weaponRange
+		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(cacheObject.unitDefID)
+		return cacheObject.location, cacheObject.v, importance, cacheObject.name, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -418,16 +413,16 @@ function UnitInfoCache:get(unitID)
 end
 
 function UnitInfoCache:forget(unitID)
-	local location, v, importance, isStatic = self:get(unitID)
+	local location, v, importance, name, isStatic, weaponImportance, weaponRange = self:get(unitID)
 	self.cache[unitID] = nil
-	return location, v, importance, isStatic
+	return location, v, importance, name, isStatic, weaponImportance, weaponRange
 end
 
 function UnitInfoCache:update(currentFrame)
 	for unitID, cacheObject in pairs(self.cache) do
-		local lastUpdated = cacheObject[3]
+		local lastUpdated = cacheObject.lastUpdatedFrame
 		if (currentFrame - lastUpdated) > unitInfoCacheFrames then
-			cacheObject[3] = currentFrame
+			cacheObject.lastUpdatedFrame = currentFrame
 			if not self:_updatePosition(unitID, cacheObject) then
 				-- Something went wrong, drop from cache.
 				self.cache[unitID] = nil
@@ -595,8 +590,8 @@ local eventStatistics = EventStatistics:new({
 		overview = 4.4,
 		unitBuilt = 4.2,
 		unitDamaged = 0.7,
-		unitDestroyed = 0.6,
-		unitDestroyer = 1.0,
+		unitDestroyed = 0.5,
+		unitDestroyer = 0.8,
 		unitMoving = 2.0,
 		unitTaken = 0.2,
 	}
@@ -631,8 +626,8 @@ end
 local function addEvent(actor, importance, location, meta, type, unitID, unitDef, deferFunc)
 	local frame = spGetGameFrame()
 	local sbj = {}
-	if unitID and unitDef then
-		sbj = spGetHumanName(UnitDefs[unitDef], unitID)
+	if unitID >= 0 then
+		_, _, _, sbj = unitInfo:get(unitID)
 	end
 	local decay = decayPerSecond[type]
 
@@ -1019,7 +1014,7 @@ function widget:GameFrame(frame)
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
 		local hotspotEvent
 		for _, unitID in pairs(units) do
-			local location, _, _, isStatic = unitInfo:get(unitID)
+			local location, _, _, _, isStatic = unitInfo:get(unitID)
 			if not isStatic then
 				hotspotEvent = hotspotEvent or addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, -1, nil)
 				hotspotEvent:addSubject(unitID, location)
@@ -1099,7 +1094,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 	if cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE then
 		-- Process move event.
 
-		local sbjLocation, _, importance, isStatic = unitInfo:get(unitID)
+		local sbjLocation, _, importance, _, isStatic = unitInfo:get(unitID)
 		if isStatic then
 			-- Not interested in move commands given to static buildings e.g. factories
 			return
@@ -1131,7 +1126,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		if not trgLocation then
 			return
 		end
-		local sbjLocation, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
+		local sbjLocation, _, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
 		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
@@ -1162,7 +1157,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-	local destroyedLocation, importance = unitInfo:forget(unitID)
+	local destroyedLocation, _, importance = unitInfo:forget(unitID)
 	purgeEvents(__purgeSubject, { unitID = unitID })
 
 	if not destroyedLocation or not importance then
