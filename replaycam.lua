@@ -714,27 +714,24 @@ local function addOverviewEvent(importance)
 	return overviewEvent
 end
 
-local function purgeEventsOfUnit(unitID)
-	-- FIXME: Remove event if no subjects.
-	local event = tailEvent
-	while event ~= nil do
-		local nextEvent = event.next
-		if event.type ~= unitDestroyedEventType then
-			event:removeUnit(unitID)
-			if event:unitCount() == 0 then
-				headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-			end
-		end
-		event = nextEvent
-	end
+
+local function __purgeSubject(event, opts)
+	-- FIXME: Separate units into subjects / objects
+  event:removeUnit(opts.unitID)
+	return event:unitCount() == 0
 end
 
-local function purgeExcludedEvents(excluder)
+local function __purgeExcludes(event, opts)
+	return opts.excluder:excludes(event)
+end
+
+-- eventProcessor - perform processing and return truthy to remove the event
+local function purgeEvents(eventProcessor, opts)
 	local event = tailEvent
 	while event ~= nil do
 		local nextEvent = event.next
-		if excluder:excludes(event) then
-			removeElement(event, headEvent, tailEvent)
+		if eventProcessor(event, opts) then
+			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 		end
 		event = nextEvent
 	end
@@ -1020,7 +1017,7 @@ function widget:GameFrame(frame)
 			-- Avoid showing it again
 			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
 		end
-		purgeExcludedEvents(mie)
+		purgeEvents(__purgeExcludes, { excluder = mie })
 		-- Set a standard decay so that we don't show the event for too long.
 		mie.decay, mie.started = 0.20, frame
 		showingEvent = mie
@@ -1097,7 +1094,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		end
 		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
 		local event = addEvent(unitTeam, importance, sbjLocation, meta, unitMovingEventType, unitID, unitDefID, _deferCommandEvent)
-		-- Hack: we want the subject to be the "actor" but the event location to be the target.
+		-- HACK: we want the subject to be the "actor" but the event location to be the target.
 		event.location = trgLocation
 		event:addUnit(-unitID, trgLocation)
 	elseif cmdID == CMD_ATTACK then
@@ -1119,7 +1116,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
 		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
 		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
-		-- Hack: we want the subject to be the "actor" but the event location to be the target.
+		-- HACK: we want the subject to be the "actor" but the event location to be the target.
 		event.location = trgLocation
 		event:addUnit(attackedUnitID or -unitID, trgLocation)
 	end
@@ -1145,7 +1142,7 @@ end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
 	local destroyedLocation, importance = unitInfo:forget(unitID)
-	purgeEventsOfUnit(unitID)
+	purgeEvents(__purgeSubject, { unitID = unitID })
 
 	if not destroyedLocation or not importance then
 		-- Might happen if an uncached unit is destroyed and fails to retrieve current location
