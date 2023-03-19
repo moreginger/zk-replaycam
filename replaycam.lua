@@ -724,15 +724,6 @@ local function addOverviewEvent(importance)
 
 	return overviewEvent
 end
-
-local function __purgeSubject(event, opts)
-  return event:removeSubject(opts.unitID)
-end
-
-local function __purgeExcludes(event, opts)
-	return opts.excluder:excludes(event)
-end
-
 -- eventProcessor - perform processing and return truthy to remove the event
 local function purgeEvents(eventProcessor, opts)
 	local event = tailEvent
@@ -744,6 +735,22 @@ local function purgeEvents(eventProcessor, opts)
 		event = nextEvent
 	end
 end
+
+local function __purgeExcludes(event, opts)
+	return opts.excluder:excludes(event)
+end
+
+local function __purgeSubject(event, opts)
+  return event:removeSubject(opts.unitID)
+end
+
+local function __purgeCommands(event, opts)
+	if event.type ~= attackEventType and event.type ~= unitMovingEventType then
+		return false
+	end
+	return event:removeSubject(opts.unitID)
+end
+
 
 local function _getEventPercentile(currentFrame, event)
 	local importance = event:importanceAtFrame(currentFrame)
@@ -1086,6 +1093,9 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		-- Don't watch units that aren't finished.
 		return
 	end
+
+	-- Shouldn't select an old command
+	purgeEvents(__purgeCommands, { unitID = unitID })
 
 	if cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE then
 		-- Process move event.
