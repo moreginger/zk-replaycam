@@ -66,7 +66,8 @@ local framesPerSecond = 30
 
 -- CONFIGURATION
 
-local debug = true
+local LOG_ERROR, LOG_DEBUG = 1, 2
+local logging = LOG_DEBUG
 local updateIntervalFrames = framesPerSecond
 local defaultFov, defaultRx, defaultRy, maxCamRPerSecond = 45, -1.0, pi, pi / 16
 
@@ -357,7 +358,7 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local x, y, z = spGetUnitPosition(unitID)
 	local xv, yv, zv = spGetUnitVelocity(unitID)
 	if not x or not y or not z or not xv or not yv or not zv then
-		if debug then
+		if logging >= LOG_DEBUG then
 			spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, cacheObject.name)
 		end
 		return false
@@ -804,7 +805,7 @@ local function selectMostInterestingEvent(currentFrame)
 		end
 		event = nextEvent
 	end
-	if debug and mie then
+	if logging >= LOG_DEBUG and mie then
 		spEcho('mie:', mie.type, mie.sbj, mostPercentile, mie.started)
 	end
 	return mie
@@ -1236,7 +1237,7 @@ local function calcCamRange(diag, fov)
 end
 
 local function updateCamera(dt)
-	if debug and dt > 0.05 then
+	if logging >= LOG_DEBUG and dt > 0.05 then
 		spEcho('slow camera update', dt)
 	end
 
