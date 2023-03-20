@@ -652,6 +652,9 @@ local function addEvent(actor, importance, location, meta, type, unitID, unitDef
 			-- Just remove the event forever.
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 		elseif event:shouldMerge(type, unitID, location) then
+			if logging >= LOG_DEBUG then
+				spEcho('merging events', type)
+			end
 			-- Merge new event into old.
 			event.importance = importanceAtFrame + importance
 			event.decay = decay
@@ -806,7 +809,7 @@ local function selectMostInterestingEvent(currentFrame)
 		event = nextEvent
 	end
 	if logging >= LOG_DEBUG and mie then
-		spEcho('mie:', mie.type, mie.sbj, mostPercentile, mie.started)
+		spEcho('mie', mie.type, mie.sbj, mostPercentile, mie.started)
 	end
 	return mie
 end
