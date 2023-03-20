@@ -486,8 +486,8 @@ function Event:removeSubject(unitID)
 	return true
 end
 
-function Event:shouldMerge(type, sbj, location)
-	return self.type == type and self._sbjUnits[sbj] and distance(self.location, location) < eventMergeRange
+function Event:shouldMerge(type, sbjName, location)
+	return self.type == type and self.sbjName == sbjName and distance(self.location, location) < eventMergeRange
 end
 
 function Event:subjectCount()
@@ -629,17 +629,15 @@ end
 --             Useful for command events that may become interesting e.g. when units close range.
 -- returns event {}
 -- - units Contains unit IDs and their current locations. May contain negative unit IDs e.g. for dead units.
-local function addEvent(actor, importance, location, meta, type, unitID, unitDef, deferFunc)
+local function addEvent(actor, importance, location, meta, sbjName, type, unitID, deferFunc, opts)
+	opts = opts or {}
+
 	local frame = spGetGameFrame()
-	local sbj = {}
-	if unitID >= 0 then
-		_, _, _, sbj = unitInfo:get(unitID)
-	end
 	local decay = decayPerSecond[type]
 
 	-- Try to merge into recent events.
 	local considerForMergeAfterFrame = frame - framesPerSecond
-	local event = headEvent
+	local event = (not opts.noMerge and headEvent) or nil
 	while event ~= nil do
 		local nextEvent = event.previous
 		if event.started < considerForMergeAfterFrame then
@@ -651,7 +649,7 @@ local function addEvent(actor, importance, location, meta, type, unitID, unitDef
 		if importanceAtFrame <= 0 then
 			-- Just remove the event forever.
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif event:shouldMerge(type, unitID, location) then
+		elseif event:shouldMerge(type, sbjName, location) then
 			if logging >= LOG_DEBUG then
 				spEcho('merging events', type)
 			end
@@ -688,7 +686,7 @@ local function addEvent(actor, importance, location, meta, type, unitID, unitDef
 			importance = importance,
 			location = location,
 			meta = meta,
-			sbj = sbj,
+			sbjName = sbjName,
 			started = frame,
 			type = type
 		})
@@ -712,7 +710,7 @@ end
 local function addOverviewEvent(importance)
 	local x, z = mapSizeX / 2, mapSizeZ / 2
 	local overviewY = spGetGroundHeight(x, z)
-	local overviewEvent = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, -1, nil)
+	local overviewEvent = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, { noMerge = true })
 
 	-- Add two fake units to get the right zoom level
 	local sx, sy = spGetViewGeometry()
@@ -839,8 +837,12 @@ end
 local function __getUnitsNameString(units)
 	local unitNames = {}
 	for unitID, _ in pairs(units) do
-		local _, _, _, name = unitInfo:get(unitID)
-		unitNames[name] = (unitNames[name] and unitNames[name] + 1) or 1
+		if unitID >= 0 then
+			local _, _, _, name = unitInfo:get(unitID)
+			-- Sometimes it's too late to get a (dead) unit in the cache
+			name = name or "unknown"
+			unitNames[name] = (unitNames[name] and unitNames[name] + 1) or 1
+		end
 	end
 	local result
 	for unitName, count in pairs(unitNames) do
@@ -863,7 +865,7 @@ local function updateDisplay(event, frame)
 	actorName = actorName or "unknown"
 
 	if event.type == attackEventType then
-		commentary = event.sbj .. " is attacking"
+		commentary = event.sbjName .. " is attacking"
   elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
@@ -871,19 +873,18 @@ local function updateDisplay(event, frame)
 		camType = camTypeOverview
 		commentary = "Let's get an overview of the battlefield"
 	elseif event.type == unitBuiltEventType then
-		commentary = event.sbj .. " built by " .. actorName
+		commentary = event.sbjName .. " built by " .. actorName
 	elseif event.type == unitDamagedEventType then
-		commentary = event.sbj .. " under attack by " .. actorName
+		commentary = event.sbjName .. " under attack by " .. actorName
 	elseif event.type == unitDestroyedEventType then
 		local destroyer = __getUnitsNameString(event._objUnits)
-		commentary = event.sbj .. " destroyed by " .. destroyer .. " of " .. actorName
+		commentary = event.sbjName .. " destroyed by " .. destroyer .. " of " .. actorName
 	elseif event.type == unitDestroyerEventType then
-		commentary = event.sbj .. " on a rampage"
+		commentary = event.sbjName .. " on a rampage"
 	elseif event.type == unitMovingEventType then
-		local movers = __getUnitsNameString(event._sbjUnits)
-		commentary = movers .. " moving"
+		commentary = event.sbjName .. " moving"
 	elseif event.type == unitTakenEventType then
-		commentary = event.sbj .. " captured by " .. actorName
+		commentary = event.sbjName .. " captured by " .. actorName
 	end
 
 	display.camAngle = camAngle
@@ -1039,7 +1040,7 @@ function widget:GameFrame(frame)
 		for _, unitID in pairs(units) do
 			local location, _, _, _, isStatic = unitInfo:get(unitID)
 			if not isStatic then
-				hotspotEvent = hotspotEvent or addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, -1, nil)
+				hotspotEvent = hotspotEvent or addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, hotspotEventType, -1, nil, { noMerge = true })
 				hotspotEvent:addSubject(unitID, location)
 			end
 		end
@@ -1117,7 +1118,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 	if cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE then
 		-- Process move event.
 
-		local sbjLocation, _, importance, _, isStatic = unitInfo:get(unitID)
+		local sbjLocation, _, importance, sbjName, isStatic = unitInfo:get(unitID)
 		if isStatic then
 			-- Not interested in move commands given to static buildings e.g. factories
 			return
@@ -1132,7 +1133,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			return
 		end
 		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
-		local event = addEvent(unitTeam, importance, sbjLocation, meta, unitMovingEventType, unitID, unitDefID, _deferCommandEvent)
+		local event = addEvent(unitTeam, importance, sbjLocation, meta, sbjName, unitMovingEventType, unitID, _deferCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
 		event:addObject(-unitID, trgLocation)
@@ -1149,12 +1150,12 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		if not trgLocation then
 			return
 		end
-		local sbjLocation, _, _, _, _, weaponImportance, weaponRange = unitInfo:get(unitID)
+		local sbjLocation, _, _, sbjName, _, weaponImportance, weaponRange = unitInfo:get(unitID)
 		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
 		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
-		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, attackEventType, unitID, unitDefID, _deferCommandEvent)
+		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, sbjName, attackEventType, unitID, _deferCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
 		event:addObject(attackedUnitID or -unitID, trgLocation)
@@ -1166,7 +1167,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage
 		damage = damage / 2
 	end
-	local sbjLocation, _, unitImportance = unitInfo:get(unitID)
+	local sbjLocation, _, unitImportance, sbjName = unitInfo:get(unitID)
 	local currentHealth, maxHealth, _, _, buildProgress = spGetUnitHealth(unitID)
 	-- currentHealth can be 0, also avoid skewing the score overly much
 	currentHealth = max(currentHealth, maxHealth / 16)
@@ -1175,12 +1176,12 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	-- Multiply by unit importance factor
 	importance = importance * unitImportance * buildProgress
 
-	addEvent(attackerTeam, importance, sbjLocation, nil, unitDamagedEventType, unitID, unitDefID)
+	addEvent(attackerTeam, importance, sbjLocation, nil, sbjName, unitDamagedEventType, unitID)
 	interestGrid:addLoc(sbjLocation, teamInfo[unitTeam].allyTeam, 0.2)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
-	local destroyedLocation, _, importance = unitInfo:get(unitID)
+	local destroyedLocation, _, importance, destroyedName = unitInfo:get(unitID)
 	unitInfo:forget(unitID)
 	purgeEvents(__purgeSubject, { unitID = unitID })
 
@@ -1200,10 +1201,10 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		return
 	end
 
-	local destroyerLocation = unitInfo:get(attackerID)
-	local destroyedEvent = addEvent(attackerTeam, importance, destroyedLocation, nil, unitDestroyedEventType, unitID, unitDefID)
+	local destroyerLocation, _, _, destroyerName = unitInfo:get(attackerID)
+	local destroyedEvent = addEvent(attackerTeam, importance, destroyedLocation, nil, destroyedName, unitDestroyedEventType, unitID)
 	destroyedEvent:addObject(attackerID, destroyerLocation)
-	local destroyerEvent = addEvent(unitTeam, importance, destroyerLocation, nil, unitDestroyerEventType, attackerID, attackerDefID)
+	local destroyerEvent = addEvent(unitTeam, importance, destroyerLocation, nil, destroyerName, unitDestroyerEventType, attackerID)
 	destroyerEvent:addObject(unitID, destroyedLocation)
 	-- It would be naff to show both
 	destroyedEvent:addExcludes(destroyerEvent)
@@ -1218,8 +1219,8 @@ end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local allyTeam = teamInfo[unitTeam].allyTeam
-	local sbjLocation, _, importance = unitInfo:watch(unitID, allyTeam, unitDefID)
-	addEvent(unitTeam, importance, sbjLocation, nil, unitBuiltEventType, unitID, unitDefID)
+	local sbjLocation, _, importance, sbjName = unitInfo:watch(unitID, allyTeam, unitDefID)
+	addEvent(unitTeam, importance, sbjLocation, nil, sbjName, unitBuiltEventType, unitID)
 end
 
 function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
@@ -1229,8 +1230,8 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 		return
 	end
 
-	local sbjLocation, _, importance = unitInfo:get(unitID)
-	local event = addEvent(newTeam, importance, sbjLocation, nil, unitTakenEventType, unitID, unitDefID)
+	local sbjLocation, _, importance, sbjName = unitInfo:get(unitID)
+	local event = addEvent(newTeam, importance, sbjLocation, nil, sbjName, unitTakenEventType, unitID)
 	local capturerLocation =  unitInfo:get(captureController)
 	event:addObject(captureController, capturerLocation)
 end
