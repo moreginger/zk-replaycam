@@ -829,9 +829,9 @@ local function initCamera(cx, cy, cz, rx, ry, type)
 	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov, type = type }
 end
 
-local function __pluralize(noun)
+local function __pluralize(noun, count)
 	-- FIXME: Better logic!
-	return noun .. "s"
+	return (count > 1 and count .. ' ' .. noun .. "s") or noun
 end
 
 local function __getUnitsNameString(units)
@@ -846,7 +846,7 @@ local function __getUnitsNameString(units)
 	end
 	local result
 	for unitName, count in pairs(unitNames) do
-		result = (result and "squad") or (count > 1 and __pluralize(unitName)) or unitName
+		result = (result and "squad") or __pluralize(unitName, count)
 	end
 	return result or "unknown"
 end
@@ -864,8 +864,14 @@ local function updateDisplay(event, frame)
 	end
 	actorName = actorName or "unknown"
 
+	local sbjUnitCount = 0
+	for _, _ in pairs(event._sbjUnits) do
+		sbjUnitCount = sbjUnitCount + 1
+	end
+  local sbjString = __pluralize(event.sbjName, sbjUnitCount)
+
 	if event.type == attackEventType then
-		commentary = event.sbjName .. " is attacking"
+		commentary = sbjString .. " is attacking"
   elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
@@ -873,18 +879,18 @@ local function updateDisplay(event, frame)
 		camType = camTypeOverview
 		commentary = "Let's get an overview of the battlefield"
 	elseif event.type == unitBuiltEventType then
-		commentary = event.sbjName .. " built by " .. actorName
+		commentary = sbjString .. " built by " .. actorName
 	elseif event.type == unitDamagedEventType then
-		commentary = event.sbjName .. " under attack by " .. actorName
+		commentary = sbjString .. " under attack by " .. actorName
 	elseif event.type == unitDestroyedEventType then
 		local destroyer = __getUnitsNameString(event._objUnits)
-		commentary = event.sbjName .. " destroyed by " .. destroyer .. " of " .. actorName
+		commentary = sbjString .. " destroyed by " .. destroyer .. " of " .. actorName
 	elseif event.type == unitDestroyerEventType then
-		commentary = event.sbjName .. " on a rampage"
+		commentary = sbjString .. " on a rampage"
 	elseif event.type == unitMovingEventType then
-		commentary = event.sbjName .. " moving"
+		commentary = sbjString .. " moving"
 	elseif event.type == unitTakenEventType then
-		commentary = event.sbjName .. " captured by " .. actorName
+		commentary = sbjString .. " captured by " .. actorName
 	end
 
 	display.camAngle = camAngle
@@ -1185,7 +1191,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	unitInfo:forget(unitID)
 	purgeEvents(__purgeSubject, { unitID = unitID })
 
-	if not destroyedLocation or not importance then
+	if not destroyedLocation or not importance or not destroyedName then
 		-- Might happen if an uncached unit is destroyed and fails to retrieve current location
 		return
 	end
