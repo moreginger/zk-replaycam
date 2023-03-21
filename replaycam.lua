@@ -342,6 +342,10 @@ function UnitInfoCache:_unitStats(unitDefID)
 	if not cacheObject then
 		local unitDef = UnitDefs[unitDefID]
 		local importance = unitDef.metalCost
+		if unitDef.customParams.ismex then
+			-- Give mexes a little buff since they are cheap but important
+			importance = importance * 2
+		end
 		local isStatic = not spGetMovetype(unitDef)
 		local wImportance, wRange = self:_weaponStats(unitDef)
 		cacheObject = { importance, isStatic, wImportance, wRange }
