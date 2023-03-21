@@ -67,7 +67,7 @@ local framesPerSecond = 30
 -- CONFIGURATION
 
 local LOG_ERROR, LOG_DEBUG = 1, 2
-local logging = LOG_DEBUG
+local logging = LOG_ERROR
 local updateIntervalFrames = framesPerSecond
 local defaultFov, defaultRx, defaultRy, maxCamRPerSecond = 45, -1.0, pi, pi / 16
 
