@@ -141,7 +141,7 @@ function WorldGrid:new(o)
 	for x = 1, o.xSize do
 		o.data[x] = {}
 		for y = 1, o.ySize do
-			o.data[x][y] = { nil, nil, 0 }
+			o.data[x][y] = {}
 		end
 	end
 	o:reset()
@@ -186,9 +186,9 @@ function WorldGrid:getInterestingScore()
 	return 5 * updateIntervalFrames / framesPerSecond
 end
 
-function WorldGrid:_addInternal(x, y, radius, opts, func)
-	if not radius then
-		radius = self.gridSize
+function WorldGrid:_addInternal(x, y, area, opts, func)
+	if not area then
+		area = self.gridSize
 	end
 	local gx, gy = self:__toGridCoords(x, y)
 
@@ -197,7 +197,7 @@ function WorldGrid:_addInternal(x, y, radius, opts, func)
 	for ix = gx - 1, gx + 1 do
 		for iy = gy - 1, gy + 1 do
 			if ix >= 1 and ix <= self.xSize and iy >= 1 and iy <= self.ySize then
-				areas[i] = self:_intersectArea(x - radius / 2, y - radius / 2, x + radius / 2, y + radius / 2,
+				areas[i] = self:_intersectArea(x - area / 2, y - area / 2, x + area / 2, y + area / 2,
 					(ix - 1) * self.gridSize, (iy - 1) * self.gridSize, ix * self.gridSize, iy * self.gridSize)
 				totalArea = totalArea + areas[i]
 			end
@@ -233,12 +233,8 @@ local function _addPasse(data, f, opts)
 	data[3] = data[3] + opts.passe * f
 end
 
-function WorldGrid:add(x, y, allyTeam, interest, radius)
-	return self:_addInternal(x, y, radius, { allyTeam = allyTeam, interest = interest }, _addInterest)
-end
-
-function WorldGrid:addLoc(location, allyTeam, interest, radius)
-	return self:add(location[1], location[2], allyTeam, interest, radius)
+function WorldGrid:add(x, y, allyTeam, interest)
+	return self:_addInternal(x, y, self.gridSize, { allyTeam = allyTeam, interest = interest }, _addInterest)
 end
 
 -- Call this exactly once between each reset.
@@ -269,7 +265,7 @@ function WorldGrid:reset()
 			data[1] = 1
 			data[2] = {}
 			-- Reduce passe to min of 0
-			data[3] = max(0, data[3] - 1)
+			data[3] = max(0, (data[3] or 0) - 1)
 		end
 	end
 end
@@ -355,9 +351,9 @@ function UnitInfoCache:_unitStats(unitDefID)
 end
 
 function UnitInfoCache:_updatePosition(unitID, cacheObject)
-	local x, y, z = spGetUnitPosition(unitID)
+	local location = getUnitLocation(unitID)
 	local xv, yv, zv = spGetUnitVelocity(unitID)
-	if not x or not y or not z or not xv or not yv or not zv then
+	if not location or not xv or not yv or not zv then
 		if logging >= LOG_DEBUG then
 			spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, cacheObject.name)
 		end
@@ -371,12 +367,13 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 		return cacheObject.location and cacheObject.velocity
 	end
 
-	local v = length(xv, yv, zv)
-	cacheObject.location = { x, y, z }
-	cacheObject.velocity = v
+	local velocity = length(xv, yv, zv)
+	cacheObject.location = location
+	cacheObject.velocity = velocity
 
 	if self.locationListener then
-		local isMoving = v > 0.1
+		local isMoving = velocity > 0.1
+		local x, y, z = unpack(location)
 		self.locationListener(x, y, z, cacheObject.allyTeam, isMoving)
 	end
 
@@ -403,7 +400,7 @@ function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
 		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(cacheObject.unitDefID)
-		return cacheObject.location, cacheObject.v, importance, cacheObject.name, isStatic, weaponImportance, weaponRange
+		return cacheObject.location, cacheObject.velocity, importance, cacheObject.name, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -515,17 +512,11 @@ function EventStatistics:new(o, types)
 end
 
 function EventStatistics:logEvent(type, importance)
-	local count, meanImportance = unpack(self[type])
-	local newCount = count + 1
-
+	local oldCount, meanImportance = unpack(self[type])
 	-- Switch to a weighted mean after a certain number of events, for faster adaptation.
-	local switchCount = 32
-	if newCount > switchCount then
-		count = switchCount - 1
-		newCount = switchCount
-	end
+	local newCount = (oldCount == 32 and oldCount) or oldCount + 1
 
-	meanImportance = meanImportance * count / newCount + importance / newCount
+	meanImportance = meanImportance * (newCount - 1) / newCount + importance / newCount
 	self[type][1] = newCount
 	self[type][2] = meanImportance
 end
@@ -676,6 +667,9 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 	end
 
 	if not event then
+		if logging == LOG_DEBUG then
+			spEcho('event', type, sbjName, importance, location)
+		end
 		lastEventId = lastEventId + 1
 		event = Event:new({
 			actorCount = 1,
@@ -757,7 +751,7 @@ end
 local function _getEventPercentile(currentFrame, event)
 	local importance = event:importanceAtFrame(currentFrame)
 	if importance <= 0 then
-		return
+		return 0
 	end
 	local x, _, z = unpack(event.location)
 	local interestModifier = interestGrid:getScore(x, z)
@@ -771,16 +765,16 @@ local function _processEvent(currentFrame, event)
 		local defer, abort = event.deferFunc(event)
 		if abort or event.deferredFrom - currentFrame > framesPerSecond * 16 then
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-			return
+			return 0
 		elseif defer then
 			-- Try it again later.
-			return
+			return 0
 		end
 		-- Stop deferring.
 		event.deferFunc = nil
 	end
 	local percentile = _getEventPercentile(currentFrame, event)
-	if not percentile then
+	if percentile <= 0 then
 		headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 	end
 	return percentile
@@ -1021,7 +1015,8 @@ function widget:Initialize()
 
 	local cx, cy, cz = spGetCameraPosition()
 	display = {
-		location = { -10000, -10000, -10000 },
+	  camAngle = defaultRx,
+		location = { mapSizeX / 2, -1000, mapSizeZ / 2 },
 		noUpdateBeforeFrame = 0,
 		velocity = { 0, 0, 0 }
 	}
@@ -1092,15 +1087,14 @@ end
 
 local function _deferCommandEvent(event)
 	local meta = event.meta
-	local sbjUnitID = meta.sbjUnitID
-	local sbjLocation, sbjv = unitInfo:get(sbjUnitID)
+	local sbjLocation, sbjv = unitInfo:get(meta.sbjUnitID)
 	if not sbjLocation or not sbjv then
 		return false, true
 	end
 	local defer = distance(event.location, sbjLocation) > meta.deferRange + sbjv * framesPerSecond * 2.5
 	if not defer then
-		local vctx, _, vctz = unpack(event.location)
-		interestGrid:add(vctx, vctz, meta.sbjAllyTeam, 1)
+		local trgx, _, trgz = unpack(event.location)
+		interestGrid:add(trgx, trgz, meta.sbjAllyTeam, 1)
 	end
 	return defer, false
 end
@@ -1117,9 +1111,6 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		-- Don't watch units that aren't finished.
 		return
 	end
-
-	-- Shouldn't select an old command
-	purgeEvents(__purgeCommands, { unitID = unitID })
 
 	if cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE then
 		-- Process move event.
@@ -1138,6 +1129,10 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 			return
 		end
+
+		-- Shouldn't display a superseded command
+		purgeEvents(__purgeCommands, { unitID = unitID })
+
 		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
 		local event = addEvent(unitTeam, importance, sbjLocation, meta, sbjName, unitMovingEventType, unitID, _deferCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
@@ -1156,6 +1151,10 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		if not trgLocation then
 			return
 		end
+
+		-- Shouldn't display a superseded command
+		purgeEvents(__purgeCommands, { unitID = unitID })
+
 		local sbjLocation, _, _, sbjName, _, weaponImportance, weaponRange = unitInfo:get(unitID)
 		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
@@ -1183,7 +1182,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	importance = importance * unitImportance * buildProgress
 
 	addEvent(attackerTeam, importance, sbjLocation, nil, sbjName, unitDamagedEventType, unitID)
-	interestGrid:addLoc(sbjLocation, teamInfo[unitTeam].allyTeam, 0.2)
+	interestGrid:add(sbjLocation[1], sbjLocation[3], teamInfo[unitTeam].allyTeam, 0.2)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
@@ -1219,8 +1218,8 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	-- Areas where units are being destroyed are particularly interesting, and
 	-- also the destroyed unit will no longer count, so add some extra interest
 	-- here.
-	interestGrid:addLoc(destroyedLocation, teamInfo[unitTeam].allyTeam, 1)
-	interestGrid:addLoc(destroyedLocation, teamInfo[attackerTeam].allyTeam, 1)
+	interestGrid:add(destroyedLocation[1], destroyedLocation[3], teamInfo[unitTeam].allyTeam, 1)
+	interestGrid:add(destroyedLocation[1], destroyedLocation[3], teamInfo[attackerTeam].allyTeam, 1)
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
