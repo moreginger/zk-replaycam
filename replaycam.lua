@@ -119,6 +119,26 @@ local function applyDamping(old, new, rollingFraction, dt)
 	return (1 - newFraction) * old + newFraction * new
 end
 
+local function _apply(fun, vector, arg1, arg2)
+	local result = {}
+	for i = 1, #vector do
+		result[i] = fun(vector[i], arg1, arg2)
+	end
+	return result
+end
+
+local function _apply2(fun, vector1, vector2, arg1, arg2)
+	local result = {}
+	for i = 1, #vector1 do
+		result[i] = fun(vector1[i], vector2[i], arg1, arg2)
+	end
+	return result
+end
+
+local function _multiply(l, r)
+	return l * r
+end
+
 -- SPRING UTILS
 
 local function getUnitLocation(unitID)
@@ -1020,6 +1040,7 @@ function widget:Initialize()
 	local cx, cy, cz = spGetCameraPosition()
 	display = {
 	  camAngle = defaultRx,
+		diag = 0,
 		location = { mapSizeX / 2, -1000, mapSizeZ / 2 },
 		noUpdateBeforeFrame = 0,
 		velocity = { 0, 0, 0 }
@@ -1289,28 +1310,24 @@ local function updateCamera(dt)
 		end
 	end
 
-	local boundingDiagLength = camDiagMin
-	if trackedLocationCount > 0 then
-		local ox, oy, oz = unpack(display.location)
-		local oxv, oyv, ozv = unpack(display.velocity)
-		local nx = xSum / trackedLocationCount
-		local ny = ySum / trackedLocationCount
-		local nz = zSum / trackedLocationCount
-		local nxv = xvSum / trackedLocationCount * framesPerSecond
-		local nyv = yvSum / trackedLocationCount * framesPerSecond
-		local nzv = zvSum / trackedLocationCount * framesPerSecond
-		-- Apply damping to location if relatively close, to avoid overly twitchy camera
-		if length(ox - nx, oy - ny, oz - nz) < eventMergeRange then
-			display.location = { applyDamping(ox, nx, 0.8, dt), applyDamping(oy, ny, 0.8, dt), applyDamping(oz, nz, 0.8, dt) }
-			display.velocity = { applyDamping(oxv, nxv, 0.8, dt), applyDamping(oyv, nyv, 0.8, dt), applyDamping(ozv, nzv, 0.8, dt)}
-		else
-		  display.location = { nx, ny, nz }
-			display.velocity = { nxv, nyv, nzv }
-		end
-		boundingDiagLength = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
-		-- Smoothly grade from camDiagMin to the boundingDiagLength when the latter is 2x the former
-		boundingDiagLength = boundingDiagLength + max(0, camDiagMin - boundingDiagLength * 0.5)
-		boundingDiagLength = max(camDiagMin, boundingDiagLength)
+	-- Update the location being displayed
+	local tlocation = _apply(_multiply, { xSum, ySum, zSum }, 1 / trackedLocationCount)
+	local tvelocity = _apply(_multiply, { xvSum, yvSum, zvSum }, 1 / trackedLocationCount)
+	local tdiag = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
+	-- Smoothly grade from camDiagMin to the target diag when the latter is 2x the former
+	tdiag = tdiag + max(0, camDiagMin - tdiag * 0.5)
+	tdiag = max(camDiagMin, tdiag)
+	
+	-- Apply damping to location if relatively close, to avoid overly twitchy camera
+	if distance(display.location, tlocation) < eventMergeRange then
+		local damping = 0.8
+		display.diag = applyDamping(display.diag, tdiag, damping, dt)
+		display.location = _apply2(applyDamping, display.location, tlocation, damping, dt)
+		display.velocity = _apply2(applyDamping, display.velocity, tvelocity, damping, dt)
+	else
+		display.diag = tdiag
+		display.location = tlocation
+		display.velocity = tvelocity
 	end
 
 	-- Smoothly move to the location of the event.
@@ -1323,7 +1340,7 @@ local function updateCamera(dt)
 	ex, ey, ez = ex + exv, ey + eyv, ez + ezv
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Where do we *want* the camera to be ie: (t)arget
-	local tcDist = calcCamRange(boundingDiagLength, defaultFov)
+	local tcDist = calcCamRange(display.diag, defaultFov)
 	local try = atan2(cx - ex, cz - ez) + pi
 	-- HACK: It appears that translation occurs 1 render frame later than rotation,
 	-- this is used to defer rotation by a frame when reorienting
@@ -1379,7 +1396,7 @@ local function updateCamera(dt)
 		-- Rotate and zoom camera
 		local trx = -atan2(cy - ey, length(cx - ex, cz - ez))
 		crx = (deferRotationRenderFrames == 0 and display.camAngle) or symmetricBound(trx, crx, maxCamRPerSecond * dt)
-		cfov = applyDamping(cfov, deg(2 * atan2(boundingDiagLength / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
+		cfov = applyDamping(cfov, deg(2 * atan2(display.diag / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
 	end
 
 	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames }
