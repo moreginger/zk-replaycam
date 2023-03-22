@@ -6,15 +6,38 @@ import re
 re_event = 'event, (?P<type>.+?),.+$'
 re_merge = 'merging events, (?P<type>.+?)$'
 re_mie = 'mie, (?P<type>.+?),.+$'
+re_opening = 'Opening demofile (?P<demofile>.+)$'
+re_reload = '[ReloadOrRestart] Spring'
 
-data = {
-    'event': {},
-    'merge': {},
-    'mie': {}
-}
+datas = []
+
+def createEmptyData(demofile):
+    return {
+        'demofile': demofile,
+        'event': {},
+        'merge': {},
+        'mie': {}
+    }
+
+data = None
 
 with open('infolog.txt') as file:
     while (line := file.readline()):
+        match = re.search(re_reload, line)
+        if match:
+            data = None
+            continue
+        match = re.search(re_opening, line)
+        if match:
+            if data:
+                raise Exception('Found new demofile while accumulating events')
+            demofile = match.group('demofile')
+            data = createEmptyData(demofile)
+            datas.append(data)
+            continue
+        if not data:
+            # FIXME: Stop creating overview event during init (before "Opening demofile" line)
+            continue
         match = re.search(re_event, line)
         if match:
             event_type = match.group('type')
@@ -34,4 +57,4 @@ with open('infolog.txt') as file:
             data['mie'][event_type] += 1
             continue
 
-print(json.dumps(data))
+print(json.dumps(datas))
