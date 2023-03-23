@@ -1401,21 +1401,20 @@ local function updateCamera(dt)
 
 	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames }
 
-	local cameraState = spGetCameraState()
-	cameraState.mode = 4
-	cameraState.px = camera.x
-	cameraState.py = camera.y
-	cameraState.pz = camera.z
-	cameraState.rx = camera.rx
-	cameraState.ry = camera.ry
-	cameraState.rz = 0
-	cameraState.fov = camera.fov
-
 	if userCameraOverrideFrame >= spGetGameFrame() then
 		return
 	end
 
-	spSetCameraState(cameraState, 0)
+	spSetCameraState({
+		mode = 4,
+		px = camera.x,
+		py = camera.y,
+		pz = camera.z,
+		rx = camera.rx,
+		ry = camera.ry,
+		rz = 0,
+		fov = camera.fov
+  }, 0)
 end
 
 function widget:Update(dt)
