@@ -257,19 +257,6 @@ function WorldGrid:add(x, y, allyTeam, interest)
 	return self:_addInternal(x, y, self.gridSize, { allyTeam = allyTeam, interest = interest }, _addInterest)
 end
 
--- Call this exactly once between each reset.
--- When watching an area we apply a fixed boost to make things sticky,
--- but a longer-term negative factor (passe) to encourage moving.
-function WorldGrid:setWatching(x, y)
-	-- Note: boost is spread over a 2x2 grid.
-	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
-	-- passe will be decreased by 1 in each grid square in reset, therefore:
-	-- 1. Make sure it all goes into one grid square instead of being shared
-	-- 2. Increase by 2 in anticipation of decreasing by 1 later
-	x, y =  self:__toWorldCoords(self:__toGridCoords(x, y))
-	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 2 }, _addPasse)
-end
-
 function WorldGrid:_intersectArea(x1, y1, x2, y2, x3, y3, x4, y4)
 	local x5, y5, x6, y6 = max(x1, x3), max(y1, y3), min(x2, x4), min(y2, y4)
 	if x5 >= x6 or y5 >= y6 then
@@ -288,6 +275,19 @@ function WorldGrid:reset()
 			data[3] = max(0, (data[3] or 0) - 1)
 		end
 	end
+end
+
+-- Call this exactly once between each reset.
+-- When watching an area we apply a fixed boost to make things sticky,
+-- but a longer-term negative factor (passe) to encourage moving.
+function WorldGrid:setWatching(x, y)
+	-- Note: boost is spread over a 2x2 grid.
+	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
+	-- passe will be decreased by 1 in each grid square in reset, therefore:
+	-- 1. Make sure it all goes into one grid square instead of being shared
+	-- 2. Increase by 2 in anticipation of decreasing by 1 later
+	x, y =  self:__toWorldCoords(self:__toGridCoords(x, y))
+	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 2 }, _addPasse)
 end
 
 -- Return mean, max, maxX, maxY
@@ -507,8 +507,8 @@ function Event:removeSubject(unitID)
 	return true
 end
 
-function Event:shouldMerge(type, sbjName, location)
-	return self.type == type and self.sbjName == sbjName and distance(self.location, location) < eventMergeRange
+function Event:shouldMerge(type, sbjName, location, actorAllyTeam)
+	return self.type == type and self.sbjName == sbjName and self.actorAllyTeam == actorAllyTeam and distance(self.location, location) < eventMergeRange
 end
 
 function Event:subjectCount()
@@ -543,6 +543,12 @@ function EventStatistics:logEvent(type, importance)
 	meanImportance = meanImportance * (newCount - 1) / newCount + importance / newCount
 	self[type][1] = newCount
 	self[type][2] = meanImportance
+end
+
+-- Return mean importance
+function EventStatistics:getMean(type)
+	local mean = self[type][2]
+	return (mean > 0) and mean or nil
 end
 
 -- Return percentile in unit range
@@ -649,6 +655,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 
 	local frame = spGetGameFrame()
 	local decay = decayPerSecond[type]
+	local actorAllyTeam = actor and teamInfo[actor].allyTeam
 
 	-- Try to merge into recent events.
 	local considerForMergeAfterFrame = frame - framesPerSecond
@@ -664,7 +671,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 		if importanceAtFrame <= 0 then
 			-- Just remove the event forever.
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif event:shouldMerge(type, sbjName, location) then
+		elseif event:shouldMerge(type, sbjName, location, actorAllyTeam) then
 			if logging >= LOG_DEBUG then
 				spEcho('merging events', type)
 			end
@@ -698,6 +705,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 		event = Event:new({
 			actorCount = 1,
 			actors = initTable(actor, true),
+			actorAllyTeam = actorAllyTeam,
 			decay = decay,
 			deferFunc = deferFunc,
 			id = lastEventId,
@@ -782,6 +790,8 @@ local function _getEventPercentile(currentFrame, event)
 	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
+-- Process the event, possibly removing it from the list
+-- Return true if the event is still in the list
 local function _processEvent(currentFrame, event)
 	if event.deferFunc then
 	  event.deferredFrom = event.deferredFrom or event.started
@@ -789,40 +799,55 @@ local function _processEvent(currentFrame, event)
 		local defer, abort = event.deferFunc(event)
 		if abort or event.deferredFrom - currentFrame > framesPerSecond * 16 then
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-			return 0
-		elseif defer then
-			-- Try it again later.
-			return 0
+			return
 		end
-		-- Stop deferring.
-		event.deferFunc = nil
+		if not defer then
+			-- Stop deferring.
+			event.deferFunc = nil
+		end
 	end
-	local percentile = _getEventPercentile(currentFrame, event)
-	if percentile <= 0 then
+
+	if event:importanceAtFrame(currentFrame) <= 0 then
 		headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
+		return
 	end
-	return percentile
+
+	return true
 end
 
 local function selectMostInterestingEvent(currentFrame)
+	-- Process events and update interest grid
 	local event = tailEvent
-	-- Update event statistics with current interest grid
+	while event ~= nil do
+		local nextEvent = event.next
+		if _processEvent(currentFrame, event) and event.actorAllyTeam then
+			local meanImportance = eventStatistics:getMean(event.type)
+			local importanceAtFrame = event:importanceAtFrame(currentFrame)
+			local interest = meanImportance and (importanceAtFrame / meanImportance) or 1
+				-- FIXME: Could use allyteams of all involved parties?
+			local x, _, z = unpack(event.location)
+			interestGrid:add(x, z, event.actorAllyTeam, interest)
+		end
+		event = nextEvent
+	end
+
+	-- Update event statistics
+	event = tailEvent
 	while event ~= nil do
 		local x, _, z = unpack(event.location)
 		eventStatistics:logEvent(event.type, event.importance * interestGrid:getScore(x, z))
 		event = event.next
 	end
-	-- Make sure we always include current event even if it's not in the list.
+
+	-- Make sure we always include current event even if it's not in the list
 	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent) or 0
 	event = tailEvent
 	while event ~= nil do
-		-- Get next event before we process the current one, as this may nil out .next.
-		local nextEvent = event.next
-		local eventPercentile = _processEvent(currentFrame, event)
-		if eventPercentile and eventPercentile > mostPercentile then
+		local eventPercentile = _getEventPercentile(currentFrame, event)
+		if eventPercentile > mostPercentile and not event.deferFunc then
 			mie, mostPercentile = event, eventPercentile
 		end
-		event = nextEvent
+		event = event.next
 	end
 	if logging >= LOG_DEBUG and mie then
 		spEcho('mie', mie.type, mie.sbj, mostPercentile, mie.started)
@@ -1207,7 +1232,6 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	importance = importance * unitImportance * buildProgress
 
 	addEvent(attackerTeam, importance, sbjLocation, nil, sbjName, unitDamagedEventType, unitID)
-	interestGrid:add(sbjLocation[1], sbjLocation[3], teamInfo[unitTeam].allyTeam, 0.2)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
@@ -1239,12 +1263,6 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	-- It would be naff to show both
 	destroyedEvent:addExcludes(destroyerEvent)
   destroyerEvent:addExcludes(destroyedEvent)
-
-	-- Areas where units are being destroyed are particularly interesting, and
-	-- also the destroyed unit will no longer count, so add some extra interest
-	-- here.
-	interestGrid:add(destroyedLocation[1], destroyedLocation[3], teamInfo[unitTeam].allyTeam, 1)
-	interestGrid:add(destroyedLocation[1], destroyedLocation[3], teamInfo[attackerTeam].allyTeam, 1)
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
