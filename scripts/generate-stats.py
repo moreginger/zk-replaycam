@@ -7,7 +7,7 @@ re_event = 'event, (?P<type>.+?),.+$'
 re_merge = 'merging events, (?P<type>.+?)$'
 re_mie = 'mie, (?P<type>.+?),.+$'
 re_opening = 'Opening demofile (?P<demofile>.+)$'
-re_reload = '[ReloadOrRestart] Spring'
+re_wins = 'game_message: .+ wins!'
 
 datas = []
 
@@ -23,7 +23,7 @@ data = None
 
 with open('infolog.txt') as file:
     while (line := file.readline()):
-        match = re.search(re_reload, line)
+        match = re.search(re_wins, line)
         if match:
             data = None
             continue
@@ -36,7 +36,6 @@ with open('infolog.txt') as file:
             datas.append(data)
             continue
         if not data:
-            # FIXME: Stop creating overview event during init (before "Opening demofile" line)
             continue
         match = re.search(re_event, line)
         if match:
