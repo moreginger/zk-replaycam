@@ -87,11 +87,9 @@ local function length(x, y, z)
 	return sqrt(x * x + y * y + (z and z * z or 0))
 end
 
--- Calculate x, z distance between two { x, y, z } points.
+-- Calculate x, y, z distance between two { x, y, z } points.
 local function distance(p1, p2)
-	local p1x, _, p1z = unpack(p1)
-	local p2x, _, p2z = unpack(p2)
-	return length(p1x - p2x, p1z - p2z)
+	return length(p1[1] - p2[1], p1[2] - p2[2], p1[3] - p2[3])
 end
 
 -- Bound a number to be >= min and <= max
@@ -1331,7 +1329,7 @@ local function updateCamera(dt)
 	-- Update the location being displayed
 	local tlocation = _apply(_multiply, { xSum, ySum, zSum }, 1 / trackedLocationCount)
 	local tvelocity = _apply(_multiply, { xvSum, yvSum, zvSum }, 1 / trackedLocationCount)
-	local tdiag = distance({ xMin, nil, zMin }, { xMax, nil, zMax })
+	local tdiag = distance({ xMin, 0, zMin }, { xMax, 0, zMax })
 	-- Smoothly grade from camDiagMin to the target diag when the latter is 2x the former
 	tdiag = tdiag + max(0, camDiagMin - tdiag * 0.5)
 	tdiag = max(camDiagMin, tdiag)
