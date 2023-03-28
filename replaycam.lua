@@ -29,7 +29,6 @@ local spEcho = Spring.Echo
 local spGetAllyTeamList = Spring.GetAllyTeamList
 local spGetCameraPosition = Spring.GetCameraPosition
 local spGetCameraState = Spring.GetCameraState
-local spGetGameFrame = Spring.GetGameFrame
 local spGetGameRulesParam = Spring.GetGameRulesParam
 local spGetGroundHeight = Spring.GetGroundHeight
 local spGetHumanName = Spring.Utilities.GetHumanName
@@ -63,6 +62,7 @@ local CMD_ATTACK_MOVE = CMD.FIGHT
 local CMD_MOVE = CMD.MOVE
 
 local framesPerSecond = 30
+local gameFrame = 0
 
 -- CONFIGURATION
 
@@ -89,7 +89,11 @@ end
 
 -- Calculate x, y, z distance between two { x, y, z } points.
 local function distance(p1, p2)
-	return length(p1[1] - p2[1], p1[2] - p2[2], p1[3] - p2[3])
+	local x, y, z = p1[1], p1[2], p1[3]
+	if p2 then
+		x, y, z = x - p2[1], y - p2[2], z - p2[3]
+	end
+	return length(x, y, z)
 end
 
 -- Bound a number to be >= min and <= max
@@ -133,8 +137,12 @@ local function _apply2(fun, vector1, vector2, arg1, arg2)
 	return result
 end
 
-local function _multiply(l, r)
-	return l * r
+local function _multiply(a, b, c)
+	return a * b * (c or 1)
+end
+
+local function _extrapolate(current, rate, dt)
+	return current + rate * dt
 end
 
 -- SPRING UTILS
@@ -142,6 +150,11 @@ end
 local function getUnitLocation(unitID)
 	local x, y, z = spGetUnitPosition(unitID)
 	return x and y and z and { x, y, z }
+end
+
+local function getUnitVelocity(unitID)
+	local xv, yv, zv = spGetUnitVelocity(unitID)
+	return xv and yv and zv and { xv, yv, zv }
 end
 
 -- WORLD GRID CLASS
@@ -374,8 +387,8 @@ end
 
 function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local location = getUnitLocation(unitID)
-	local xv, yv, zv = spGetUnitVelocity(unitID)
-	if not location or not xv or not yv or not zv then
+	local velocity = getUnitVelocity(unitID)
+	if not location or not velocity then
 		if logging >= LOG_DEBUG then
 			spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, cacheObject.name)
 		end
@@ -389,12 +402,11 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 		return cacheObject.location and cacheObject.velocity
 	end
 
-	local velocity = length(xv, yv, zv)
 	cacheObject.location = location
 	cacheObject.velocity = velocity
 
 	if self.locationListener then
-		local isMoving = velocity > 0.1
+		local isMoving = distance(velocity) > 0.1
 		local x, y, z = unpack(location)
 		self.locationListener(x, y, z, cacheObject.allyTeam, isMoving)
 	end
@@ -403,13 +415,12 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 end
 
 function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
-	local currentFrame = spGetGameFrame()
 	if not unitDefID then
 		unitDefID = spGetUnitDefID(unitID)
 	end
 	local unitDef = UnitDefs[unitDefID]
 	local name = spGetHumanName(unitDef, unitID)
-	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, lastUpdatedFrame = currentFrame }
+	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, lastUpdatedFrame = gameFrame }
 	if not self:_updatePosition(unitID, cacheObject) then
 		return
 	end
@@ -422,7 +433,9 @@ function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
 		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(cacheObject.unitDefID)
-		return cacheObject.location, cacheObject.velocity, importance, cacheObject.name, isStatic, weaponImportance, weaponRange
+		local dt = (gameFrame - cacheObject.lastUpdatedFrame) / framesPerSecond
+		local location = _apply2(_extrapolate, cacheObject.location, cacheObject.velocity, dt)
+		return location, cacheObject.velocity, importance, cacheObject.name, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -436,7 +449,7 @@ end
 function UnitInfoCache:forget(unitID)
 	if self.cache[unitID] then
 		-- Don't remove immediately as we may need to get information for event display
-		self.cache[unitID].removeAfterFrame = spGetGameFrame() + framesPerSecond * 30
+		self.cache[unitID].removeAfterFrame = gameFrame + framesPerSecond * 30
 	end
 end
 
@@ -651,12 +664,11 @@ end
 local function addEvent(actor, importance, location, meta, sbjName, type, unitID, deferFunc, opts)
 	opts = opts or {}
 
-	local frame = spGetGameFrame()
 	local decay = decayPerSecond[type]
 	local actorAllyTeam = actor and teamInfo[actor].allyTeam
 
 	-- Try to merge into recent events.
-	local considerForMergeAfterFrame = frame - framesPerSecond
+	local considerForMergeAfterFrame = gameFrame - framesPerSecond
 	local event = (not opts.noMerge and headEvent) or nil
 	while event ~= nil do
 		local nextEvent = event.previous
@@ -665,7 +677,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			event = nil
 			break
 		end
-		local importanceAtFrame = event:importanceAtFrame(frame)
+		local importanceAtFrame = event:importanceAtFrame(gameFrame)
 		if importanceAtFrame <= 0 then
 			-- Just remove the event forever.
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
@@ -677,7 +689,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			event.importance = importanceAtFrame + importance
 			event.decay = decay
 			event.location = location
-			event.started = frame
+			event.started = gameFrame
 			if actor and not event.actors[actor] then
 				event.actorCount = event.actorCount + 1
 				event.actors[actor] = actor
@@ -711,7 +723,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			location = location,
 			meta = meta,
 			sbjName = sbjName,
-			started = frame,
+			started = gameFrame,
 			type = type
 		})
 		if unitID then
@@ -892,8 +904,8 @@ local function __getUnitsNameString(units)
 	return result or "unknown"
 end
 
-local function updateDisplay(event, frame)
-	if display.noUpdateBeforeFrame > frame then
+local function updateDisplay(event)
+	if display.noUpdateBeforeFrame > gameFrame then
 		return false
 	end
 
@@ -937,7 +949,7 @@ local function updateDisplay(event, frame)
 	display.camAngle = camAngle
 	if display.camType ~= camType then
 		-- It looks especially naff if we flip between camera types every second
-		display.noUpdateBeforeFrame = frame + framesPerSecond * 4
+		display.noUpdateBeforeFrame = gameFrame + framesPerSecond * 4
 	end
 	display.camType = camType
 
@@ -1068,11 +1080,12 @@ function widget:Initialize()
 		noUpdateBeforeFrame = 0,
 		velocity = { 0, 0, 0 }
 	}
-	updateDisplay(addOverviewEvent(1), 0)
+	updateDisplay(addOverviewEvent(1))
 	camera = initCamera(cx, cy, cz, defaultRx, defaultRy, camTypeTracking)
 end
 
 function widget:GameFrame(frame)
+	gameFrame = frame
 	unitInfo:update(frame)
 
 	if (frame % updateIntervalFrames ~= 0) then
@@ -1098,7 +1111,7 @@ function widget:GameFrame(frame)
 	addOverviewEvent(100 / igMax)
 
 	local mie = selectMostInterestingEvent(frame)
-	if mie and mie ~= showingEvent and updateDisplay(mie, frame) then
+	if mie and mie ~= showingEvent and updateDisplay(mie) then
 		if showingEvent then
 			-- Avoid showing it again
 			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
@@ -1114,7 +1127,7 @@ end
 
 local function userAction()
 	-- Override camera movements for a short time.
-  userCameraOverrideFrame = spGetGameFrame() + framesPerSecond
+  userCameraOverrideFrame = gameFrame + framesPerSecond
 end
 
 function widget:MousePress(x, y, button)
@@ -1139,7 +1152,7 @@ local function _deferCommandEvent(event)
 	if not sbjLocation or not sbjv then
 		return false, true
 	end
-	local defer = distance(event.location, sbjLocation) > meta.deferRange + sbjv * framesPerSecond * 2.5
+	local defer = distance(event.location, sbjLocation) > meta.deferRange + distance(sbjv) * framesPerSecond * 2.5
 	if not defer then
 		local trgx, _, trgz = unpack(event.location)
 		interestGrid:add(trgx, trgz, meta.sbjAllyTeam, 1)
@@ -1417,7 +1430,7 @@ local function updateCamera(dt)
 
 	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames }
 
-	if userCameraOverrideFrame >= spGetGameFrame() then
+	if userCameraOverrideFrame >= gameFrame then
 		return
 	end
 
