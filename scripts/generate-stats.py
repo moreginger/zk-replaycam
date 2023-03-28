@@ -29,8 +29,7 @@ with open('infolog.txt') as file:
             continue
         match = re.search(re_opening, line)
         if match:
-            if data:
-                raise Exception('Found new demofile while accumulating events')
+            # FIXME: Found new demofile while accumulating events - e.g. caused by restarting.
             demofile = match.group('demofile')
             data = createEmptyData(demofile)
             datas.append(data)
