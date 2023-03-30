@@ -1491,7 +1491,7 @@ function widget:Update(dt)
 end
 
 function widget:DrawScreen()
-	if not logging == LOG_DEBUG or not camera.bounds then
+	if not logging ~= LOG_DEBUG or not camera.bounds then
 		return
 	end
 
