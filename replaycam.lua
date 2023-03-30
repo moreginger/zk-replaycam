@@ -1127,7 +1127,7 @@ function widget:GameFrame(frame)
 		for _, unitID in pairs(units) do
 			local location, _, _, _, isStatic = unitInfo:get(unitID)
 			if not isStatic then
-				hotspotEvent = hotspotEvent or addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, hotspotEventType, -1, nil, { noMerge = true })
+				hotspotEvent = hotspotEvent or addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, hotspotEventType, nil, nil, { noMerge = true })
 				hotspotEvent:addSubject(unitID, location)
 			end
 		end
