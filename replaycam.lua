@@ -44,7 +44,7 @@ local spGetUnitHealth = Spring.GetUnitHealth
 local spGetUnitNoDraw = Spring.GetUnitNoDraw
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
-local spGetUnitsInRectangle = Spring.GetUnitsInRectangle
+local spGetUnitsInCylinder = Spring.GetUnitsInCylinder
 local spGetUnitTeam = Spring.GetUnitTeam
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spGetViewGeometry = Spring.GetViewGeometry
@@ -898,7 +898,7 @@ local camDiagMin = 1000
 local cameraAccel = worldGridSize * 1.2
 local maxPanDistance = worldGridSize * 3
 local mapEdgeBorder = worldGridSize * 0.5
-local keepTrackingRange = worldGridSize * 1.5
+local keepTrackingRange = worldGridSize * 2
 
 local display, initialCameraState, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
@@ -1122,7 +1122,7 @@ function widget:GameFrame(frame)
 
 	local igMax, igX, igZ = interestGrid:statistics()
 	if igMax >= interestGrid:getInterestingScore() then
-		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
+		local units = spGetUnitsInCylinder(igX, igZ, length(worldGridSize / 2, worldGridSize / 2))
 		local hotspotEvent
 		for _, unitID in pairs(units) do
 			local location, _, _, _, isStatic = unitInfo:get(unitID)
@@ -1374,7 +1374,7 @@ local function updateCamera(dt)
 	
 	-- Apply damping to location if relatively close, to avoid overly twitchy camera
 	if distance(display.location, tlocation) < eventMergeRange then
-		local damping = 0.8
+		local damping = 0.4
 		display.diag = applyDamping(display.diag, tdiag, damping, dt)
 		display.location = _apply2(applyDamping, display.location, tlocation, damping, dt)
 		display.velocity = _apply2(applyDamping, display.velocity, tvelocity, damping, dt)
