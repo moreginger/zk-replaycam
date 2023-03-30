@@ -304,18 +304,43 @@ end
 -- Return mean, max, maxX, maxY
 function WorldGrid:statistics()
 	local maxValue, maxX, maxY, total = -1, nil, nil, 0
-	for x = 1, self.xSize do
-		for y = 1, self.ySize do
-			local value = self:_getScoreGridCoords(x, y)
+	for gx = 1, self.xSize do
+		for gy = 1, self.ySize do
+			local value = self:_getScoreGridCoords(gx, gy)
 			total = total + value
 			if maxValue < value then
 				maxValue = value
-				maxX = x
-				maxY = y
+				maxX = gx
+				maxY = gy
 			end
 		end
 	end
-	return total / (self.xSize * self.ySize), maxValue, (maxX - 0.5) * self.gridSize, (maxY - 0.5) * self.gridSize
+
+	-- Displace the coordinates according to the scores of neighbouring squares,
+	-- this avoids the problem of a hard stop at the edge of a square.
+	local centerX, centerY = self:__toWorldCoords(maxX, maxY)
+	local gridsToAverage = {}
+	local totalScore = 0
+	for gx = max(1, maxX - 1), min(self.xSize, maxX + 1) do
+		for gy = max(1, maxY - 1), min(self.ySize, maxY + 1) do
+			if gx ~= maxX or gy ~= maxY then
+				local wX, wY = self:__toWorldCoords(gx, gy)
+				-- Displace according to the inverse of the distance
+				local distanceFactor = 1 / length(maxX - gx, maxY - gy)
+				local dX, dY = (wX - centerX) * distanceFactor, (wY - centerY) * distanceFactor
+				local score = self:_getScoreGridCoords(gx, gy)
+				gridsToAverage[#gridsToAverage + 1] = { dX = dX, dY = dY, score = score }
+				totalScore = totalScore + score
+			end
+		end
+	end
+
+	local dX, dY = 0, 0
+	for _, grid in pairs(gridsToAverage) do
+		dX, dY = dX + (grid.dX * grid.score / totalScore), dY + (grid.dY * grid.score / totalScore)
+	end
+
+	return maxValue, centerX + dX, centerY + dY
 end
 
 -- UNIT INFO CACHE
@@ -1095,7 +1120,7 @@ function widget:GameFrame(frame)
 	local x, _, z = unpack(display.location)
 	interestGrid:setWatching(x, z)
 
-	local _, igMax, igX, igZ = interestGrid:statistics()
+	local igMax, igX, igZ = interestGrid:statistics()
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInRectangle (igX - worldGridSize / 2, igZ - worldGridSize / 2, igX + worldGridSize / 2, igZ + worldGridSize / 2)
 		local hotspotEvent
