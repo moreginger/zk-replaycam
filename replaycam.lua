@@ -25,6 +25,14 @@ local sin = math.sin
 local sqrt = math.sqrt
 local tan = math.tan
 
+
+local GL_LINE = GL.LINE
+local GL_FRONT_AND_BACK = GL.FRONT_AND_BACK
+local glColor = gl.Color
+local glLineWidth = gl.LineWidth
+local glPolygonMode = gl.PolygonMode
+local glRect = gl.Rect
+
 local spEcho = Spring.Echo
 local spGetAllyTeamList = Spring.GetAllyTeamList
 local spGetCameraPosition = Spring.GetCameraPosition
@@ -51,6 +59,7 @@ local spGetViewGeometry = Spring.GetViewGeometry
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
 local spTableEcho = Spring.Utilities.TableEcho
+local spWorldToScreenCoords = Spring.WorldToScreenCoords
 
 local Chili
 local Window
@@ -1453,7 +1462,7 @@ local function updateCamera(dt)
 		cfov = applyDamping(cfov, deg(2 * atan2(display.diag / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
 	end
 
-	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames }
+	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, bounds = { xMin, zMin, xMax, zMax } }
 
 	if userCameraOverrideFrame >= gameFrame then
 		return
@@ -1479,4 +1488,29 @@ function widget:Update(dt)
 		userAction()
 	end
 	updateCamera(dt)
+end
+
+function widget:DrawScreen()
+	if not logging == LOG_DEBUG or not camera.bounds then
+		return
+	end
+
+	local xMin, zMin, xMax, zMax = unpack(camera.bounds)
+	local centerGroundHeight = spGetGroundHeight((xMin + xMax) / 2, (zMin + zMax) / 2)
+	local screenCoordinates = {}
+	screenCoordinates[#screenCoordinates+1] = { spWorldToScreenCoords(xMin, centerGroundHeight, zMin) }
+	screenCoordinates[#screenCoordinates+1] = { spWorldToScreenCoords(xMin, centerGroundHeight, zMax) }
+	screenCoordinates[#screenCoordinates+1] = { spWorldToScreenCoords(xMax, centerGroundHeight, zMin) }
+	screenCoordinates[#screenCoordinates+1] = { spWorldToScreenCoords(xMax, centerGroundHeight, zMax) }
+	
+	local xMinScreen, yMinScreen, xMaxScreen, yMaxScreen = huge, huge, -huge, -huge
+	for _, coord in pairs(screenCoordinates) do
+		local x, y = unpack(coord)
+		xMinScreen, yMinScreen, xMaxScreen, yMaxScreen = min(xMinScreen, x), min(yMinScreen, y), max(xMaxScreen, x), max(yMaxScreen, y)
+	end
+
+	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+	glLineWidth(2)
+	glColor(0, 1, 0, 0.5)
+	glRect(xMinScreen - 32, yMinScreen - 32, xMaxScreen + 32, yMaxScreen + 32)
 end
