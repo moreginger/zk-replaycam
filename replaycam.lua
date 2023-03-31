@@ -80,6 +80,17 @@ local logging = LOG_ERROR
 local updateIntervalFrames = framesPerSecond
 local defaultFov, defaultRx, defaultRy, maxCamRPerSecond = 45, -1.0, pi, pi / 16
 
+options_path = 'Settings/Camera/ReplayCam'
+options = {
+	tracking_reticle = {
+		name = 'Show tracking reticle',
+		desc = 'Draw a reticle around the units being tracked',
+		type = 'bool',
+		value = false,
+		noHotkey = true,
+	}
+}
+
 -- UTILITY FUNCTIONS
 
 -- Initialize a table.
@@ -1491,7 +1502,7 @@ function widget:Update(dt)
 end
 
 function widget:DrawScreen()
-	if not logging ~= LOG_DEBUG or not camera.bounds then
+	if not options.tracking_reticle.value or not camera.bounds then
 		return
 	end
 
