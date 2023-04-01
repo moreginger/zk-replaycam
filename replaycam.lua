@@ -88,6 +88,19 @@ options = {
 		type = 'bool',
 		value = false,
 		noHotkey = true,
+	},
+	disable_tracking = {
+		name = 'Disable tracking',
+		desc = 'Disable camera tracking',
+		type = 'bool',
+		value = false,
+	},
+	user_interrupts_tracking = {
+		name = 'Pause tracking on user input',
+		desc = 'Pause camera tracking when the user moves the mouse etc',
+		type = 'bool',
+		value = true,
+		noHotkey = true,
 	}
 }
 
@@ -1171,8 +1184,10 @@ function widget:GameFrame(frame)
 end
 
 local function userAction()
-	-- Override camera movements for a short time.
-  userCameraOverrideFrame = gameFrame + framesPerSecond
+	if options.user_interrupts_tracking.value then
+		-- Override camera movements for a short time.
+		userCameraOverrideFrame = gameFrame + framesPerSecond
+	end
 end
 
 function widget:MousePress(x, y, button)
@@ -1473,9 +1488,9 @@ local function updateCamera(dt)
 		cfov = applyDamping(cfov, deg(2 * atan2(display.diag / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
 	end
 
-	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, bounds = { xMin, zMin, xMax, zMax } }
+	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, reticle = { xMin, zMin, xMax, zMax } }
 
-	if userCameraOverrideFrame >= gameFrame then
+	if options.disable_tracking.value or userCameraOverrideFrame >= gameFrame then
 		return
 	end
 
@@ -1502,18 +1517,18 @@ function widget:Update(dt)
 end
 
 function widget:DrawScreen()
-	if not options.tracking_reticle.value or not camera.bounds then
+	if not options.tracking_reticle.value or not camera.reticle then
 		return
 	end
 
-	local xMin, zMin, xMax, zMax = unpack(camera.bounds)
+	local xMin, zMin, xMax, zMax = unpack(camera.reticle)
 	local centerGroundHeight = spGetGroundHeight((xMin + xMax) / 2, (zMin + zMax) / 2)
 	local screenCoordinates = {}
 	screenCoordinates[#screenCoordinates+1] = { spWorldToScreenCoords(xMin, centerGroundHeight, zMin) }
 	screenCoordinates[#screenCoordinates+1] = { spWorldToScreenCoords(xMin, centerGroundHeight, zMax) }
 	screenCoordinates[#screenCoordinates+1] = { spWorldToScreenCoords(xMax, centerGroundHeight, zMin) }
 	screenCoordinates[#screenCoordinates+1] = { spWorldToScreenCoords(xMax, centerGroundHeight, zMax) }
-	
+
 	local xMinScreen, yMinScreen, xMaxScreen, yMaxScreen = huge, huge, -huge, -huge
 	for _, coord in pairs(screenCoordinates) do
 		local x, y = unpack(coord)
