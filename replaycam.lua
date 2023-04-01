@@ -1488,7 +1488,8 @@ local function updateCamera(dt)
 		cfov = applyDamping(cfov, deg(2 * atan2(display.diag / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
 	end
 
-	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, reticle = { xMin, zMin, xMax, zMax } }
+	local showReticle = display.camType == camTypeTracking
+	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, reticle = showReticle and { xMin, zMin, xMax, zMax } }
 
 	if options.disable_tracking.value or userCameraOverrideFrame >= gameFrame then
 		return
