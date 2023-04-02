@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Smoother camera rotation
 - Improved tracking of hotspot event
 - Apply all events to interest grid weighted by importance
 - Apply damping to the event field of view (diagonal), as already done for location and velocity

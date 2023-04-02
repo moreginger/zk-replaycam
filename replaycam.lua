@@ -78,7 +78,7 @@ local gameFrame = 0
 local LOG_ERROR, LOG_DEBUG = 1, 2
 local logging = LOG_ERROR
 local updateIntervalFrames = framesPerSecond
-local defaultFov, defaultRx, defaultRy, maxCamRPerSecond = 45, -1.0, pi, pi / 16
+local defaultFov, defaultRx, defaultRy = 45, -1.0, pi
 
 options_path = 'Settings/Camera/ReplayCam'
 options = {
@@ -138,10 +138,6 @@ local function bound(x, min, max)
 		return max
 	end
 	return x
-end
-
-local function symmetricBound(x, center, diff)
-	return bound(x, center - diff, center + diff)
 end
 
 local function signum(x)
@@ -929,6 +925,7 @@ local camTypeTracking = 'tracking'
 local camTypeOverview = 'overview'
 local camDiagMin = 1000
 local cameraAccel = worldGridSize * 1.2
+local cameraRAccel =  pi / 16
 local maxPanDistance = worldGridSize * 3
 local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 2
@@ -937,7 +934,7 @@ local display, initialCameraState, camera
 local userCameraOverrideFrame, lastMouseLocation = -1000, { -1, 0, -1 }
 
 local function initCamera(cx, cy, cz, rx, ry, type)
-	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, ry = ry, fov = defaultFov, type = type }
+	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, rxv = 0, ry = ry, ryv = 0, fov = defaultFov, type = type }
 end
 
 local function __pluralize(noun, count)
@@ -1399,6 +1396,10 @@ local function updateCamera(dt)
 		end
 	end
 
+	-- HACK: It appears that translation occurs 1 render frame later than rotation,
+	-- this is used to defer rotation by a frame when reorienting
+	local deferRotationRenderFrames = camera.deferRotationRenderFrames and camera.deferRotationRenderFrames - 1
+
 	-- Update the location being displayed
 	local tlocation = _apply(_multiply, { xSum, ySum, zSum }, 1 / trackedLocationCount)
 	local tvelocity = _apply(_multiply, { xvSum, yvSum, zvSum }, 1 / trackedLocationCount)
@@ -1422,7 +1423,7 @@ local function updateCamera(dt)
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
 	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
-	local crx, cry, cfov = camera.rx, camera.ry, camera.fov
+	local crx, crxv, cry, cryv, cfov = camera.rx, camera.rxv, camera.ry, camera.ryv, camera.fov
 	-- Event location
 	local ex, ey, ez = unpack(display.location)
 	local exv, eyv, ezv = unpack(display.velocity)
@@ -1431,10 +1432,10 @@ local function updateCamera(dt)
 	-- Where do we *want* the camera to be ie: (t)arget
 	local tcDist = calcCamRange(display.diag, defaultFov)
 	local try = atan2(cx - ex, cz - ez) + pi
-	-- HACK: It appears that translation occurs 1 render frame later than rotation,
-	-- this is used to defer rotation by a frame when reorienting
-	local deferRotationRenderFrames = camera.deferRotationRenderFrames and camera.deferRotationRenderFrames - 1
-	cry = (deferRotationRenderFrames == 0 and try) or symmetricBound(try, cry, maxCamRPerSecond * dt)
+	local pry = cry + cryv / cameraRAccel / 2
+	cryv = (deferRotationRenderFrames == 0 and 0) or cryv + signum(try - pry) * cameraRAccel * dt
+	cry = (deferRotationRenderFrames == 0 and try) or cry + cryv * dt
+	-- spEcho(cry, try, pry, signum(try - pry), cryv)
 	-- Calculate target position
 	local tcDist2d = tcDist * cos(-display.camAngle)
 	local tcx, tcy, tcz = ex + tcDist2d * sin(cry - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(cry - pi)
@@ -1442,7 +1443,7 @@ local function updateCamera(dt)
 	local doInstantTransition = length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance
 	if doInstantTransition or display.camType == camTypeOverview then
 		cx, cy, cz = ex + tcDist2d * sin(defaultRy - pi), tcy, ez + tcDist2d * cos(defaultRy - pi)
-		cxv, cyv, czv = 0, 0, 0
+		cxv, crxv, cyv, cryv, czv = 0, 0, 0, 0, 0
 		if doInstantTransition then
 			-- HACK: Need to defer rotation by 1 frame, see earlier
 			deferRotationRenderFrames = 1
@@ -1454,7 +1455,7 @@ local function updateCamera(dt)
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
 		local px, py, pz = cx, cy, cz
-		if (cv > 0) then
+		if cv > 0 then
 			local time = cv / cameraAccel
 			px = px + cxv * time / 2
 			py = py + cyv * time / 2
@@ -1484,12 +1485,14 @@ local function updateCamera(dt)
 
 		-- Rotate and zoom camera
 		local trx = -atan2(cy - ey, length(cx - ex, cz - ez))
-		crx = (deferRotationRenderFrames == 0 and display.camAngle) or symmetricBound(trx, crx, maxCamRPerSecond * dt)
+		local prx = crx + crxv / cameraRAccel / 2
+		crxv = (deferRotationRenderFrames == 0 and 0) or crxv + signum(trx - prx) * cameraRAccel * dt
+		crx = (deferRotationRenderFrames == 0 and display.camAngle) or crx + crxv * dt
 		cfov = applyDamping(cfov, deg(2 * atan2(display.diag / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
 	end
 
 	local showReticle = display.camType == camTypeTracking
-	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, ry = cry, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, reticle = showReticle and { xMin, zMin, xMax, zMax } }
+	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, rxv = crxv, ry = cry, ryv = cryv, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, reticle = showReticle and { xMin, zMin, xMax, zMax } }
 
 	if options.disable_tracking.value or userCameraOverrideFrame >= gameFrame then
 		return
