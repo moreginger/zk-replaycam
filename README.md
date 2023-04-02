@@ -4,8 +4,7 @@ A widget that implements a spectator camera for [Zero-K](https://zero-k.info/)
 
 Example video:
 
-https://youtu.be/mEMOBLMRVRI
-
+https://youtu.be/As0ma57rgAQ
 
 ## Overview
 
@@ -19,20 +18,17 @@ The strategy is fairly basic. It listens to a bunch of callins e.g for a unit be
 
 There's a lot that it doesn't do well that I will hopefully get around to improving
 
+- Better event anticipation
 - Better framing of attack events (need attacker info, dev BAR engine has feature)
-- More organic camera rotation / zooming (panning works OK)
 - Improved commentary on events
-- Improved selection of units for "hotspot / something's going down" events
 - Camera stickiness when a projectile is about to impact
 - Artistic camera rotation
-- Recording mode that disables user camera override
-- Preferences e.g. stickiness
 
 ## Usage
 
 **This is very much a beta, and only recommended for expert users.**
 
-Install as a local widget, as per the [instructions here](https://zero-k.info/mediawiki/Widget_Configuration#Activate_local_widgets). After activating - Ctrl+F11 and search for ReplayCam in the Local widgets section - it will take over the camera when spectating a game or watching a replay. Just sit back and let it do the work! Using the mouse should briefly pause the camera. Note that ReplayCam switches to the cofc camera, which you may not be familiar with. It should restore your normal camera settings when deactivated or after the replay is finished.
+Install [replaycam.lua](./replaycam.lua) as a local widget, as per the [instructions here](https://zero-k.info/mediawiki/Widget_Configuration#Activate_local_widgets). After activating - Ctrl+F11 and search for ReplayCam in the Local widgets section - it will take over the camera when spectating a game or watching a replay. Just sit back and let it do the work! Using the mouse should briefly pause the camera. Note that ReplayCam switches to the cofc camera, which you may not be familiar with. It should restore your normal camera settings when deactivated or after the replay is finished.
 
 ## Known issues
 

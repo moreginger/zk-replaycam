@@ -1,12 +1,11 @@
 # Changelog
 
-## Unreleased
+## [0.2.0] - 2023-04-02
 
-- Smoother camera rotation
+- Smoother camera rotation and zoom
 - Improved tracking of hotspot event
-- Apply all events to interest grid weighted by importance
-- Apply damping to the event field of view (diagonal), as already done for location and velocity
-- Options!
+- Improved event prioritization (interest grid now includes all events)
+- UI options
   - Disable tracking (bindable)
   - Disable user override, useful for recording
   - Experimental/debug option to show tracking reticle
