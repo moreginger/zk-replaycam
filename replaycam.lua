@@ -25,9 +25,9 @@ local sin = math.sin
 local sqrt = math.sqrt
 local tan = math.tan
 
-
-local GL_LINE = GL.LINE
+local GL_FILL = GL.FILL
 local GL_FRONT_AND_BACK = GL.FRONT_AND_BACK
+local GL_LINE = GL.LINE
 local glColor = gl.Color
 local glLineWidth = gl.LineWidth
 local glPolygonMode = gl.PolygonMode
@@ -1542,5 +1542,11 @@ function widget:DrawScreen()
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
 	glLineWidth(2)
 	glColor(0, 1, 0, 0.5)
+
 	glRect(xMinScreen - 32, yMinScreen - 32, xMaxScreen + 32, yMaxScreen + 32)
+
+	-- Reset GL state
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+	glLineWidth(1.0)
+	glColor(1, 1, 1, 1)
 end
