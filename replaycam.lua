@@ -598,6 +598,7 @@ function EventStatistics:new(o, types)
 	setmetatable(o, self)
 	self.__index = self
 
+	o._types = types
 	for _, type in pairs(types) do
 		o[type] = { 0, 0 }
 	end
@@ -628,6 +629,14 @@ function EventStatistics:getPercentile(type, importance)
 	-- Assume exponential distribution
 	local m = 1 / (meanImportance * self.eventMeanAdj[type])
 	return 1 - exp(-m * importance)
+end
+
+function EventStatistics:summary()
+	local summary = {}
+	for _, type in pairs(self._types) do
+		summary[#summary+1] = type .. ': ' .. (self:getMean(type) or 'nil')
+	end
+	return table.concat(summary, ', ')
 end
 
 -- WORLD INFO
@@ -919,7 +928,8 @@ local function selectMostInterestingEvent(currentFrame)
 		event = event.next
 	end
 	if logging >= LOG_DEBUG and mie then
-		spEcho('mie', mie.type, mie.sbj, mostPercentile, mie.started)
+		spEcho('eventStats', eventStatistics:summary())
+		spEcho('mie', mie.type, mie.sbjName, mostPercentile, mie.started)
 	end
 	return mie
 end
