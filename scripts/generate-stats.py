@@ -7,6 +7,7 @@ re_event = 'event, (?P<type>.+?),.+$'
 re_merge = 'merging events, (?P<type>.+?)$'
 re_mie = 'mie, (?P<type>.+?),.+$'
 re_opening = 'Opening demofile (?P<demofile>.+)$'
+re_connecting = 'Connecting to battle, Zero-K v[^,]+, (?P<map>.+),'
 re_wins = 'game_message: .+ wins!'
 
 datas = []
@@ -29,9 +30,14 @@ with open('infolog.txt') as file:
             continue
         match = re.search(re_opening, line)
         if match:
-            # FIXME: Found new demofile while accumulating events - e.g. caused by restarting.
             demofile = match.group('demofile')
             data = createEmptyData(demofile)
+            datas.append(data)
+            continue
+        match = re.search(re_connecting, line)
+        if match:
+            map = match.group('map')
+            data = createEmptyData(map)
             datas.append(data)
             continue
         if not data:
