@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.1] - 2023-04-02
+
+- Fix broken event selection caused by a unit being too far outside the map
+
 ## [0.2.0] - 2023-04-02
 
 - Smoother camera rotation and zoom

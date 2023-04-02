@@ -265,6 +265,11 @@ function WorldGrid:_addInternal(x, y, area, opts, func)
 		end
 	end
 
+	if totalArea == 0 then
+		-- This can happen if the location is so far outside the map that it doesn't touch any grids
+		return
+	end
+
 	-- Divvy out the interest.
 	i = 1
 	for ix = gx - 1, gx + 1 do
