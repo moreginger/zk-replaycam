@@ -1310,8 +1310,12 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weap
 	local importance = 100 * min(currentHealth, damage) / currentHealth
 	-- Multiply by unit importance factor
 	importance = importance * unitImportance * buildProgress
-
-	addEvent(attackerTeam, importance, sbjLocation, nil, sbjName, unitDamagedEventType, unitID)
+	
+	local event = addEvent(attackerTeam, importance, sbjLocation, nil, sbjName, unitDamagedEventType, unitID)
+	if attackerID then
+		local attackerLocation = unitInfo:get(attackerID)
+		event:addObject(attackerID, attackerLocation)
+	end
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
