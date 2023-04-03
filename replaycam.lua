@@ -242,7 +242,8 @@ function WorldGrid:getScore(x, y)
 end
 
 function WorldGrid:getInterestingScore()
-	-- 4 is equal to 4 ally units, or 2 x 1 units from different ally teams.
+	-- one event of the mean value, or one moving unit (per second) = 1
+	-- two interacting teams = *4	
 	return 5 * updateIntervalFrames / framesPerSecond
 end
 
@@ -466,8 +467,7 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 
 	if self.locationListener then
 		local isMoving = distance(velocity) > 0.1
-		local x, y, z = unpack(location)
-		self.locationListener(x, y, z, cacheObject.allyTeam, isMoving)
+		self.locationListener(location, cacheObject.allyTeam, isMoving)
 	end
 
 	return true
@@ -1129,13 +1129,10 @@ function widget:Initialize()
 	end
 
 	interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, allyTeams = allyTeams })
-	unitInfo = UnitInfoCache:new({ locationListener = function(x, _, z, allyTeam, isMoving)
-		local interest = 1
-		if not isMoving then
-			-- Static things aren't themselves very interesting but count for #teams
-			interest = 0.16
-		end
-		interestGrid:add(x, z, allyTeam, interest)
+	unitInfo = UnitInfoCache:new({ locationListener = function(location, allyTeam, isMoving)
+		-- Static things are less interesting, but with allyTeams multiplier can still be relevant
+		local interest = isMoving and 1 or 0.16
+		interestGrid:add(location[1], location[3], allyTeam, interest)
 	end})
 
 	setupPanels()
@@ -1158,7 +1155,7 @@ function widget:GameFrame(frame)
 	gameFrame = frame
 	unitInfo:update(frame)
 
-	if (frame % updateIntervalFrames ~= 0) then
+	if frame % updateIntervalFrames ~= 0 then
 		return
 	end
 
