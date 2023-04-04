@@ -1372,7 +1372,7 @@ local function calcCamRange(diag, fov)
 	return diag / 2 / tan(rad(fov / 2))
 end
 
-local function updateCamera(dt)
+local function updateCamera(dt, userCameraOverride)
 	if logging >= LOG_DEBUG and dt > 0.05 then
 		spEcho('slow camera update', dt)
 	end
@@ -1510,7 +1510,7 @@ local function updateCamera(dt)
 	local showReticle = display.camType == camTypeTracking
 	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, rxv = crxv, ry = cry, ryv = cryv, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, reticle = showReticle and { xMin, zMin, xMax, zMax } }
 
-	if options.disable_tracking.value or userCameraOverrideFrame >= gameFrame then
+	if options.disable_tracking.value or userCameraOverride then
 		return
 	end
 
@@ -1533,7 +1533,7 @@ function widget:Update(dt)
 		lastMouseLocation = newMouseLocation
 		userAction()
 	end
-	updateCamera(dt)
+	updateCamera(dt, userCameraOverrideFrame >= gameFrame)
 end
 
 function widget:DrawScreen()
