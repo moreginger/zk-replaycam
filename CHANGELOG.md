@@ -1,5 +1,10 @@
 # Changelog
 
+## WIP
+
+- Make current event slightly stickier
+- Include attacker for unitDamaged event
+
 ## [0.2.1] - 2023-04-02
 
 - Fix broken event selection caused by a unit being too far outside the map

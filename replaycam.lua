@@ -858,8 +858,9 @@ local function __purgeCommands(event, opts)
 end
 
 
-local function _getEventPercentile(currentFrame, event)
-	local importance = event:importanceAtFrame(currentFrame)
+local function _getEventPercentile(currentFrame, event, eventBoost)
+	eventBoost = eventBoost or 1
+	local importance = event:importanceAtFrame(currentFrame) * eventBoost
 	if importance <= 0 then
 		return 0
 	end
@@ -918,7 +919,7 @@ local function selectMostInterestingEvent(currentFrame)
 	end
 
 	-- Make sure we always include current event even if it's not in the list
-	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent) or 0
+	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent, 1.6) or 0
 	event = tailEvent
 	while event ~= nil do
 		local eventPercentile = _getEventPercentile(currentFrame, event)
@@ -1185,7 +1186,7 @@ function widget:GameFrame(frame)
 		end
 		purgeEvents(__purgeExcludes, { excluder = mie })
 		-- Set a standard decay so that we don't show the event for too long.
-		mie.decay, mie.started = 0.20, frame
+		mie.decay, mie.started = 0.25, frame
 		showingEvent = mie
 	end
 
