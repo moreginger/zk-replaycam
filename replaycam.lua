@@ -994,7 +994,7 @@ local function updateDisplay(event)
   local sbjString = __pluralize(event.sbjName, sbjUnitCount)
 
 	if event.type == attackEventType then
-		commentary = sbjString .. " is attacking"
+		commentary = sbjString .. " attacking"
   elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
