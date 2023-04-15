@@ -4,6 +4,7 @@
 
 - Make current event slightly stickier
 - Include attacker for unitDamaged event
+- Show "building" events for units under construction
 
 ## [0.2.1] - 2023-04-02
 

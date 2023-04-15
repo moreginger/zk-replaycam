@@ -653,6 +653,7 @@ local window_cpl, panel_cpl, commentary_cpl
 -- EVENT TRACKING
 
 local attackEventType = "attack"
+local buildingEventType = "building"
 local hotspotEventType = "hotspot"
 local overviewEventType = "overview"
 local unitBuiltEventType = "unitBuilt"
@@ -663,6 +664,7 @@ local unitMovingEventType = "unitMoving"
 local unitTakenEventType = "unitTaken"
 local eventTypes = {
 	attackEventType,
+	buildingEventType,
 	hotspotEventType,
 	overviewEventType,
 	unitBuiltEventType,
@@ -676,6 +678,7 @@ local eventTypes = {
 -- Linear decay rate
 local decayPerSecond = {
 	attack = 1,
+	building = 0,
 	hotspot = 1,
 	overview = 1,
 	unitBuilt = 0.05,
@@ -692,6 +695,7 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		attack = 1.3,
+		building = 4.0,
 		hotspot = 0.7,
 		overview = 4.4,
 		unitBuilt = 3.2,
@@ -996,6 +1000,8 @@ local function updateDisplay(event)
 
 	if event.type == attackEventType then
 		commentary = sbjString .. " attacking"
+  elseif event.type == buildingEventType then
+		commentary = actorName .. " making " .. sbjString
   elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
@@ -1220,7 +1226,7 @@ local function _deferCommandEvent(event)
 	local meta = event.meta
 	local sbjLocation, sbjv = unitInfo:get(meta.sbjUnitID)
 	if not sbjLocation or not sbjv then
-		return false, true
+		return nil, true
 	end
 	local defer = distance(event.location, sbjLocation) > meta.deferRange + distance(sbjv) * framesPerSecond * 2.5
 	if not defer then
@@ -1296,6 +1302,23 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		event.location = trgLocation
 		event:addObject(attackedUnitID or -unitID, trgLocation)
 	end
+end
+
+local function _deferBuildingEvent(event)
+	local meta = event.meta
+	local _, _, _, _, buildProgress = spGetUnitHealth(meta.sbjUnitID)
+	if not buildProgress or buildProgress > 0.5 then
+		-- Either the unit is not longer being built or it is over half built
+		return nil, true
+	end
+	return buildProgress < 0.1, false
+end
+
+function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
+	local allyTeam = teamInfo[unitTeam].allyTeam
+	local sbjLocation, _, importance, sbjName = unitInfo:watch(unitID, allyTeam, unitDefID)
+	local meta = { sbjUnitID = unitID }
+	addEvent(unitTeam, importance, sbjLocation, meta, sbjName, buildingEventType, unitID, _deferBuildingEvent)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
