@@ -1451,7 +1451,6 @@ local function updateCamera(dt, userCameraOverride)
 	local pry = cry + cryv / cameraRAccel / 2
 	cryv = (deferRotationRenderFrames == 0 and 0) or cryv + signum(try - pry) * cameraRAccel * dt
 	cry = (deferRotationRenderFrames == 0 and try) or cry + cryv * dt
-	-- spEcho(cry, try, pry, signum(try - pry), cryv)
 	-- Calculate target position
 	local tcDist2d = tcDist * cos(-display.camAngle)
 	local tcx, tcy, tcz = ex + tcDist2d * sin(cry - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(cry - pi)
