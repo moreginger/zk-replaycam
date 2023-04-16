@@ -2,8 +2,8 @@
 
 ## WIP
 
-- Make current event slightly stickier
-- Include attacker for unitDamaged event
+- Make active event stickier
+- Include attacker for unitDamaged event when supported by engine
 - Show _building_ events for units under construction
 - Set `normal` map mode (i.e. not `los`)
 
