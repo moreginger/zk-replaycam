@@ -73,6 +73,7 @@ local CMD_MOVE = CMD.MOVE
 
 local framesPerSecond = 30
 local gameFrame = 0
+local doToggleLos = true
 
 -- CONFIGURATION
 
@@ -790,6 +791,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			actors = initTable(actor, true),
 			actorAllyTeam = actorAllyTeam,
 			decay = decay,
+			defer = deferFunc and true,
 			deferFunc = deferFunc,
 			id = lastEventId,
 			importance = importance,
@@ -878,16 +880,12 @@ end
 -- Return true if the event is still in the list
 local function _processEvent(currentFrame, event)
 	if event.deferFunc then
-	  event.deferredFrom = event.deferredFrom or event.started
 		event.started = currentFrame
 		local defer, abort = event.deferFunc(event)
-		if abort or event.deferredFrom - currentFrame > framesPerSecond * 16 then
+		event.defer = defer
+		if abort then
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 			return
-		end
-		if not defer then
-			-- Stop deferring.
-			event.deferFunc = nil
 		end
 	end
 
@@ -924,11 +922,11 @@ local function selectMostInterestingEvent(currentFrame)
 	end
 
 	-- Make sure we always include current event even if it's not in the list
-	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent, 1.6) or 0
+	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent, 2.0) or 0
 	event = tailEvent
 	while event ~= nil do
 		local eventPercentile = _getEventPercentile(currentFrame, event)
-		if eventPercentile > mostPercentile and not event.deferFunc then
+		if eventPercentile > mostPercentile and not event.defer then
 			mie, mostPercentile = event, eventPercentile
 		end
 		event = event.next
