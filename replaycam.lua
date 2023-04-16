@@ -696,9 +696,9 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		attack = 1.3,
-		building = 4.0,
+		building = 5.0,
 		hotspot = 0.7,
-		overview = 4.4,
+		overview = 4.2,
 		unitBuilt = 3.2,
 		unitDamaged = 0.7,
 		unitDestroyed = 0.5,
