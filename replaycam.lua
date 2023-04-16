@@ -881,9 +881,9 @@ end
 -- Return true if the event is still in the list
 local function _processEvent(currentFrame, event)
 	if event.deferFunc then
-		event.started = currentFrame
+		event.started = event.defer and currentFrame or event.started
 		local defer, abort = event.deferFunc(event)
-		event.defer = defer
+		event.defer = event.defer and defer
 		if abort then
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
 			return
