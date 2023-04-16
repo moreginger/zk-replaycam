@@ -48,6 +48,7 @@ local spGetSpectatingState = Spring.GetSpectatingState
 local spGetTeamColor = Spring.GetTeamColor
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
+local spGetUnitCommands = Spring.GetUnitCommands
 local spGetUnitDefID = Spring.GetUnitDefID
 local spGetUnitHealth = Spring.GetUnitHealth
 local spGetUnitNoDraw = Spring.GetUnitNoDraw
@@ -1229,7 +1230,9 @@ end
 local function _deferCommandEvent(event)
 	local meta = event.meta
 	local sbjLocation, sbjv = unitInfo:get(meta.sbjUnitID)
-	if not sbjLocation or not sbjv then
+	local cmds = spGetUnitCommands(meta.sbjUnitID, -1)
+	local cmd = cmds and cmds[#cmds]
+	if not sbjLocation or not sbjv or not cmd or cmd.id ~= meta.cmdID then
 		return nil, true
 	end
 	local defer = distance(event.location, sbjLocation) > meta.deferRange + distance(sbjv) * framesPerSecond * 2.5
@@ -1274,7 +1277,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		-- Shouldn't display a superseded command
 		purgeEvents(__purgeCommands, { unitID = unitID })
 
-		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
+		local meta = { cmdID = cmdID, sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
 		local event = addEvent(unitTeam, importance, sbjLocation, meta, sbjName, unitMovingEventType, unitID, _deferCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
@@ -1300,7 +1303,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
-		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
+		local meta = { cmdID = cmdID, sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
 		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, sbjName, attackEventType, unitID, _deferCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
