@@ -40,6 +40,7 @@ local spGetCameraState = Spring.GetCameraState
 local spGetGameRulesParam = Spring.GetGameRulesParam
 local spGetGroundHeight = Spring.GetGroundHeight
 local spGetHumanName = Spring.Utilities.GetHumanName
+local spGetMapDrawMode = Spring.GetMapDrawMode
 local spGetMouseState = Spring.GetMouseState
 local spGetMovetype = Spring.Utilities.getMovetype
 local spGetPlayerInfo = Spring.GetPlayerInfo
@@ -57,8 +58,8 @@ local spGetUnitTeam = Spring.GetUnitTeam
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spGetViewGeometry = Spring.GetViewGeometry
 local spIsReplay = Spring.IsReplay
+local spSendCommands = Spring.SendCommands
 local spSetCameraState = Spring.SetCameraState
-local spTableEcho = Spring.Utilities.TableEcho
 local spWorldToScreenCoords = Spring.WorldToScreenCoords
 
 local Chili
@@ -1159,6 +1160,11 @@ function widget:Initialize()
 end
 
 function widget:GameFrame(frame)
+	if doToggleLos and spGetMapDrawMode() == "los" then
+		spSendCommands("togglelos")
+		doToggleLos = false
+	end
+
 	gameFrame = frame
 	unitInfo:update(frame)
 
