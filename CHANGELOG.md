@@ -5,6 +5,7 @@
 - Make active event stickier
 - Include attacker for unitDamaged event when supported by engine
 - Show _building_ events for units under construction
+- More frequent _move_ command events
 - Set `normal` map mode (i.e. not `los`)
 
 ## [0.2.1] - 2023-04-02

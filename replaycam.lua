@@ -68,9 +68,11 @@ local Window
 local ScrollPanel
 local screen0
 
+local customCmds                = VFS.Include("LuaRules/Configs/customcmds.lua")
 local CMD_ATTACK = CMD.ATTACK
 local CMD_ATTACK_MOVE = CMD.FIGHT
 local CMD_MOVE = CMD.MOVE
+local CMD_RAW_MOVE = customCmds.RAW_MOVE
 
 local framesPerSecond = 30
 local gameFrame = 0
@@ -705,7 +707,7 @@ local eventStatistics = EventStatistics:new({
 		unitDamaged = 0.7,
 		unitDestroyed = 0.5,
 		unitDestroyer = 0.8,
-		unitMoving = 2.0,
+		unitMoving = 3.0,
 		unitTaken = 0.2,
 	}
 }, eventTypes)
@@ -1230,9 +1232,7 @@ end
 local function _deferCommandEvent(event)
 	local meta = event.meta
 	local sbjLocation, sbjv = unitInfo:get(meta.sbjUnitID)
-	local cmds = spGetUnitCommands(meta.sbjUnitID, -1)
-	local cmd = cmds and cmds[#cmds]
-	if not sbjLocation or not sbjv or not cmd or cmd.id ~= meta.cmdID then
+	if not sbjLocation or not sbjv then
 		return nil, true
 	end
 	local defer = distance(event.location, sbjLocation) > meta.deferRange + distance(sbjv) * framesPerSecond * 2.5
@@ -1243,7 +1243,17 @@ local function _deferCommandEvent(event)
 	return defer, false
 end
 
+local moveCommands = {
+	[CMD_ATTACK_MOVE] = true,
+	[CMD_MOVE] = true,
+	[CMD_RAW_MOVE] = true,
+}
+
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
+	if not moveCommands[cmdID] and cmdID ~= CMD_ATTACK then
+		return
+	end
+
 	local unitDef = UnitDefs[unitDefID]
 	if unitDef.customParams.dontcount or unitDef.customParams.is_drone then
 		-- Drones get move commands too :shrug:
@@ -1256,9 +1266,10 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		return
 	end
 
-	if cmdID == CMD_MOVE or cmdID == CMD_ATTACK_MOVE then
-		-- Process move event.
+	-- Shouldn't display a superseded command
+	purgeEvents(__purgeCommands, { unitID = unitID })
 
+	if moveCommands[cmdID] then
 		local sbjLocation, _, importance, sbjName, isStatic = unitInfo:get(unitID)
 		if isStatic then
 			-- Not interested in move commands given to static buildings e.g. factories
@@ -1269,21 +1280,17 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		local trgLocation = { trgx, trgy, trgz }
 
 		local moveDistance = distance(trgLocation, sbjLocation)
-		if (moveDistance < 512) then
+		if (moveDistance < 256) then
 			-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 			return
 		end
 
-		-- Shouldn't display a superseded command
-		purgeEvents(__purgeCommands, { unitID = unitID })
-
-		local meta = { cmdID = cmdID, sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
+		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
 		local event = addEvent(unitTeam, importance, sbjLocation, meta, sbjName, unitMovingEventType, unitID, _deferCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
 		event:addObject(-unitID, trgLocation)
 	elseif cmdID == CMD_ATTACK then
-		-- Process attack event
 		local trgLocation, attackedUnitID
 		-- Find the location / unit being attacked.
 		if #cmdParams == 1 then
@@ -1296,14 +1303,11 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			return
 		end
 
-		-- Shouldn't display a superseded command
-		purgeEvents(__purgeCommands, { unitID = unitID })
-
 		local sbjLocation, _, _, sbjName, _, weaponImportance, weaponRange = unitInfo:get(unitID)
 		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
-		local meta = { cmdID = cmdID, sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
+		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
 		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, sbjName, attackEventType, unitID, _deferCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
