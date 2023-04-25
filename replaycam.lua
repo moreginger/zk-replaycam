@@ -149,6 +149,10 @@ local function signum(x)
     return x > 0 and 1 or (x == 0 and 0 or -1)
 end
 
+local function logistic(x)
+	return 1 / (1 + exp(-x))
+end
+
 local function applyDamping(old, new, rollingFraction, dt)
 	dt = dt or 1
 	local newFraction = (1 - rollingFraction) * dt
@@ -157,16 +161,16 @@ end
 
 local function _apply(fun, vector, arg1, arg2)
 	local result = {}
-	for i = 1, #vector do
-		result[i] = fun(vector[i], arg1, arg2)
+	for k, v in pairs(vector) do
+		result[k] = fun(v, arg1, arg2)
 	end
 	return result
 end
 
 local function _apply2(fun, vector1, vector2, arg1, arg2)
 	local result = {}
-	for i = 1, #vector1 do
-		result[i] = fun(vector1[i], vector2[i], arg1, arg2)
+	for k, v in pairs(vector1) do
+		result[k] = fun(v, vector2[k], arg1, arg2)
 	end
 	return result
 end
@@ -236,8 +240,7 @@ function WorldGrid:_getScoreGridCoords(x, y)
 	-- We want passe to kick in slowly then get strong after 10s or so;
 	-- use logistic function
 	-- Shift the function to the right given min passe is 0
-	passe = passe - 8
-	local passeMult = 1 - (1 / (1 + exp(-0.4 * passe)))
+	local passeMult = 1 - logistic(0.4 * (passe - 8))
 	return interest * allyTeamsMult * passeMult
 end
 
@@ -537,6 +540,9 @@ end
 
 local eventMergeRange = 256
 
+-- This value gives a decay of 0.018 at time zero
+local eventDecayBase = 4
+
 Event = {}
 
 function Event:new(o)
@@ -570,7 +576,7 @@ function Event:excludes(other)
 end
 
 function Event:importanceAtFrame(frame)
-  return self.importance * (1 - self.decay * (frame - self.started) / framesPerSecond)
+  return self.importance * (1 - logistic(eventDecayBase / self.decay * (frame - self.started - self.decay)))
 end
 
 -- return - true if there are no more subjects
@@ -680,19 +686,19 @@ local eventTypes = {
 	unitTakenEventType
 }
 
--- Linear decay rate
-local decayPerSecond = {
+-- Logistic decay, time in frames to reach 1/2 of original value
+local eventDecayFactors = _apply(_multiply, {
 	attack = 1,
-	building = 0,
+	building = 100,
 	hotspot = 1,
 	overview = 1,
-	unitBuilt = 0.05,
-	unitDamaged = 0.4,
-	unitDestroyed = 0.1,
-	unitDestroyer = 0.1,
-	unitMoving = 0.4,
-	unitTaken = 0.1,
-}
+	unitBuilt = 5,
+	unitDamaged = 2,
+	unitDestroyed = 3,
+	unitDestroyer = 3,
+	unitMoving = 2,
+	unitTaken = 3,
+}, framesPerSecond)
 
 local eventStatistics = EventStatistics:new({
 	-- Adjust mean of events in percentile estimation
@@ -741,7 +747,7 @@ end
 local function addEvent(actor, importance, location, meta, sbjName, type, unitID, deferFunc, opts)
 	opts = opts or {}
 
-	local decay = decayPerSecond[type]
+	local decay = eventDecayFactors[type]
 	local actorAllyTeam = actor and teamInfo[actor].allyTeam
 
 	-- Try to merge into recent events.
@@ -755,10 +761,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			break
 		end
 		local importanceAtFrame = event:importanceAtFrame(gameFrame)
-		if importanceAtFrame <= 0 then
-			-- Just remove the event forever.
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif event:shouldMerge(type, sbjName, location, actorAllyTeam) then
+		if event:shouldMerge(type, sbjName, location, actorAllyTeam) then
 			if logging >= LOG_DEBUG then
 				spEcho('merging events', type)
 			end
@@ -871,17 +874,13 @@ end
 local function _getEventPercentile(currentFrame, event, eventBoost)
 	eventBoost = eventBoost or 1
 	local importance = event:importanceAtFrame(currentFrame) * eventBoost
-	if importance <= 0 then
-		return 0
-	end
 	local x, _, z = unpack(event.location)
 	local interestModifier = interestGrid:getScore(x, z)
 	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
--- Process the event, possibly removing it from the list
 -- Return true if the event is still in the list
-local function _processEvent(currentFrame, event)
+local function _applyDeferFunc(currentFrame, event)
 	if event.deferFunc then
 		event.started = event.defer and currentFrame or event.started
 		local defer, abort = event.deferFunc(event)
@@ -892,11 +891,6 @@ local function _processEvent(currentFrame, event)
 		end
 	end
 
-	if event:importanceAtFrame(currentFrame) <= 0 then
-		headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		return
-	end
-
 	return true
 end
 
@@ -905,11 +899,10 @@ local function selectMostInterestingEvent(currentFrame)
 	local event = tailEvent
 	while event ~= nil do
 		local nextEvent = event.next
-		if _processEvent(currentFrame, event) and event.actorAllyTeam then
+		if _applyDeferFunc(currentFrame, event) and event.actorAllyTeam then
 			local meanImportance = eventStatistics:getMean(event.type)
 			local importanceAtFrame = event:importanceAtFrame(currentFrame)
 			local interest = meanImportance and (importanceAtFrame / meanImportance) or 1
-				-- FIXME: Could use allyteams of all involved parties?
 			local x, _, z = unpack(event.location)
 			interestGrid:add(x, z, event.actorAllyTeam, interest)
 		end
@@ -927,16 +920,22 @@ local function selectMostInterestingEvent(currentFrame)
 	-- Make sure we always include current event even if it's not in the list
 	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent, 2.0) or 0
 	event = tailEvent
+	local checkedEvents = 0
 	while event ~= nil do
+		checkedEvents = checkedEvents + 1
+		local nextEvent = event.next
 		local eventPercentile = _getEventPercentile(currentFrame, event)
-		if eventPercentile > mostPercentile and not event.defer then
+		if eventPercentile <= 0.1 then
+			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
+		elseif eventPercentile > mostPercentile and not event.defer then
 			mie, mostPercentile = event, eventPercentile
 		end
-		event = event.next
+		event = nextEvent
 	end
 	if logging >= LOG_DEBUG and mie then
+		spEcho('checked ' .. checkedEvents .. ' events')
 		spEcho('eventStats', eventStatistics:summary())
-		spEcho('mie', mie.type, mie.sbjName, mostPercentile, mie.started)
+		spEcho('mie', mie.type, mie.sbjName, mie.importance, mie.started, mostPercentile)
 	end
 	return mie
 end
@@ -1199,7 +1198,7 @@ function widget:GameFrame(frame)
 		end
 		purgeEvents(__purgeExcludes, { excluder = mie })
 		-- Set a standard decay so that we don't show the event for too long.
-		mie.decay, mie.started = 0.25, frame
+		mie.decay, mie.started = 3 * framesPerSecond, frame
 		showingEvent = mie
 	end
 
