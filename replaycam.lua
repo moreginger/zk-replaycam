@@ -1012,7 +1012,8 @@ local function updateDisplay(event)
 	elseif event.type == unitBuiltEventType then
 		commentary = sbjString .. " built by " .. actorName
 	elseif event.type == unitDamagedEventType then
-		commentary = sbjString .. " under attack by " .. actorName
+		local attacker = __getUnitsNameString(event._objUnits)
+		commentary = sbjString .. " under attack by " .. attacker .. " of " .. actorName
 	elseif event.type == unitDestroyedEventType then
 		local destroyer = __getUnitsNameString(event._objUnits)
 		commentary = sbjString .. " destroyed by " .. destroyer .. " of " .. actorName
