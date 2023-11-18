@@ -198,13 +198,14 @@ end
 -- WORLD GRID CLASS
 -- Translates world coordinates into operations on a grid.
 
-WorldGrid = { xSize = 0, ySize = 0, gridSize = 0, allyTeams = {}, data = {} }
+WorldGrid = { xSize = 0, ySize = 0, gridSize = 0, teamCount = 0, allyTeams = {}, data = {} }
 
 function WorldGrid:new(o)
 	o = o or {} -- create object if user does not provide one
 	setmetatable(o, self)
 	self.__index = self
 
+    o.teamCount = o.teamCount or 0
 	o.allyTeams = o.allyTeams or {}
 	o.data = o.data or {}
 	for x = 1, o.xSize do
@@ -342,6 +343,10 @@ function WorldGrid:setWatching(x, y)
 	-- 2. Increase by 2 in anticipation of decreasing by 1 later
 	x, y =  self:__toWorldCoords(self:__toGridCoords(x, y))
 	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 2 }, _addPasse)
+end
+
+function WorldGrid:setCursor(x, y)
+	self:_addInternal(x, y, self.gridSize, { boost = 10 / self.teamCount }, _boostInterest)
 end
 
 -- Return mean, max, maxX, maxY
@@ -1112,6 +1117,7 @@ function widget:Initialize()
 
 	-- Init teams.
 	teamInfo = {}
+	local teamCount = 0
 	local allyTeams = spGetAllyTeamList()
 	for _, allyTeam in pairs(allyTeams) do
 		local teamList = spGetTeamList(allyTeam)
@@ -1134,10 +1140,11 @@ function widget:Initialize()
 				color = { spGetTeamColor(teamID) } or { 1, 1, 1, 1 },
 				name = teamName
 			}
+			teamCount = teamCount + 1
 		end
 	end
 
-	interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, allyTeams = allyTeams })
+	interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, teamCount = teamCount, allyTeams = allyTeams })
 	unitInfo = UnitInfoCache:new({ locationListener = function(location, allyTeam, isMoving)
 		-- Static things are less interesting, but with allyTeams multiplier can still be relevant
 		local interest = isMoving and 1 or 0.16
@@ -1175,6 +1182,15 @@ function widget:GameFrame(frame)
 
 	local x, _, z = unpack(display.location)
 	interestGrid:setWatching(x, z)
+
+	if (WG.alliedCursorsPos) then
+		for _, acp in pairs(WG.alliedCursorsPos) do
+		    local curx, curz = unpack(acp)
+			if (curx and curz) then
+				interestGrid:setCursor(curx, curz)
+			end
+		end
+    end
 
 	local igMax, igX, igZ = interestGrid:statistics()
 	if igMax >= interestGrid:getInterestingScore() then

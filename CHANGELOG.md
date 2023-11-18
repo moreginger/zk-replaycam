@@ -3,10 +3,15 @@
 ## WIP
 
 - Make active event stickier
-- Include attacker for unitDamaged event when supported by engine
 - Show _building_ events for units under construction
 - More frequent _move_ command events
 - Set `normal` map mode (i.e. not `los`)
+- Fix jank transition from overview
+
+## [?]
+
+- Incorporate cursor information in event selection
+- Show attacker information for unitDamaged event
 
 ## [0.2.1] - 2023-04-02
 
