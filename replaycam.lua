@@ -449,6 +449,9 @@ function UnitInfoCache:_unitStats(unitDefID)
 		if unitDef.customParams.ismex then
 			-- Give mexes a little buff since they are cheap but important
 			importance = importance * 2
+		elseif unitDef.name == 'terraunit' then
+			-- terraunit has fixed cost of 100000, actual estimated cost is a unit rules param
+			importance = 500
 		end
 		local isStatic = not spGetMovetype(unitDef)
 		local wImportance, wRange = self:_weaponStats(unitDef)
@@ -492,7 +495,13 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	end
 	local unitDef = UnitDefs[unitDefID]
 	local name = spGetHumanName(unitDef, unitID)
-	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, lastUpdatedFrame = gameFrame }
+	local importance, _, _, _ = self:_unitStats(unitDefID)
+	if unitDef.name == 'terraunit' then
+		-- FIXME: This is set in unit_terraform.lua, but not accessible here?
+		importance = spGetUnitRulesParam(unitID, 'terraform_estimate') or importance
+		spEcho('terraform_estimate', importance)
+	end
+	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, importance = importance, lastUpdatedFrame = gameFrame }
 	if not self:_updatePosition(unitID, cacheObject) then
 		return
 	end
@@ -504,10 +513,10 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(cacheObject.unitDefID)
+		local _, isStatic, weaponImportance, weaponRange = self:_unitStats(cacheObject.unitDefID)
 		local dt = (gameFrame - cacheObject.lastUpdatedFrame) / framesPerSecond
 		local location = _apply2(_extrapolate, cacheObject.location, cacheObject.velocity, dt)
-		return location, cacheObject.velocity, importance, cacheObject.name, isStatic, weaponImportance, weaponRange
+		return location, cacheObject.velocity, cacheObject.importance, cacheObject.name, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -671,38 +680,38 @@ local window_cpl, panel_cpl, commentary_cpl
 local attackEventType = "attack"
 local buildingEventType = "building"
 local hotspotEventType = "hotspot"
+local moveEventType = "move"
 local overviewEventType = "overview"
 local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
 local unitDestroyerEventType = "unitDestroyer"
-local unitMovingEventType = "unitMoving"
 local unitTakenEventType = "unitTaken"
 local eventTypes = {
 	attack = true,
 	building = true,
 	hotspot = true,
+	move = true,
 	overview = true,
 	unitBuilt = true,
 	unitDamaged = true,
 	unitDestroyed = true,
 	unitDestroyer = true,
-	unitMoving = true,
-	unitTaken = true,
+	unitTaken = true
 }
 
 -- Logistic decay, time in frames to reach 1/2 of original value
 local eventDecayFactors = _apply(_multiply, {
 	attack = 1,
-	building = 100,
+	building = 5,
 	hotspot = 1,
+	move = 2,
 	overview = 1,
 	unitBuilt = 5,
 	unitDamaged = 2,
 	unitDestroyed = 3,
 	unitDestroyer = 3,
-	unitMoving = 2,
-	unitTaken = 3,
+	unitTaken = 3
 }, framesPerSecond)
 
 local eventStatistics = EventStatistics:new({
@@ -711,15 +720,15 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		attack = 1.3,
-		building = 5.0,
+		building = 4.0,
 		hotspot = 0.75,
+		move = 4.0,
 		overview = 4.2,
 		unitBuilt = 3.2,
 		unitDamaged = 0.7,
 		unitDestroyed = 0.5,
 		unitDestroyer = 0.8,
-		unitMoving = 3.0,
-		unitTaken = 0.2,
+		unitTaken = 0.2
 	}
 }, eventTypes)
 
@@ -745,11 +754,10 @@ local function removeElement(element, head, tail)
 	return head, tail
 end
 
--- deferFunc - Optional function taking the event as a parameter.
---             Useful for command events that may become interesting e.g. when units close range.
+-- updateFunc - Optional function taking the event as a parameter.
 -- returns event {}
 -- - units Contains unit IDs and their current locations. May contain negative unit IDs e.g. for dead units.
-local function addEvent(actor, importance, location, meta, sbjName, type, unitID, deferFunc, opts)
+local function addEvent(actor, importance, location, meta, sbjName, type, unitID, updateFunc, opts)
 	opts = opts or {}
 
 	local decay = eventDecayFactors[type]
@@ -802,8 +810,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			actors = initTable(actor, true),
 			actorAllyTeam = actorAllyTeam,
 			decay = decay,
-			defer = deferFunc and true,
-			deferFunc = deferFunc,
+			updateFunc = updateFunc,
 			id = lastEventId,
 			importance = importance,
 			location = location,
@@ -869,7 +876,7 @@ local function __purgeSubject(event, opts)
 end
 
 local function __purgeCommands(event, opts)
-	if event.type ~= attackEventType and event.type ~= unitMovingEventType then
+	if event.type ~= attackEventType and event.type ~= moveEventType then
 		return false
 	end
 	return event:removeSubject(opts.unitID)
@@ -884,32 +891,13 @@ local function _getEventPercentile(currentFrame, event, eventBoost)
 	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
--- Return true if the event is still in the list
-local function _applyDeferFunc(currentFrame, event)
-	if event.deferFunc then
-		event.started = event.defer and currentFrame or event.started
-		local defer, abort = event.deferFunc(event)
-		event.defer = event.defer and defer
-		if abort then
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-			return
-		end
-	end
-
-	return true
-end
-
 local function selectMostInterestingEvent(currentFrame)
 	-- Process events and update interest grid
 	local event = tailEvent
 	while event ~= nil do
 		local nextEvent = event.next
-		if _applyDeferFunc(currentFrame, event) and event.actorAllyTeam then
-			local meanImportance = eventStatistics:getMean(event.type)
-			local importanceAtFrame = event:importanceAtFrame(currentFrame)
-			local interest = meanImportance and (importanceAtFrame / meanImportance) or 1
-			local x, _, z = unpack(event.location)
-			interestGrid:add(x, z, event.actorAllyTeam, interest)
+		if event.updateFunc then
+			event.updateFunc(event)
 		end
 		event = nextEvent
 	end
@@ -930,9 +918,10 @@ local function selectMostInterestingEvent(currentFrame)
 		checkedEvents = checkedEvents + 1
 		local nextEvent = event.next
 		local eventPercentile = _getEventPercentile(currentFrame, event)
-		if eventPercentile <= 0.1 then
+		if eventPercentile <= 0.1 and not event.updateFunc then
+			-- Note updateFunc expected to play nicely and nil itself out at some point
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif eventTypes[event.type] and eventPercentile > mostPercentile and not event.defer then
+		elseif eventTypes[event.type] and eventPercentile > mostPercentile then
 			mie, mostPercentile = event, eventPercentile
 		end
 		event = nextEvent
@@ -1024,7 +1013,7 @@ local function updateDisplay(event)
 		commentary = sbjString .. " destroyed by " .. destroyer .. " of " .. actorName
 	elseif event.type == unitDestroyerEventType then
 		commentary = sbjString .. " on a rampage"
-	elseif event.type == unitMovingEventType then
+	elseif event.type == moveEventType then
 		commentary = sbjString .. " moving"
 	elseif event.type == unitTakenEventType then
 		commentary = sbjString .. " captured by " .. actorName
@@ -1208,12 +1197,15 @@ function widget:GameFrame(frame)
 	addOverviewEvent(100 / igMax)
 
 	local mie = selectMostInterestingEvent(frame)
-	if mie and mie ~= showingEvent and updateDisplay(mie) then
+	if mie and mie ~= showingEvent then
 		if showingEvent then
-			-- Avoid showing it again
+			-- Avoid showing current event again
 			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
 		end
+		updateDisplay(mie);
 		purgeEvents(__purgeExcludes, { excluder = mie })
+		-- Picked event should stop changing itself
+		mie.updateFunc = nil
 		-- Set a standard decay so that we don't show the event for too long.
 		mie.decay, mie.started = 3 * framesPerSecond, frame
 		showingEvent = mie
@@ -1245,18 +1237,34 @@ function widget:MouseWheel(up, value)
 	userAction()
 end
 
-local function _deferCommandEvent(event)
+local function _updateCommandEvent(event)
 	local meta = event.meta
+
+	if meta.updateUntilFrame < gameFrame then
+		event.importance, event.updateFunc = 0, nil
+		return
+	end
+
+	event.started = gameFrame
 	local sbjLocation, sbjv = unitInfo:get(meta.sbjUnitID)
 	if not sbjLocation or not sbjv then
-		return nil, true
+		event.importance, event.updateFunc = 0, nil
+		return
 	end
-	local defer = distance(event.location, sbjLocation) > meta.deferRange + distance(sbjv) * framesPerSecond * 2.5
-	if not defer then
-		local trgx, _, trgz = unpack(event.location)
-		interestGrid:add(trgx, trgz, meta.sbjAllyTeam, 1)
-	end
-	return defer, false
+
+	-- Predicted distance in 1s
+	local distanceFromCommand = distance(event.location, sbjLocation) - distance(sbjv) * framesPerSecond
+	event.importance = meta.importance * meta.commandRange / max(meta.commandRange, distanceFromCommand)
+
+	-- FIXME add interest for command events or more generally for all events
+	-- Wait we are already doing it above :confused:
+	-- if _applyupdateFunc(currentFrame, event) and event.actorAllyTeam then
+	-- 	local meanImportance = eventStatistics:getMean(event.type)
+	-- 	local importanceAtFrame = event:importanceAtFrame(currentFrame)
+	-- 	local interest = meanImportance and (importanceAtFrame / meanImportance) or 1
+	-- 	local x, _, z = unpack(event.location)
+	-- 	interestGrid:add(x, z, event.actorAllyTeam, interest)
+	-- end
 end
 
 local moveCommands = {
@@ -1301,8 +1309,8 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			return
 		end
 
-		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
-		local event = addEvent(unitTeam, importance, sbjLocation, meta, sbjName, unitMovingEventType, unitID, _deferCommandEvent)
+		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, commandRange = worldGridSize / 2, importance = importance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
+		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, moveEventType, unitID, _updateCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
 		event:addObject(-unitID, trgLocation)
@@ -1323,29 +1331,30 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
-		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
-		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, sbjName, attackEventType, unitID, _deferCommandEvent)
+		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, commandRange = weaponRange, importance = weaponImportance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
+		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, attackEventType, unitID, _updateCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
 		event:addObject(attackedUnitID or -unitID, trgLocation)
 	end
 end
 
-local function _deferBuildingEvent(event)
+local function _updateBuildingEvent(event)
+	event.started = gameFrame
+
 	local meta = event.meta
 	local _, _, _, _, buildProgress = spGetUnitHealth(meta.sbjUnitID)
 	if not buildProgress or buildProgress > 0.5 then
-		-- Either the unit is not longer being built or it is over half built
-		return nil, true
+		-- Either the unit is no longer being built or let's wait for it to finish
+		event.importance, event.updateFunc = 0, nil
 	end
-	return buildProgress < 0.1, false
 end
 
 function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 	local allyTeam = teamInfo[unitTeam].allyTeam
 	local sbjLocation, _, importance, sbjName = unitInfo:watch(unitID, allyTeam, unitDefID)
 	local meta = { sbjUnitID = unitID }
-	addEvent(unitTeam, importance, sbjLocation, meta, sbjName, buildingEventType, unitID, _deferBuildingEvent)
+	addEvent(unitTeam, importance, sbjLocation, meta, sbjName, buildingEventType, unitID, _updateBuildingEvent)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
