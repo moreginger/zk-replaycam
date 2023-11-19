@@ -114,7 +114,7 @@ options = {
 -- Initialize a table.
 local function initTable(key, value)
 	local result = {}
-	if (key) then
+	if key then
 		result[key] = value
 	end
 	return result
@@ -136,10 +136,10 @@ end
 
 -- Bound a number to be >= min and <= max
 local function bound(x, min, max)
-	if (x < min) then
+	if x < min then
 		return min
 	end
-	if (x > max) then
+	if x > max then
 		return max
 	end
 	return x
@@ -615,7 +615,7 @@ function EventStatistics:new(o, types)
 	self.__index = self
 
 	o._types = types
-	for _, type in pairs(types) do
+	for type, _ in pairs(types) do
 		o[type] = { 0, 0 }
 	end
 
@@ -679,16 +679,16 @@ local unitDestroyerEventType = "unitDestroyer"
 local unitMovingEventType = "unitMoving"
 local unitTakenEventType = "unitTaken"
 local eventTypes = {
-	attackEventType,
-	buildingEventType,
-	hotspotEventType,
-	overviewEventType,
-	unitBuiltEventType,
-	unitDamagedEventType,
-	unitDestroyedEventType,
-	unitDestroyerEventType,
-	unitMovingEventType,
-	unitTakenEventType
+	attack = true,
+	building = true,
+	hotspot = true,
+	overview = true,
+	unitBuilt = true,
+	unitDamaged = true,
+	unitDestroyed = true,
+	unitDestroyer = true,
+	unitMoving = true,
+	unitTaken = true,
 }
 
 -- Logistic decay, time in frames to reach 1/2 of original value
@@ -712,7 +712,7 @@ local eventStatistics = EventStatistics:new({
 	eventMeanAdj = {
 		attack = 1.3,
 		building = 5.0,
-		hotspot = 0.7,
+		hotspot = 0.75,
 		overview = 4.2,
 		unitBuilt = 3.2,
 		unitDamaged = 0.7,
@@ -817,10 +817,10 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 		end
 	end
 
-	if (headEvent == nil) then
+	if headEvent == nil then
 		tailEvent = event
 		headEvent = event
-	elseif (event ~= headEvent) then
+	elseif event ~= headEvent then
 		headEvent.next = event
 		event.previous = headEvent
 		headEvent = event
@@ -832,7 +832,7 @@ end
 local function addOverviewEvent(importance)
 	local x, z = mapSizeX / 2, mapSizeZ / 2
 	local overviewY = spGetGroundHeight(x, z)
-	local overviewEvent = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, { noMerge = true })
+	local event = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, { noMerge = true })
 
 	-- Add two fake units to get the right zoom level
 	local sx, sy = spGetViewGeometry()
@@ -843,10 +843,10 @@ local function addOverviewEvent(importance)
 		zfit = zfit * sratio / mratio
 	end
 	local zoffset = mapSizeZ * (1 - zfit) / 2
-	overviewEvent:addSubject(-2, { x, overviewY, -zoffset })
-	overviewEvent:addSubject(-3, { x, overviewY, mapSizeZ + zoffset })
+	event:addSubject(-2, { x, overviewY, -zoffset })
+	event:addSubject(-3, { x, overviewY, mapSizeZ + zoffset })
 
-	return overviewEvent
+	return event
 end
 -- eventProcessor - perform processing and return truthy to remove the event
 local function purgeEvents(eventProcessor, opts)
@@ -932,7 +932,7 @@ local function selectMostInterestingEvent(currentFrame)
 		local eventPercentile = _getEventPercentile(currentFrame, event)
 		if eventPercentile <= 0.1 then
 			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif eventPercentile > mostPercentile and not event.defer then
+		elseif eventTypes[event.type] and eventPercentile > mostPercentile and not event.defer then
 			mie, mostPercentile = event, eventPercentile
 		end
 		event = nextEvent
@@ -1131,7 +1131,7 @@ function widget:Initialize()
 			local teamLeader = nil
 			_, teamLeader = spGetTeamInfo(teamID)
 			local teamName = "unknown"
-			if (teamLeader) then
+			if teamLeader then
 				teamName = spGetPlayerInfo(teamLeader)
 			end
 			teamInfo[teamID] = {
@@ -1183,10 +1183,10 @@ function widget:GameFrame(frame)
 	local x, _, z = unpack(display.location)
 	interestGrid:setWatching(x, z)
 
-	if (WG.alliedCursorsPos) then
+	if WG.alliedCursorsPos then
 		for _, acp in pairs(WG.alliedCursorsPos) do
 		    local curx, curz = unpack(acp)
-			if (curx and curz) then
+			if curx and curz then
 				interestGrid:setCursor(curx, curz)
 			end
 		end
@@ -1296,7 +1296,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		local trgLocation = { trgx, trgy, trgz }
 
 		local moveDistance = distance(trgLocation, sbjLocation)
-		if (moveDistance < 256) then
+		if moveDistance < 256 then
 			-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 			return
 		end
@@ -1532,7 +1532,7 @@ local function updateCamera(dt, userCameraOverride)
 		local od     = length(ox, oy, oz)
 		-- Correction vector
 		local dx, dy, dz = -cxv, -cyv, -czv
-		if (od > 0) then
+		if od > 0 then
 			-- Not 2 x d as we want to accelerate until half way then decelerate.
 			local ov = sqrt(od * cameraAccel)
 			dx = dx + ov * ox / od
@@ -1540,7 +1540,7 @@ local function updateCamera(dt, userCameraOverride)
 			dz = dz + ov * oz / od
 		end
 		local dv = length(dx, dy, dz)
-		if (dv > 0) then
+		if dv > 0 then
 			cxv = cxv + dt * cameraAccel * dx / dv
 			cyv = cyv + dt * cameraAccel * dy / dv
 			czv = czv + dt * cameraAccel * dz / dv
