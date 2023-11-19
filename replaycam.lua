@@ -342,7 +342,7 @@ function WorldGrid:setWatching(x, y)
 	-- 1. Make sure it all goes into one grid square instead of being shared
 	-- 2. Increase by 2 in anticipation of decreasing by 1 later
 	x, y =  self:__toWorldCoords(self:__toGridCoords(x, y))
-	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 2 }, _addPasse)
+	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 4 }, _addPasse)
 end
 
 function WorldGrid:setCursor(x, y)
