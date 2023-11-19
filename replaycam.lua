@@ -649,7 +649,7 @@ end
 
 function EventStatistics:summary()
 	local summary = {}
-	for _, type in pairs(self._types) do
+	for type, _ in pairs(self._types) do
 		summary[#summary+1] = type .. ': ' .. (self:getMean(type) or 'nil')
 	end
 	return table.concat(summary, ', ')
