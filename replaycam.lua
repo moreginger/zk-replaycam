@@ -338,11 +338,9 @@ end
 function WorldGrid:setWatching(x, y)
 	-- Note: boost is spread over a 2x2 grid.
 	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
-	-- passe will be decreased by 1 in each grid square in reset, therefore:
-	-- 1. Make sure it all goes into one grid square instead of being shared
-	-- 2. Increase by 2 in anticipation of decreasing by 1 later
+	-- passe will be decreased by 1 in EACH grid square in reset, therefore we MUST add more than 1 to a square to have any effect.
 	x, y =  self:__toWorldCoords(self:__toGridCoords(x, y))
-	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 4 }, _addPasse)
+	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 3 }, _addPasse)
 end
 
 function WorldGrid:setCursor(x, y)
@@ -719,14 +717,14 @@ local eventStatistics = EventStatistics:new({
 	-- > 1: make each event seem more likely (less interesting)
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
-		attack = 1.3,
-		building = 4.0,
-		hotspot = 0.75,
-		move = 4.0,
-		overview = 4.2,
-		unitBuilt = 3.2,
-		unitDamaged = 0.7,
-		unitDestroyed = 0.5,
+		attack = 1.0,
+		building = 3.8,
+		hotspot = 0.7,
+		move = 5.0,
+		overview = 1.8,
+		unitBuilt = 1.6,
+		unitDamaged = 0.8,
+		unitDestroyed = 0.6,
 		unitDestroyer = 0.8,
 		unitTaken = 0.2
 	}
