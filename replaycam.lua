@@ -232,8 +232,8 @@ function LinkedList:remove(e)
 	if e == self.head then
 		self.head = prev
 	end
-	if e == self.tail then
-		self.tail = next
+	if e == self._tail then
+		self._tail = next
 	end
 	if prev then
 		prev.next = next
