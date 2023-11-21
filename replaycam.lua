@@ -786,25 +786,6 @@ local lastEventId = 0
 local events = LinkedList:new({ capacity = 128 })
 local showingEvent
 
--- Removes element from linked list and returns new head/tail.
-local function removeElement(element, head, tail)
-	if element == head then
-		head = element.prev
-	end
-	if element == tail then
-		tail = element.next
-	end
-	if element.prev then
-		element.prev.next = element.next
-	end
-	if element.next then
-		element.next.prev = element.prev
-	end
-	element.prev = nil
-	element.next = nil
-	return head, tail
-end
-
 -- updateFunc - Optional function taking the event as a parameter.
 -- returns event {}
 -- - units Contains unit IDs and their current locations. May contain negative unit IDs e.g. for dead units.
@@ -1074,23 +1055,23 @@ local function updateDisplay(event)
 	-- We use keepPrevious to keep runs of track infos from the same event
 	local keepPrevious = false
 	for k, v in pairs(event._sbjUnits) do
-		display.tracking = { unitID = k, location = v, prev = display.tracking, keepPrevious = keepPrevious }
+		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
 		keepPrevious = true
 	end
 	for k, v in pairs(event._objUnits) do
-		display.tracking = { unitID = k, location = v, prev = display.tracking, keepPrevious = keepPrevious }
+		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
 		keepPrevious = true
 	end
 
 	-- Remove duplicates from tracking
-	local tracked, trackInfo = {}, display.tracking
+	local tracked, trackInfo = {}, display.tracking.head
 	while trackInfo do
 		if tracked[trackInfo.unitID] then
-			_, display.tracking = removeElement(trackInfo, nil, display.tracking)
+			trackInfo, _ = display.tracking:remove(trackInfo)
 		else
 			tracked[trackInfo.unitID] = true
-		end
 		trackInfo = trackInfo.prev
+		end
 	end
 
 	commentary_cpl:SetText(commentary)
@@ -1195,6 +1176,7 @@ function widget:Initialize()
 		diag = 0,
 		location = { mapSizeX / 2, -1000, mapSizeZ / 2 },
 		noUpdateBeforeFrame = 0,
+		tracking = LinkedList:new(),
 		velocity = { 0, 0, 0 }
 	}
 	updateDisplay(addOverviewEvent(1))
@@ -1484,7 +1466,7 @@ local function updateCamera(dt, userCameraOverride)
 
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
-	local trackInfo, nextTrackInfo = display.tracking, nil
+	local trackInfo, keepPrevious = display.tracking.head, false
 	while trackInfo do
 		if not trackInfo.isDead then
 			-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
@@ -1503,17 +1485,17 @@ local function updateCamera(dt, userCameraOverride)
 		
 		-- Accumulate tracking info if not too distant
 		local nxMin, nxMax, nzMin, nzMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
-		if (nextTrackInfo and nextTrackInfo.keepPrevious) or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
+		if keepPrevious or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
 			xMin, xMax, zMin, zMax = nxMin, nxMax, nzMin, nzMax
 			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
 			trackedLocationCount = trackedLocationCount + 1
-			nextTrackInfo = trackInfo
+			keepPrevious = trackInfo.keepPrevious
 			trackInfo = trackInfo.prev
 		else
-			if nextTrackInfo then
-				nextTrackInfo.prev = nil
+			-- Chop off the rest of the tracking infos
+			while trackInfo do
+				trackInfo, _ = display.tracking:remove(trackInfo)
 			end
-			trackInfo = nil
 		end
 	end
 
