@@ -195,6 +195,58 @@ local function getUnitVelocity(unitID)
 	return xv and yv and zv and { xv, yv, zv }
 end
 
+-- LINKED LIST CLASS
+
+-- capacity of 0 = unlimited
+LinkedList = { capacity = 0, size = 0, head = nil, _tail = nil }
+
+function LinkedList:new(o)
+	o = o or {}
+	setmetatable(o, self)
+	self.__index = self
+
+	return o
+end
+
+function LinkedList:add(e)
+	local tail, head = self._tail, self.head
+	if not tail and not head then
+		self._tail = e
+		self.head = e
+		self.size = 1
+	else
+		head.next = e
+		e.prev = head
+		self.head = e
+		if self.capacity > 0 and self.capacity == self.size then
+			tail.next.prev = nil
+			self._tail = tail.next
+		else
+			self.size = self.size + 1
+		end
+	end
+end
+
+function LinkedList:remove(e)
+	local prev, next = e.prev, e.next
+	if e == self.head then
+		self.head = prev
+	end
+	if e == self.tail then
+		self.tail = next
+	end
+	if prev then
+		prev.next = next
+	end
+	if next then
+		next.prev = prev
+	end
+	e.prev, e.next = nil, nil
+	self.size = self.size - 1
+
+	return prev, next
+end
+
 -- WORLD GRID CLASS
 -- Translates world coordinates into operations on a grid.
 
@@ -731,23 +783,24 @@ local eventStatistics = EventStatistics:new({
 }, eventTypes)
 
 local lastEventId = 0
-local tailEvent, headEvent, showingEvent
+local events = LinkedList:new({ capacity = 128 })
+local showingEvent
 
 -- Removes element from linked list and returns new head/tail.
 local function removeElement(element, head, tail)
 	if element == head then
-		head = element.previous
+		head = element.prev
 	end
 	if element == tail then
 		tail = element.next
 	end
-	if element.previous then
-		element.previous.next = element.next
+	if element.prev then
+		element.prev.next = element.next
 	end
 	if element.next then
-		element.next.previous = element.previous
+		element.next.prev = element.prev
 	end
-	element.previous = nil
+	element.prev = nil
 	element.next = nil
 	return head, tail
 end
@@ -763,9 +816,9 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 
 	-- Try to merge into recent events.
 	local considerForMergeAfterFrame = gameFrame - framesPerSecond
-	local event = (not opts.noMerge and headEvent) or nil
+	local event = (not opts.noMerge and events.head) or nil
 	while event ~= nil do
-		local nextEvent = event.previous
+		local nextEvent = event.prev
 		if event.started < considerForMergeAfterFrame then
 			-- Don't want to check further back, so break.
 			event = nil
@@ -790,7 +843,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			end
 
 			-- Remove it and attach at head later.
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
+			events:remove(event)
 
 			-- We merged, so break.
 			break
@@ -822,14 +875,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 		end
 	end
 
-	if headEvent == nil then
-		tailEvent = event
-		headEvent = event
-	elseif event ~= headEvent then
-		headEvent.next = event
-		event.previous = headEvent
-		headEvent = event
-	end
+	events:add(event)
 
 	return event
 end
@@ -853,15 +899,16 @@ local function addOverviewEvent(importance)
 
 	return event
 end
+
 -- eventProcessor - perform processing and return truthy to remove the event
 local function purgeEvents(eventProcessor, opts)
-	local event = tailEvent
+	local event = events.head
 	while event ~= nil do
-		local nextEvent = event.next
 		if eventProcessor(event, opts) then
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
+			event, _ = events:remove(event)
+		else
+			event = event.prev
 		end
-		event = nextEvent
 	end
 end
 
@@ -891,38 +938,38 @@ end
 
 local function selectMostInterestingEvent(currentFrame)
 	-- Process events and update interest grid
-	local event = tailEvent
+	local event = events.head
 	while event ~= nil do
-		local nextEvent = event.next
 		if event.updateFunc then
 			event.updateFunc(event)
 		end
-		event = nextEvent
+		event = event.prev
 	end
 
 	-- Update event statistics
-	event = tailEvent
+	event = events.head
 	while event ~= nil do
 		local x, _, z = unpack(event.location)
 		eventStatistics:logEvent(event.type, event.importance * interestGrid:getScore(x, z))
-		event = event.next
+		event = event.prev
 	end
 
 	-- Make sure we always include current event even if it's not in the list
 	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent, 2.0) or 0
-	event = tailEvent
+	event = events.head
 	local checkedEvents = 0
 	while event ~= nil do
 		checkedEvents = checkedEvents + 1
-		local nextEvent = event.next
 		local eventPercentile = _getEventPercentile(currentFrame, event)
 		if eventPercentile <= 0.1 and not event.updateFunc then
 			-- Note updateFunc expected to play nicely and nil itself out at some point
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif eventTypes[event.type] and eventPercentile > mostPercentile then
+			event, _ = events:remove(event)
+		else
+			if eventTypes[event.type] and eventPercentile > mostPercentile then
 			mie, mostPercentile = event, eventPercentile
+			end
+			event = event.prev
 		end
-		event = nextEvent
 	end
 	if logging >= LOG_DEBUG and mie then
 		spEcho('checked ' .. checkedEvents .. ' events')
@@ -1027,11 +1074,11 @@ local function updateDisplay(event)
 	-- We use keepPrevious to keep runs of track infos from the same event
 	local keepPrevious = false
 	for k, v in pairs(event._sbjUnits) do
-		display.tracking = { unitID = k, location = v, previous = display.tracking, keepPrevious = keepPrevious }
+		display.tracking = { unitID = k, location = v, prev = display.tracking, keepPrevious = keepPrevious }
 		keepPrevious = true
 	end
 	for k, v in pairs(event._objUnits) do
-		display.tracking = { unitID = k, location = v, previous = display.tracking, keepPrevious = keepPrevious }
+		display.tracking = { unitID = k, location = v, prev = display.tracking, keepPrevious = keepPrevious }
 		keepPrevious = true
 	end
 
@@ -1043,7 +1090,7 @@ local function updateDisplay(event)
 		else
 			tracked[trackInfo.unitID] = true
 		end
-		trackInfo = trackInfo.previous
+		trackInfo = trackInfo.prev
 	end
 
 	commentary_cpl:SetText(commentary)
@@ -1198,7 +1245,7 @@ function widget:GameFrame(frame)
 	if mie and mie ~= showingEvent then
 		if showingEvent then
 			-- Avoid showing current event again
-			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
+			events:remove(showingEvent)
 		end
 		updateDisplay(mie);
 		purgeEvents(__purgeExcludes, { excluder = mie })
@@ -1461,10 +1508,10 @@ local function updateCamera(dt, userCameraOverride)
 			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
 			trackedLocationCount = trackedLocationCount + 1
 			nextTrackInfo = trackInfo
-			trackInfo = trackInfo.previous
+			trackInfo = trackInfo.prev
 		else
 			if nextTrackInfo then
-				nextTrackInfo.previous = nil
+				nextTrackInfo.prev = nil
 			end
 			trackInfo = nil
 		end
