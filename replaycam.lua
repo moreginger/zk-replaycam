@@ -446,7 +446,7 @@ function WorldGrid:statistics()
 		dX, dY = dX + (grid.dX * grid.score / totalScore), dY + (grid.dY * grid.score / totalScore)
 	end
 
-	return maxValue, centerX + dX, centerY + dY
+	return total, maxValue, centerX + dX, centerY + dY
 end
 
 -- UNIT INFO CACHE
@@ -757,6 +757,10 @@ local eventTypes = {
 	unitDestroyer = true,
 	unitTaken = true
 }
+local eventTypesCount = 0
+for _, enabled in pairs(eventTypes) do
+	eventTypesCount = eventTypesCount + (enabled and 1 or 0)
+end
 
 -- Logistic decay, time in frames to reach 1/2 of original value
 local eventDecayFactors = _apply(_multiply, {
@@ -778,12 +782,12 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		attack = 1.0,
-		building = 3.8,
-		hotspot = 0.7,
-		move = 5.0,
-		overview = 1.8,
+		building = 3.2,
+		hotspot = 0.8,
+		move = 5.5,
+		overview = 1.7,
 		unitBuilt = 1.6,
-		unitDamaged = 0.8,
+		unitDamaged = 0.9,
 		unitDestroyed = 0.6,
 		unitDestroyer = 0.8,
 		unitTaken = 0.2
@@ -926,12 +930,29 @@ local function _getEventPercentile(currentFrame, event, eventBoost)
 end
 
 local function selectMostInterestingEvent(currentFrame)
+	local typeCounts = {}
+	for type, _ in pairs(eventTypes) do
+		typeCounts[type] = 0
+	end
+
 	-- Process events and update interest grid
 	local event = events.head
 	while event ~= nil do
 		if event.updateFunc then
 			event.updateFunc(event)
 		end
+		typeCounts[event.type] = typeCounts[event.type] + 1
+		event = event.prev
+	end
+
+	local total, _, _, _ = interestGrid:statistics()
+	-- Calculate a bonus per event type to add to the grid
+	local perEventTypeBonus = total / eventTypesCount / 8
+	event = events.head
+	while event ~= nil do
+		local x, _, z = unpack(event.location)
+		-- FIXME: Add allyTeam if we can?
+		interestGrid:add(x, z, nil, perEventTypeBonus / typeCounts[event.type])
 		event = event.prev
 	end
 
@@ -1205,8 +1226,10 @@ function widget:GameFrame(frame)
 		return
 	end
 
-	local x, _, z = unpack(display.location)
-	interestGrid:setWatching(x, z)
+	if display.camType ~= camTypeOverview then
+		local x, _, z = unpack(display.location)
+		interestGrid:setWatching(x, z)
+	end
 
 	if WG.alliedCursorsPos then
 		for _, acp in pairs(WG.alliedCursorsPos) do
@@ -1217,7 +1240,7 @@ function widget:GameFrame(frame)
 		end
     end
 
-	local igMax, igX, igZ = interestGrid:statistics()
+	local _, igMax, igX, igZ = interestGrid:statistics()
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInCylinder(igX, igZ, length(worldGridSize / 2, worldGridSize / 2))
 		local hotspotEvent
@@ -1291,16 +1314,6 @@ local function _updateCommandEvent(event)
 	-- Predicted distance in 1s
 	local distanceFromCommand = distance(event.location, sbjLocation) - distance(sbjv) * framesPerSecond
 	event.importance = meta.importance * meta.commandRange / max(meta.commandRange, distanceFromCommand)
-
-	-- FIXME add interest for command events or more generally for all events
-	-- Wait we are already doing it above :confused:
-	-- if _applyupdateFunc(currentFrame, event) and event.actorAllyTeam then
-	-- 	local meanImportance = eventStatistics:getMean(event.type)
-	-- 	local importanceAtFrame = event:importanceAtFrame(currentFrame)
-	-- 	local interest = meanImportance and (importanceAtFrame / meanImportance) or 1
-	-- 	local x, _, z = unpack(event.location)
-	-- 	interestGrid:add(x, z, event.actorAllyTeam, interest)
-	-- end
 end
 
 local moveCommands = {
