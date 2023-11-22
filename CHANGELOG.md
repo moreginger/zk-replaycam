@@ -4,6 +4,7 @@
 
 - Rework event selection to use more player input (command events, cursor position)
 - Less battle centric - show slightly more build and overview events
+- Less janky instant camera transitions
 - Show attacker information for unitDamaged event
 
 ## [0.2.1] - 2023-04-02

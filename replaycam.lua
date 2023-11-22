@@ -247,6 +247,14 @@ function LinkedList:remove(e)
 	return prev, next
 end
 
+function LinkedList:clear()
+	-- We do it this way to unlink all elements as well
+	local e = self.head
+	while e ~= nil do
+		e, _ = self:remove(e)
+	end
+end
+
 -- WORLD GRID CLASS
 -- Translates world coordinates into operations on a grid.
 
@@ -947,7 +955,7 @@ local function selectMostInterestingEvent(currentFrame)
 			event, _ = events:remove(event)
 		else
 			if eventTypes[event.type] and eventPercentile > mostPercentile then
-			mie, mostPercentile = event, eventPercentile
+				mie, mostPercentile = event, eventPercentile
 			end
 			event = event.prev
 		end
@@ -1017,13 +1025,13 @@ local function updateDisplay(event)
 	for _, _ in pairs(event._sbjUnits) do
 		sbjUnitCount = sbjUnitCount + 1
 	end
-  local sbjString = __pluralize(event.sbjName, sbjUnitCount)
+	local sbjString = __pluralize(event.sbjName, sbjUnitCount)
 
 	if event.type == attackEventType then
 		commentary = sbjString .. " attacking"
-  elseif event.type == buildingEventType then
+	elseif event.type == buildingEventType then
 		commentary = actorName .. " making " .. sbjString
-  elseif event.type == hotspotEventType then
+	elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
 		camAngle = - pi / 2
@@ -1049,6 +1057,7 @@ local function updateDisplay(event)
 	if display.camType ~= camType then
 		-- It looks especially naff if we flip between camera types every second
 		display.noUpdateBeforeFrame = gameFrame + framesPerSecond * 4
+		display.tracking:clear()
 	end
 	display.camType = camType
 
@@ -1070,7 +1079,7 @@ local function updateDisplay(event)
 			trackInfo, _ = display.tracking:remove(trackInfo)
 		else
 			tracked[trackInfo.unitID] = true
-		trackInfo = trackInfo.prev
+			trackInfo = trackInfo.prev
 		end
 	end
 
@@ -1172,7 +1181,7 @@ function widget:Initialize()
 
 	local cx, cy, cz = spGetCameraPosition()
 	display = {
-	  camAngle = defaultRx,
+		camAngle = defaultRx,
 		diag = 0,
 		location = { mapSizeX / 2, -1000, mapSizeZ / 2 },
 		noUpdateBeforeFrame = 0,
@@ -1523,6 +1532,7 @@ local function updateCamera(dt, userCameraOverride)
 		display.velocity = tvelocity
 	end
 
+	local isOverview = display.camType == camTypeOverview;
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
 	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
@@ -1534,7 +1544,7 @@ local function updateCamera(dt, userCameraOverride)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Where do we *want* the camera to be ie: (t)arget
 	local tcDist = calcCamRange(display.diag, defaultFov)
-	local try = atan2(cx - ex, cz - ez) + pi
+	local try = isOverview and defaultRy or atan2(cx - ex, cz - ez) + pi
 	local pry = cry + cryv / cameraRAccel / 2
 	cryv = (deferRotationRenderFrames == 0 and 0) or cryv + signum(try - pry) * cameraRAccel * dt
 	cry = (deferRotationRenderFrames == 0 and try) or cry + cryv * dt
@@ -1543,16 +1553,12 @@ local function updateCamera(dt, userCameraOverride)
 	local tcx, tcy, tcz = ex + tcDist2d * sin(cry - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(cry - pi)
 
 	local doInstantTransition = length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance
-	if doInstantTransition or display.camType == camTypeOverview then
+	if doInstantTransition then
 		cx, cy, cz = ex + tcDist2d * sin(defaultRy - pi), tcy, ez + tcDist2d * cos(defaultRy - pi)
 		cxv, crxv, cyv, cryv, czv = 0, 0, 0, 0, 0
-		if doInstantTransition then
-			-- HACK: Need to defer rotation by 1 frame, see earlier
-			deferRotationRenderFrames = 1
-		else
-			-- FIXME: Simplify this else case (for overview) somehow
-			crx, cry, cfov = display.camAngle, defaultRy, defaultFov
-		end
+		cfov = defaultFov
+		-- HACK: Need to defer rotation by 1 frame, see earlier
+		deferRotationRenderFrames = 1
 	else
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
@@ -1586,7 +1592,7 @@ local function updateCamera(dt, userCameraOverride)
 		cz = cz + dt * czv
 
 		-- Rotate and zoom camera
-		local trx = -atan2(cy - ey, length(cx - ex, cz - ez))
+		local trx = isOverview and display.camAngle or -atan2(cy - ey, length(cx - ex, cz - ez))
 		local prx = crx + crxv / cameraRAccel / 2
 		crxv = (deferRotationRenderFrames == 0 and 0) or crxv + signum(trx - prx) * cameraRAccel * dt
 		crx = (deferRotationRenderFrames == 0 and display.camAngle) or crx + crxv * dt
