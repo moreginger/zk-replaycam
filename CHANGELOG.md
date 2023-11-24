@@ -1,16 +1,10 @@
 # Changelog
 
-## WIP
-
-- Make active event stickier
-- Show _building_ events for units under construction
-- More frequent _move_ command events
-- Set `normal` map mode (i.e. not `los`)
-- Fix jank transition from overview
-
 ## [?]
 
-- Incorporate cursor information in event selection
+- Rework event selection to use more player input (command events, cursor position)
+- Less battle centric - show slightly more build and overview events
+- Less janky instant camera transitions
 - Show attacker information for unitDamaged event
 
 ## [0.2.1] - 2023-04-02

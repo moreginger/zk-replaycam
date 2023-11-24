@@ -114,7 +114,7 @@ options = {
 -- Initialize a table.
 local function initTable(key, value)
 	local result = {}
-	if (key) then
+	if key then
 		result[key] = value
 	end
 	return result
@@ -136,10 +136,10 @@ end
 
 -- Bound a number to be >= min and <= max
 local function bound(x, min, max)
-	if (x < min) then
+	if x < min then
 		return min
 	end
-	if (x > max) then
+	if x > max then
 		return max
 	end
 	return x
@@ -193,6 +193,66 @@ end
 local function getUnitVelocity(unitID)
 	local xv, yv, zv = spGetUnitVelocity(unitID)
 	return xv and yv and zv and { xv, yv, zv }
+end
+
+-- LINKED LIST CLASS
+
+-- capacity of 0 = unlimited
+LinkedList = { capacity = 0, size = 0, head = nil, _tail = nil }
+
+function LinkedList:new(o)
+	o = o or {}
+	setmetatable(o, self)
+	self.__index = self
+
+	return o
+end
+
+function LinkedList:add(e)
+	local tail, head = self._tail, self.head
+	if not tail and not head then
+		self._tail = e
+		self.head = e
+		self.size = 1
+	else
+		head.next = e
+		e.prev = head
+		self.head = e
+		if self.capacity > 0 and self.capacity == self.size then
+			tail.next.prev = nil
+			self._tail = tail.next
+		else
+			self.size = self.size + 1
+		end
+	end
+end
+
+function LinkedList:remove(e)
+	local prev, next = e.prev, e.next
+	if e == self.head then
+		self.head = prev
+	end
+	if e == self._tail then
+		self._tail = next
+	end
+	if prev then
+		prev.next = next
+	end
+	if next then
+		next.prev = prev
+	end
+	e.prev, e.next = nil, nil
+	self.size = self.size - 1
+
+	return prev, next
+end
+
+function LinkedList:clear()
+	-- We do it this way to unlink all elements as well
+	local e = self.head
+	while e ~= nil do
+		e, _ = self:remove(e)
+	end
 end
 
 -- WORLD GRID CLASS
@@ -338,11 +398,9 @@ end
 function WorldGrid:setWatching(x, y)
 	-- Note: boost is spread over a 2x2 grid.
 	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
-	-- passe will be decreased by 1 in each grid square in reset, therefore:
-	-- 1. Make sure it all goes into one grid square instead of being shared
-	-- 2. Increase by 2 in anticipation of decreasing by 1 later
+	-- passe will be decreased by 1 in EACH grid square in reset, therefore we MUST add more than 1 to a square to have any effect.
 	x, y =  self:__toWorldCoords(self:__toGridCoords(x, y))
-	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 2 }, _addPasse)
+	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 3 }, _addPasse)
 end
 
 function WorldGrid:setCursor(x, y)
@@ -388,7 +446,7 @@ function WorldGrid:statistics()
 		dX, dY = dX + (grid.dX * grid.score / totalScore), dY + (grid.dY * grid.score / totalScore)
 	end
 
-	return maxValue, centerX + dX, centerY + dY
+	return total, maxValue, centerX + dX, centerY + dY
 end
 
 -- UNIT INFO CACHE
@@ -449,6 +507,9 @@ function UnitInfoCache:_unitStats(unitDefID)
 		if unitDef.customParams.ismex then
 			-- Give mexes a little buff since they are cheap but important
 			importance = importance * 2
+		elseif unitDef.name == 'terraunit' then
+			-- terraunit has fixed cost of 100000, actual estimated cost is a unit rules param
+			importance = 500
 		end
 		local isStatic = not spGetMovetype(unitDef)
 		local wImportance, wRange = self:_weaponStats(unitDef)
@@ -492,7 +553,13 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	end
 	local unitDef = UnitDefs[unitDefID]
 	local name = spGetHumanName(unitDef, unitID)
-	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, lastUpdatedFrame = gameFrame }
+	local importance, _, _, _ = self:_unitStats(unitDefID)
+	if unitDef.name == 'terraunit' then
+		-- FIXME: This is set in unit_terraform.lua, but not accessible here?
+		importance = spGetUnitRulesParam(unitID, 'terraform_estimate') or importance
+		spEcho('terraform_estimate', importance)
+	end
+	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, importance = importance, lastUpdatedFrame = gameFrame }
 	if not self:_updatePosition(unitID, cacheObject) then
 		return
 	end
@@ -504,10 +571,10 @@ end
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
-		local importance, isStatic, weaponImportance, weaponRange = self:_unitStats(cacheObject.unitDefID)
+		local _, isStatic, weaponImportance, weaponRange = self:_unitStats(cacheObject.unitDefID)
 		local dt = (gameFrame - cacheObject.lastUpdatedFrame) / framesPerSecond
 		local location = _apply2(_extrapolate, cacheObject.location, cacheObject.velocity, dt)
-		return location, cacheObject.velocity, importance, cacheObject.name, isStatic, weaponImportance, weaponRange
+		return location, cacheObject.velocity, cacheObject.importance, cacheObject.name, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -580,8 +647,8 @@ function Event:excludes(other)
 	return self._excludes[other.id]
 end
 
-function Event:importanceAtFrame(frame)
-  return self.importance * (1 - logistic(eventDecayBase / self.decay * (frame - self.started - self.decay)))
+function Event:valueAtFrame(value, frame)
+  return value * (1 - logistic(eventDecayBase / self.decay * (frame - self.started - self.decay)))
 end
 
 -- return - true if there are no more subjects
@@ -615,7 +682,7 @@ function EventStatistics:new(o, types)
 	self.__index = self
 
 	o._types = types
-	for _, type in pairs(types) do
+	for type, _ in pairs(types) do
 		o[type] = { 0, 0 }
 	end
 
@@ -649,7 +716,7 @@ end
 
 function EventStatistics:summary()
 	local summary = {}
-	for _, type in pairs(self._types) do
+	for type, _ in pairs(self._types) do
 		summary[#summary+1] = type .. ': ' .. (self:getMean(type) or 'nil')
 	end
 	return table.concat(summary, ', ')
@@ -671,38 +738,42 @@ local window_cpl, panel_cpl, commentary_cpl
 local attackEventType = "attack"
 local buildingEventType = "building"
 local hotspotEventType = "hotspot"
+local moveEventType = "move"
 local overviewEventType = "overview"
 local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
 local unitDestroyerEventType = "unitDestroyer"
-local unitMovingEventType = "unitMoving"
 local unitTakenEventType = "unitTaken"
 local eventTypes = {
-	attackEventType,
-	buildingEventType,
-	hotspotEventType,
-	overviewEventType,
-	unitBuiltEventType,
-	unitDamagedEventType,
-	unitDestroyedEventType,
-	unitDestroyerEventType,
-	unitMovingEventType,
-	unitTakenEventType
+	attack = true,
+	building = true,
+	hotspot = true,
+	move = true,
+	overview = true,
+	unitBuilt = true,
+	unitDamaged = true,
+	unitDestroyed = true,
+	unitDestroyer = true,
+	unitTaken = true
 }
+local eventTypesCount = 0
+for _, enabled in pairs(eventTypes) do
+	eventTypesCount = eventTypesCount + (enabled and 1 or 0)
+end
 
 -- Logistic decay, time in frames to reach 1/2 of original value
 local eventDecayFactors = _apply(_multiply, {
 	attack = 1,
-	building = 100,
+	building = 5,
 	hotspot = 1,
+	move = 2,
 	overview = 1,
 	unitBuilt = 5,
 	unitDamaged = 2,
 	unitDestroyed = 3,
 	unitDestroyer = 3,
-	unitMoving = 2,
-	unitTaken = 3,
+	unitTaken = 3
 }, framesPerSecond)
 
 local eventStatistics = EventStatistics:new({
@@ -710,46 +781,27 @@ local eventStatistics = EventStatistics:new({
 	-- > 1: make each event seem more likely (less interesting)
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
-		attack = 1.3,
-		building = 5.0,
+		attack = 1.0,
+		building = 3.2,
 		hotspot = 0.7,
-		overview = 4.2,
-		unitBuilt = 3.2,
-		unitDamaged = 0.7,
+		move = 5.0,
+		overview = 1.7,
+		unitBuilt = 1.6,
+		unitDamaged = 0.8,
 		unitDestroyed = 0.5,
-		unitDestroyer = 0.8,
-		unitMoving = 3.0,
-		unitTaken = 0.2,
+		unitDestroyer = 0.7,
+		unitTaken = 0.2
 	}
 }, eventTypes)
 
 local lastEventId = 0
-local tailEvent, headEvent, showingEvent
+local events = LinkedList:new({ capacity = 128 })
+local showingEvent
 
--- Removes element from linked list and returns new head/tail.
-local function removeElement(element, head, tail)
-	if element == head then
-		head = element.previous
-	end
-	if element == tail then
-		tail = element.next
-	end
-	if element.previous then
-		element.previous.next = element.next
-	end
-	if element.next then
-		element.next.previous = element.previous
-	end
-	element.previous = nil
-	element.next = nil
-	return head, tail
-end
-
--- deferFunc - Optional function taking the event as a parameter.
---             Useful for command events that may become interesting e.g. when units close range.
+-- updateFunc - Optional function taking the event as a parameter.
 -- returns event {}
 -- - units Contains unit IDs and their current locations. May contain negative unit IDs e.g. for dead units.
-local function addEvent(actor, importance, location, meta, sbjName, type, unitID, deferFunc, opts)
+local function addEvent(actor, importance, location, meta, sbjName, type, unitID, updateFunc, opts)
 	opts = opts or {}
 
 	local decay = eventDecayFactors[type]
@@ -757,21 +809,20 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 
 	-- Try to merge into recent events.
 	local considerForMergeAfterFrame = gameFrame - framesPerSecond
-	local event = (not opts.noMerge and headEvent) or nil
+	local event = (not opts.noMerge and events.head) or nil
 	while event ~= nil do
-		local nextEvent = event.previous
+		local nextEvent = event.prev
 		if event.started < considerForMergeAfterFrame then
 			-- Don't want to check further back, so break.
 			event = nil
 			break
 		end
-		local importanceAtFrame = event:importanceAtFrame(gameFrame)
 		if event:shouldMerge(type, sbjName, location, actorAllyTeam) then
 			if logging >= LOG_DEBUG then
 				spEcho('merging events', type)
 			end
 			-- Merge new event into old.
-			event.importance = importanceAtFrame + importance
+			event.importance = event:valueAtFrame(event.importance, gameFrame) + importance
 			event.decay = decay
 			event.location = location
 			event.started = gameFrame
@@ -784,7 +835,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			end
 
 			-- Remove it and attach at head later.
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
+			events:remove(event)
 
 			-- We merged, so break.
 			break
@@ -802,8 +853,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			actors = initTable(actor, true),
 			actorAllyTeam = actorAllyTeam,
 			decay = decay,
-			defer = deferFunc and true,
-			deferFunc = deferFunc,
+			updateFunc = updateFunc,
 			id = lastEventId,
 			importance = importance,
 			location = location,
@@ -817,14 +867,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 		end
 	end
 
-	if (headEvent == nil) then
-		tailEvent = event
-		headEvent = event
-	elseif (event ~= headEvent) then
-		headEvent.next = event
-		event.previous = headEvent
-		headEvent = event
-	end
+	events:add(event)
 
 	return event
 end
@@ -832,7 +875,7 @@ end
 local function addOverviewEvent(importance)
 	local x, z = mapSizeX / 2, mapSizeZ / 2
 	local overviewY = spGetGroundHeight(x, z)
-	local overviewEvent = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, { noMerge = true })
+	local event = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, { noMerge = true })
 
 	-- Add two fake units to get the right zoom level
 	local sx, sy = spGetViewGeometry()
@@ -843,20 +886,21 @@ local function addOverviewEvent(importance)
 		zfit = zfit * sratio / mratio
 	end
 	local zoffset = mapSizeZ * (1 - zfit) / 2
-	overviewEvent:addSubject(-2, { x, overviewY, -zoffset })
-	overviewEvent:addSubject(-3, { x, overviewY, mapSizeZ + zoffset })
+	event:addSubject(-2, { x, overviewY, -zoffset })
+	event:addSubject(-3, { x, overviewY, mapSizeZ + zoffset })
 
-	return overviewEvent
+	return event
 end
+
 -- eventProcessor - perform processing and return truthy to remove the event
 local function purgeEvents(eventProcessor, opts)
-	local event = tailEvent
+	local event = events.head
 	while event ~= nil do
-		local nextEvent = event.next
 		if eventProcessor(event, opts) then
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
+			event, _ = events:remove(event)
+		else
+			event = event.prev
 		end
-		event = nextEvent
 	end
 end
 
@@ -869,7 +913,7 @@ local function __purgeSubject(event, opts)
 end
 
 local function __purgeCommands(event, opts)
-	if event.type ~= attackEventType and event.type ~= unitMovingEventType then
+	if event.type ~= attackEventType and event.type ~= moveEventType then
 		return false
 	end
 	return event:removeSubject(opts.unitID)
@@ -878,64 +922,50 @@ end
 
 local function _getEventPercentile(currentFrame, event, eventBoost)
 	eventBoost = eventBoost or 1
-	local importance = event:importanceAtFrame(currentFrame) * eventBoost
+	local importance = event:valueAtFrame(event.importance, currentFrame) * eventBoost
 	local x, _, z = unpack(event.location)
 	local interestModifier = interestGrid:getScore(x, z)
 	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
--- Return true if the event is still in the list
-local function _applyDeferFunc(currentFrame, event)
-	if event.deferFunc then
-		event.started = event.defer and currentFrame or event.started
-		local defer, abort = event.deferFunc(event)
-		event.defer = event.defer and defer
-		if abort then
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-			return
-		end
-	end
-
-	return true
-end
-
 local function selectMostInterestingEvent(currentFrame)
 	-- Process events and update interest grid
-	local event = tailEvent
+	local event = events.head
 	while event ~= nil do
-		local nextEvent = event.next
-		if _applyDeferFunc(currentFrame, event) and event.actorAllyTeam then
-			local meanImportance = eventStatistics:getMean(event.type)
-			local importanceAtFrame = event:importanceAtFrame(currentFrame)
-			local interest = meanImportance and (importanceAtFrame / meanImportance) or 1
-			local x, _, z = unpack(event.location)
-			interestGrid:add(x, z, event.actorAllyTeam, interest)
+		if event.updateFunc then
+			event.updateFunc(event)
 		end
-		event = nextEvent
+		if event.interest then
+			local x, _, z = unpack(event.location)
+			interestGrid:add(x, z, event.actorAllyTeam, event:valueAtFrame(event.interest, currentFrame))
+		end
+		event = event.prev
 	end
 
 	-- Update event statistics
-	event = tailEvent
+	event = events.head
 	while event ~= nil do
 		local x, _, z = unpack(event.location)
 		eventStatistics:logEvent(event.type, event.importance * interestGrid:getScore(x, z))
-		event = event.next
+		event = event.prev
 	end
 
 	-- Make sure we always include current event even if it's not in the list
 	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent, 2.0) or 0
-	event = tailEvent
+	event = events.head
 	local checkedEvents = 0
 	while event ~= nil do
 		checkedEvents = checkedEvents + 1
-		local nextEvent = event.next
 		local eventPercentile = _getEventPercentile(currentFrame, event)
-		if eventPercentile <= 0.1 then
-			headEvent, tailEvent = removeElement(event, headEvent, tailEvent)
-		elseif eventPercentile > mostPercentile and not event.defer then
-			mie, mostPercentile = event, eventPercentile
+		if eventPercentile <= 0.1 and not event.updateFunc then
+			-- Note updateFunc expected to play nicely and nil itself out at some point
+			event, _ = events:remove(event)
+		else
+			if eventTypes[event.type] and eventPercentile > mostPercentile then
+				mie, mostPercentile = event, eventPercentile
+			end
+			event = event.prev
 		end
-		event = nextEvent
 	end
 	if logging >= LOG_DEBUG and mie then
 		spEcho('checked ' .. checkedEvents .. ' events')
@@ -1002,13 +1032,13 @@ local function updateDisplay(event)
 	for _, _ in pairs(event._sbjUnits) do
 		sbjUnitCount = sbjUnitCount + 1
 	end
-  local sbjString = __pluralize(event.sbjName, sbjUnitCount)
+	local sbjString = __pluralize(event.sbjName, sbjUnitCount)
 
 	if event.type == attackEventType then
 		commentary = sbjString .. " attacking"
-  elseif event.type == buildingEventType then
+	elseif event.type == buildingEventType then
 		commentary = actorName .. " making " .. sbjString
-  elseif event.type == hotspotEventType then
+	elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
 	elseif event.type == overviewEventType then
 		camAngle = - pi / 2
@@ -1024,7 +1054,7 @@ local function updateDisplay(event)
 		commentary = sbjString .. " destroyed by " .. destroyer .. " of " .. actorName
 	elseif event.type == unitDestroyerEventType then
 		commentary = sbjString .. " on a rampage"
-	elseif event.type == unitMovingEventType then
+	elseif event.type == moveEventType then
 		commentary = sbjString .. " moving"
 	elseif event.type == unitTakenEventType then
 		commentary = sbjString .. " captured by " .. actorName
@@ -1034,29 +1064,30 @@ local function updateDisplay(event)
 	if display.camType ~= camType then
 		-- It looks especially naff if we flip between camera types every second
 		display.noUpdateBeforeFrame = gameFrame + framesPerSecond * 4
+		display.tracking:clear()
 	end
 	display.camType = camType
 
 	-- We use keepPrevious to keep runs of track infos from the same event
 	local keepPrevious = false
 	for k, v in pairs(event._sbjUnits) do
-		display.tracking = { unitID = k, location = v, previous = display.tracking, keepPrevious = keepPrevious }
+		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
 		keepPrevious = true
 	end
 	for k, v in pairs(event._objUnits) do
-		display.tracking = { unitID = k, location = v, previous = display.tracking, keepPrevious = keepPrevious }
+		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
 		keepPrevious = true
 	end
 
 	-- Remove duplicates from tracking
-	local tracked, trackInfo = {}, display.tracking
+	local tracked, trackInfo = {}, display.tracking.head
 	while trackInfo do
 		if tracked[trackInfo.unitID] then
-			_, display.tracking = removeElement(trackInfo, nil, display.tracking)
+			trackInfo, _ = display.tracking:remove(trackInfo)
 		else
 			tracked[trackInfo.unitID] = true
+			trackInfo = trackInfo.prev
 		end
-		trackInfo = trackInfo.previous
 	end
 
 	commentary_cpl:SetText(commentary)
@@ -1131,7 +1162,7 @@ function widget:Initialize()
 			local teamLeader = nil
 			_, teamLeader = spGetTeamInfo(teamID)
 			local teamName = "unknown"
-			if (teamLeader) then
+			if teamLeader then
 				teamName = spGetPlayerInfo(teamLeader)
 			end
 			teamInfo[teamID] = {
@@ -1157,10 +1188,11 @@ function widget:Initialize()
 
 	local cx, cy, cz = spGetCameraPosition()
 	display = {
-	  camAngle = defaultRx,
+		camAngle = defaultRx,
 		diag = 0,
 		location = { mapSizeX / 2, -1000, mapSizeZ / 2 },
 		noUpdateBeforeFrame = 0,
+		tracking = LinkedList:new(),
 		velocity = { 0, 0, 0 }
 	}
 	updateDisplay(addOverviewEvent(1))
@@ -1180,19 +1212,21 @@ function widget:GameFrame(frame)
 		return
 	end
 
-	local x, _, z = unpack(display.location)
-	interestGrid:setWatching(x, z)
+	if display.camType ~= camTypeOverview then
+		local x, _, z = unpack(display.location)
+		interestGrid:setWatching(x, z)
+	end
 
-	if (WG.alliedCursorsPos) then
+	if WG.alliedCursorsPos then
 		for _, acp in pairs(WG.alliedCursorsPos) do
 		    local curx, curz = unpack(acp)
-			if (curx and curz) then
+			if curx and curz then
 				interestGrid:setCursor(curx, curz)
 			end
 		end
     end
 
-	local igMax, igX, igZ = interestGrid:statistics()
+	local _, igMax, igX, igZ = interestGrid:statistics()
 	if igMax >= interestGrid:getInterestingScore() then
 		local units = spGetUnitsInCylinder(igX, igZ, length(worldGridSize / 2, worldGridSize / 2))
 		local hotspotEvent
@@ -1208,12 +1242,15 @@ function widget:GameFrame(frame)
 	addOverviewEvent(100 / igMax)
 
 	local mie = selectMostInterestingEvent(frame)
-	if mie and mie ~= showingEvent and updateDisplay(mie) then
+	if mie and mie ~= showingEvent then
 		if showingEvent then
-			-- Avoid showing it again
-			headEvent, tailEvent = removeElement(showingEvent, headEvent, tailEvent)
+			-- Avoid showing current event again
+			events:remove(showingEvent)
 		end
+		updateDisplay(mie);
 		purgeEvents(__purgeExcludes, { excluder = mie })
+		-- Picked event should stop changing itself
+		mie.updateFunc = nil
 		-- Set a standard decay so that we don't show the event for too long.
 		mie.decay, mie.started = 3 * framesPerSecond, frame
 		showingEvent = mie
@@ -1245,18 +1282,34 @@ function widget:MouseWheel(up, value)
 	userAction()
 end
 
-local function _deferCommandEvent(event)
+local function _updateCommandEvent(event)
 	local meta = event.meta
-	local sbjLocation, sbjv = unitInfo:get(meta.sbjUnitID)
+
+	if meta.updateUntilFrame < gameFrame then
+		event.importance, event.updateFunc = 0, nil
+		return
+	end
+
+	event.started = gameFrame
+
+	-- For simplicity we'll just take the location of one subject
+	local sbjUnitID, sbjCount = nil, 0
+	for k, _ in pairs(event._sbjUnits) do
+		sbjUnitID = sbjUnitID or k
+		sbjCount = sbjCount + 1
+	end
+	local sbjLocation, sbjv = unitInfo:get(sbjUnitID)
 	if not sbjLocation or not sbjv then
-		return nil, true
+		event.importance, event.updateFunc = 0, nil
+		return
 	end
-	local defer = distance(event.location, sbjLocation) > meta.deferRange + distance(sbjv) * framesPerSecond * 2.5
-	if not defer then
-		local trgx, _, trgz = unpack(event.location)
-		interestGrid:add(trgx, trgz, meta.sbjAllyTeam, 1)
-	end
-	return defer, false
+
+	-- Predicted distance in 1s
+	local distanceFromCommand = distance(event.location, sbjLocation) - distance(sbjv) * framesPerSecond
+	local rangeFraction = meta.commandRange / max(meta.commandRange, distanceFromCommand)
+	event.importance = meta.importance * rangeFraction
+	-- A moving unit is worth 1, let's make the commands worth a little less per unit
+	event.interest = 0.5 * sbjCount * rangeFraction
 end
 
 local moveCommands = {
@@ -1296,13 +1349,13 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		local trgLocation = { trgx, trgy, trgz }
 
 		local moveDistance = distance(trgLocation, sbjLocation)
-		if (moveDistance < 256) then
+		if moveDistance < 256 then
 			-- Ignore smaller moves to keep event numbers down and help ignore unitAI
 			return
 		end
 
-		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, deferRange = worldGridSize / 2 }
-		local event = addEvent(unitTeam, importance, sbjLocation, meta, sbjName, unitMovingEventType, unitID, _deferCommandEvent)
+		local meta = { commandRange = worldGridSize / 2, importance = importance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
+		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, moveEventType, unitID, _updateCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
 		event:addObject(-unitID, trgLocation)
@@ -1320,32 +1373,32 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		end
 
 		local sbjLocation, _, _, sbjName, _, weaponImportance, weaponRange = unitInfo:get(unitID)
-		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
-		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, deferRange = weaponRange }
-		local event = addEvent(unitTeam, weaponImportance, sbjLocation, meta, sbjName, attackEventType, unitID, _deferCommandEvent)
+		local meta = { commandRange = weaponRange, importance = weaponImportance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
+		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, attackEventType, unitID, _updateCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
 		event:addObject(attackedUnitID or -unitID, trgLocation)
 	end
 end
 
-local function _deferBuildingEvent(event)
+local function _updateBuildingEvent(event)
+	event.started = gameFrame
+
 	local meta = event.meta
 	local _, _, _, _, buildProgress = spGetUnitHealth(meta.sbjUnitID)
 	if not buildProgress or buildProgress > 0.5 then
-		-- Either the unit is not longer being built or it is over half built
-		return nil, true
+		-- Either the unit is no longer being built or let's wait for it to finish
+		event.importance, event.updateFunc = 0, nil
 	end
-	return buildProgress < 0.1, false
 end
 
 function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 	local allyTeam = teamInfo[unitTeam].allyTeam
 	local sbjLocation, _, importance, sbjName = unitInfo:watch(unitID, allyTeam, unitDefID)
 	local meta = { sbjUnitID = unitID }
-	addEvent(unitTeam, importance, sbjLocation, meta, sbjName, buildingEventType, unitID, _deferBuildingEvent)
+	addEvent(unitTeam, importance, sbjLocation, meta, sbjName, buildingEventType, unitID, _updateBuildingEvent)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
@@ -1397,7 +1450,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	destroyerEvent:addObject(unitID, destroyedLocation)
 	-- It would be naff to show both
 	destroyedEvent:addExcludes(destroyerEvent)
-  destroyerEvent:addExcludes(destroyedEvent)
+    destroyerEvent:addExcludes(destroyedEvent)
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
@@ -1430,7 +1483,7 @@ local function updateCamera(dt, userCameraOverride)
 
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
-	local trackInfo, nextTrackInfo = display.tracking, nil
+	local trackInfo, keepPrevious = display.tracking.head, false
 	while trackInfo do
 		if not trackInfo.isDead then
 			-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
@@ -1449,17 +1502,17 @@ local function updateCamera(dt, userCameraOverride)
 		
 		-- Accumulate tracking info if not too distant
 		local nxMin, nxMax, nzMin, nzMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
-		if (nextTrackInfo and nextTrackInfo.keepPrevious) or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
+		if keepPrevious or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
 			xMin, xMax, zMin, zMax = nxMin, nxMax, nzMin, nzMax
 			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
 			trackedLocationCount = trackedLocationCount + 1
-			nextTrackInfo = trackInfo
-			trackInfo = trackInfo.previous
+			keepPrevious = trackInfo.keepPrevious
+			trackInfo = trackInfo.prev
 		else
-			if nextTrackInfo then
-				nextTrackInfo.previous = nil
+			-- Chop off the rest of the tracking infos
+			while trackInfo do
+				trackInfo, _ = display.tracking:remove(trackInfo)
 			end
-			trackInfo = nil
 		end
 	end
 
@@ -1487,6 +1540,7 @@ local function updateCamera(dt, userCameraOverride)
 		display.velocity = tvelocity
 	end
 
+	local isOverview = display.camType == camTypeOverview;
 	-- Smoothly move to the location of the event.
 	-- Camera position and vector
 	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
@@ -1498,7 +1552,7 @@ local function updateCamera(dt, userCameraOverride)
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Where do we *want* the camera to be ie: (t)arget
 	local tcDist = calcCamRange(display.diag, defaultFov)
-	local try = atan2(cx - ex, cz - ez) + pi
+	local try = isOverview and defaultRy or atan2(cx - ex, cz - ez) + pi
 	local pry = cry + cryv / cameraRAccel / 2
 	cryv = (deferRotationRenderFrames == 0 and 0) or cryv + signum(try - pry) * cameraRAccel * dt
 	cry = (deferRotationRenderFrames == 0 and try) or cry + cryv * dt
@@ -1507,16 +1561,12 @@ local function updateCamera(dt, userCameraOverride)
 	local tcx, tcy, tcz = ex + tcDist2d * sin(cry - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(cry - pi)
 
 	local doInstantTransition = length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance
-	if doInstantTransition or display.camType == camTypeOverview then
+	if doInstantTransition then
 		cx, cy, cz = ex + tcDist2d * sin(defaultRy - pi), tcy, ez + tcDist2d * cos(defaultRy - pi)
 		cxv, crxv, cyv, cryv, czv = 0, 0, 0, 0, 0
-		if doInstantTransition then
-			-- HACK: Need to defer rotation by 1 frame, see earlier
-			deferRotationRenderFrames = 1
-		else
-			-- FIXME: Simplify this else case (for overview) somehow
-			crx, cry, cfov = display.camAngle, defaultRy, defaultFov
-		end
+		cfov = defaultFov
+		-- HACK: Need to defer rotation by 1 frame, see earlier
+		deferRotationRenderFrames = 1
 	else
 		-- Project out current vector
 		local cv = length(cxv, cyv, czv)
@@ -1532,7 +1582,7 @@ local function updateCamera(dt, userCameraOverride)
 		local od     = length(ox, oy, oz)
 		-- Correction vector
 		local dx, dy, dz = -cxv, -cyv, -czv
-		if (od > 0) then
+		if od > 0 then
 			-- Not 2 x d as we want to accelerate until half way then decelerate.
 			local ov = sqrt(od * cameraAccel)
 			dx = dx + ov * ox / od
@@ -1540,7 +1590,7 @@ local function updateCamera(dt, userCameraOverride)
 			dz = dz + ov * oz / od
 		end
 		local dv = length(dx, dy, dz)
-		if (dv > 0) then
+		if dv > 0 then
 			cxv = cxv + dt * cameraAccel * dx / dv
 			cyv = cyv + dt * cameraAccel * dy / dv
 			czv = czv + dt * cameraAccel * dz / dv
@@ -1550,7 +1600,7 @@ local function updateCamera(dt, userCameraOverride)
 		cz = cz + dt * czv
 
 		-- Rotate and zoom camera
-		local trx = -atan2(cy - ey, length(cx - ex, cz - ez))
+		local trx = isOverview and display.camAngle or -atan2(cy - ey, length(cx - ex, cz - ez))
 		local prx = crx + crxv / cameraRAccel / 2
 		crxv = (deferRotationRenderFrames == 0 and 0) or crxv + signum(trx - prx) * cameraRAccel * dt
 		crx = (deferRotationRenderFrames == 0 and display.camAngle) or crx + crxv * dt
