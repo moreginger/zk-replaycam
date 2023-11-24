@@ -647,8 +647,8 @@ function Event:excludes(other)
 	return self._excludes[other.id]
 end
 
-function Event:importanceAtFrame(frame)
-  return self.importance * (1 - logistic(eventDecayBase / self.decay * (frame - self.started - self.decay)))
+function Event:valueAtFrame(value, frame)
+  return value * (1 - logistic(eventDecayBase / self.decay * (frame - self.started - self.decay)))
 end
 
 -- return - true if there are no more subjects
@@ -783,13 +783,13 @@ local eventStatistics = EventStatistics:new({
 	eventMeanAdj = {
 		attack = 1.0,
 		building = 3.2,
-		hotspot = 0.8,
-		move = 5.5,
+		hotspot = 0.7,
+		move = 5.0,
 		overview = 1.7,
 		unitBuilt = 1.6,
-		unitDamaged = 0.9,
-		unitDestroyed = 0.6,
-		unitDestroyer = 0.8,
+		unitDamaged = 0.8,
+		unitDestroyed = 0.5,
+		unitDestroyer = 0.7,
 		unitTaken = 0.2
 	}
 }, eventTypes)
@@ -817,13 +817,12 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			event = nil
 			break
 		end
-		local importanceAtFrame = event:importanceAtFrame(gameFrame)
 		if event:shouldMerge(type, sbjName, location, actorAllyTeam) then
 			if logging >= LOG_DEBUG then
 				spEcho('merging events', type)
 			end
 			-- Merge new event into old.
-			event.importance = importanceAtFrame + importance
+			event.importance = event:valueAtFrame(event.importance, gameFrame) + importance
 			event.decay = decay
 			event.location = location
 			event.started = gameFrame
@@ -923,36 +922,23 @@ end
 
 local function _getEventPercentile(currentFrame, event, eventBoost)
 	eventBoost = eventBoost or 1
-	local importance = event:importanceAtFrame(currentFrame) * eventBoost
+	local importance = event:valueAtFrame(event.importance, currentFrame) * eventBoost
 	local x, _, z = unpack(event.location)
 	local interestModifier = interestGrid:getScore(x, z)
 	return eventStatistics:getPercentile(event.type, importance * interestModifier)
 end
 
 local function selectMostInterestingEvent(currentFrame)
-	local typeCounts = {}
-	for type, _ in pairs(eventTypes) do
-		typeCounts[type] = 0
-	end
-
 	-- Process events and update interest grid
 	local event = events.head
 	while event ~= nil do
 		if event.updateFunc then
 			event.updateFunc(event)
 		end
-		typeCounts[event.type] = typeCounts[event.type] + 1
-		event = event.prev
-	end
-
-	local total, _, _, _ = interestGrid:statistics()
-	-- Calculate a bonus per event type to add to the grid
-	local perEventTypeBonus = total / eventTypesCount / 8
-	event = events.head
-	while event ~= nil do
-		local x, _, z = unpack(event.location)
-		-- FIXME: Add allyTeam if we can?
-		interestGrid:add(x, z, nil, perEventTypeBonus / typeCounts[event.type])
+		if event.interest then
+			local x, _, z = unpack(event.location)
+			interestGrid:add(x, z, event.actorAllyTeam, event:valueAtFrame(event.interest, currentFrame))
+		end
 		event = event.prev
 	end
 
@@ -1305,7 +1291,14 @@ local function _updateCommandEvent(event)
 	end
 
 	event.started = gameFrame
-	local sbjLocation, sbjv = unitInfo:get(meta.sbjUnitID)
+
+	-- For simplicity we'll just take the location of one subject
+	local sbjUnitID, sbjCount = nil, 0
+	for k, _ in pairs(event._sbjUnits) do
+		sbjUnitID = sbjUnitID or k
+		sbjCount = sbjCount + 1
+	end
+	local sbjLocation, sbjv = unitInfo:get(sbjUnitID)
 	if not sbjLocation or not sbjv then
 		event.importance, event.updateFunc = 0, nil
 		return
@@ -1313,7 +1306,10 @@ local function _updateCommandEvent(event)
 
 	-- Predicted distance in 1s
 	local distanceFromCommand = distance(event.location, sbjLocation) - distance(sbjv) * framesPerSecond
-	event.importance = meta.importance * meta.commandRange / max(meta.commandRange, distanceFromCommand)
+	local rangeFraction = meta.commandRange / max(meta.commandRange, distanceFromCommand)
+	event.importance = meta.importance * rangeFraction
+	-- A moving unit is worth 1, let's make the commands worth a little less per unit
+	event.interest = 0.5 * sbjCount * rangeFraction
 end
 
 local moveCommands = {
@@ -1358,7 +1354,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 			return
 		end
 
-		local meta = { sbjAllyTeam = teamInfo[unitTeam].allyTeam, sbjUnitID = unitID, commandRange = worldGridSize / 2, importance = importance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
+		local meta = { commandRange = worldGridSize / 2, importance = importance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
 		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, moveEventType, unitID, _updateCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
@@ -1377,10 +1373,9 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 		end
 
 		local sbjLocation, _, _, sbjName, _, weaponImportance, weaponRange = unitInfo:get(unitID)
-		local sbjAllyTeam = teamInfo[unitTeam].allyTeam
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
-		local meta = { sbjAllyTeam = sbjAllyTeam, sbjUnitID = unitID, commandRange = weaponRange, importance = weaponImportance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
+		local meta = { commandRange = weaponRange, importance = weaponImportance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
 		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, attackEventType, unitID, _updateCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
@@ -1455,7 +1450,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	destroyerEvent:addObject(unitID, destroyedLocation)
 	-- It would be naff to show both
 	destroyedEvent:addExcludes(destroyerEvent)
-  destroyerEvent:addExcludes(destroyedEvent)
+    destroyerEvent:addExcludes(destroyedEvent)
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
