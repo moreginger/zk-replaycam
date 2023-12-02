@@ -6,6 +6,7 @@
 - Less battle centric - show slightly more build and overview events
 - Less janky instant camera transitions
 - Show attacker information for unitDamaged event
+- Team names for AIs
 
 ## [0.2.1] - 2023-04-02
 

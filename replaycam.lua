@@ -2,11 +2,11 @@ function widget:GetInfo()
 	return {
 		name    = "ReplayCam",
 		desc    = "Pan to and comment on interesting events",
-		author  = "moreginger",
+		author  = "fiendicus_prime",
 		date    = "2023-01-23",
 		license = "GNU GPL v2",
 		--layer        = 0,
-		enabled = true
+		enabled = false
 	}
 end
 
@@ -34,9 +34,11 @@ local glPolygonMode = gl.PolygonMode
 local glRect = gl.Rect
 
 local spEcho = Spring.Echo
+local spGetAIInfo = Spring.GetAIInfo
 local spGetAllyTeamList = Spring.GetAllyTeamList
 local spGetCameraPosition = Spring.GetCameraPosition
 local spGetCameraState = Spring.GetCameraState
+local spGetGaiaTeamID = Spring.GetGaiaTeamID
 local spGetGameRulesParam = Spring.GetGameRulesParam
 local spGetGroundHeight = Spring.GetGroundHeight
 local spGetHumanName = Spring.Utilities.GetHumanName
@@ -48,7 +50,6 @@ local spGetSpectatingState = Spring.GetSpectatingState
 local spGetTeamColor = Spring.GetTeamColor
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
-local spGetUnitCommands = Spring.GetUnitCommands
 local spGetUnitDefID = Spring.GetUnitDefID
 local spGetUnitHealth = Spring.GetUnitHealth
 local spGetUnitNoDraw = Spring.GetUnitNoDraw
@@ -1147,6 +1148,7 @@ function widget:Initialize()
 	screen0 = Chili.Screen0
 
 	-- Init teams.
+    local gaiaTeamID = spGetGaiaTeamID()
 	teamInfo = {}
 	local teamCount = 0
 	local allyTeams = spGetAllyTeamList()
@@ -1159,12 +1161,18 @@ function widget:Initialize()
 		end
 
 		for _, teamID in pairs(teamList) do
-			local teamLeader = nil
-			_, teamLeader = spGetTeamInfo(teamID)
-			local teamName = "unknown"
-			if teamLeader then
-				teamName = spGetPlayerInfo(teamLeader)
-			end
+			local teamName
+            if teamID == gaiaTeamID then
+                teamName = "Gaia"
+            else
+                local _, teamLeader, _, isAI = spGetTeamInfo(teamID)
+                if isAI then
+                    local _, name = spGetAIInfo(teamID)
+                    teamName = name
+                else
+                teamName = spGetPlayerInfo(teamLeader)
+                end
+            end
 			teamInfo[teamID] = {
 				allyTeam = allyTeam,
 				allyTeamName = allyTeamName,
