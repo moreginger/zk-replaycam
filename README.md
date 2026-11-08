@@ -33,3 +33,26 @@ Install [replaycam.lua](./replaycam.lua) as a local widget, as per the [instruct
 ## Known issues
 
 - Doesn't interact well with Alt+Tab overview mode.
+
+## Measuring the camera
+
+Set `STATS = true` (or `DEBUG = true`) in `replaycam.lua`, watch one or more replays, then run:
+
+```bash
+python3 scripts/generate-stats.py path/to/infolog.txt -o run.json
+```
+
+This writes per-game timelines and metrics to `run.json` and prints summary tables. Metrics are graded against ground truth (unit deaths and damage valued in metal), so two runs over the same replays can be compared directly:
+
+```bash
+python3 scripts/generate-stats.py --compare base.json new.json
+```
+
+Key metrics, weighted by metal value:
+
+- `seen` - the death was inside the camera's ground footprint
+- `antic` (anticipation) - mean of focus × visible over 5s..1s before the death
+- `focus` - 1 for a tight view (`--ref-area`), 0 when the whole map is visible, log-scaled
+- `frame` - share of nearby action in view × how close the footprint is to that action's size
+- `lead s` / `late` - how long the spot was framed beforehand, or how often the camera arrived after
+- `missed` - share of losses never seen within 5s before to 2s after

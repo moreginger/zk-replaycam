@@ -57,6 +57,7 @@ local spGetGameRulesParam = Spring.GetGameRulesParam
 local spGetGroundHeight = Spring.GetGroundHeight
 local spGetHumanName = Spring.Utilities.GetHumanName
 local spGetMouseState = Spring.GetMouseState
+local spGetPixelDir = Spring.GetPixelDir
 local spGetMovetype = Spring.Utilities.getMovetype
 local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetSpectatingState = Spring.GetSpectatingState
@@ -76,6 +77,7 @@ local spGetViewGeometry = Spring.GetViewGeometry
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
 local spSetMouseCursor = Spring.SetMouseCursor
+local spTraceScreenRay = Spring.TraceScreenRay
 local spWorldToScreenCoords = Spring.WorldToScreenCoords
 
 local Chili
@@ -97,6 +99,8 @@ local gameFrame = 0
 local DEBUG = false
 local LOG_ERROR, LOG_DEBUG = 1, 2
 local logging = DEBUG and LOG_DEBUG or LOG_ERROR
+-- Emit machine-readable "rc-*" lines for scripts/generate-stats.py. Must ship with false (or DEBUG).
+local STATS = DEBUG
 local updateIntervalFrames = framesPerSecond
 local defaultFov, defaultRx, defaultRy = 45, -1.0, pi
 -- Time until we think the user is watching, not playing
@@ -1021,7 +1025,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 		end
 	else
 		if logging == LOG_DEBUG then
-			spEcho('event', type, sbjName, importance, location)
+			spEcho('event', type, sbjName, importance, location[1], location[3])
 		end
 		lastEventId = lastEventId + 1
 		event = Event:new({
@@ -1123,6 +1127,99 @@ local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 2
 
 local display, initialCameraState, camera
+-- Event the camera is actually showing (updateDisplay may refuse to switch)
+local shownEvent
+
+-- STATS LOGGING (see scripts/generate-stats.py)
+-- Ground-truth lines are logged straight from callins, independently of event scoring,
+-- so that different camera algorithms can be compared on the same replay.
+
+local statsCellSize = 256
+local statsDamage = {}
+
+local function statsLogGame()
+	local vsx, vsy = spGetViewGeometry()
+	spEcho(string.format('rc-game,%s,%d,%d,%d,%d', Game.mapName, mapSizeX, mapSizeZ, vsx, vsy))
+end
+
+local function statsUnitValue(unitID, unitDefID)
+	local unitDef = UnitDefs[unitDefID]
+	if not unitDef or unitDef.customParams.dontcount then
+		return
+	end
+	local _, maxHealth, _, _, buildProgress = spGetUnitHealth(unitID)
+	return unitDef.metalCost * (buildProgress or 1), maxHealth, unitDef
+end
+
+local function statsLogDeath(unitID, unitDefID, unitTeam)
+	local value, _, unitDef = statsUnitValue(unitID, unitDefID)
+	local x, y, z = spGetUnitPosition(unitID)
+	if not value or value <= 0 or not x then
+		return
+	end
+	local allyTeam = teamInfo[unitTeam] and teamInfo[unitTeam].allyTeam or -1
+	spEcho(string.format('rc-death,%s,%.0f,%.0f,%.0f,%.1f,%d', unitDef.name, x, y, z, value, allyTeam))
+end
+
+-- Damage is aggregated per cell and flushed once per update interval to keep the log small.
+local function statsAddDamage(unitID, unitDefID, damage, paralyzer)
+	local value, maxHealth = statsUnitValue(unitID, unitDefID)
+	local x, _, z = spGetUnitPosition(unitID)
+	if not value or not maxHealth or maxHealth <= 0 or not x then
+		return
+	end
+	-- Metal-equivalent of the damage dealt. Paralysis counts for half, as in event scoring.
+	value = value * min(damage, maxHealth) / maxHealth * (paralyzer and 0.5 or 1)
+	if value <= 0 then
+		return
+	end
+	local key = floor(x / statsCellSize) * 4096 + floor(z / statsCellSize)
+	local cell = statsDamage[key]
+	if not cell then
+		cell = { 0, 0, 0 }
+		statsDamage[key] = cell
+	end
+	cell[1], cell[2], cell[3] = cell[1] + value, cell[2] + x * value, cell[3] + z * value
+end
+
+local function statsFlush(userOverride)
+	for _, cell in pairs(statsDamage) do
+		local value, wx, wz = unpack(cell)
+		spEcho(string.format('rc-dmg,%.0f,%.0f,%.1f', wx / value, wz / value, value))
+	end
+	statsDamage = {}
+
+	-- Ground footprint of the view from the four screen corners. TraceScreenRay only gives
+	-- useful coordinates for ground hits, so otherwise intersect the pixel's ray with a plane
+	-- at the ground height in the middle of the view, capped at the map diagonal.
+	local vsx, vsy = spGetViewGeometry()
+	local cx, cy, cz = spGetCameraPosition()
+	local _, mid = spTraceScreenRay(floor(vsx / 2), floor(vsy / 2), true, false, false)
+	local planeY = mid and mid[2] or spGetGroundHeight(cx, cz)
+	local maxDist = length(mapSizeX, mapSizeZ)
+	local corners = {}
+	for _, c in ipairs({ { 0, 0 }, { vsx - 1, 0 }, { vsx - 1, vsy - 1 }, { 0, vsy - 1 } }) do
+		local hitType, pos = spTraceScreenRay(c[1], c[2], true, false, false)
+		local x, z
+		if hitType == 'ground' and pos then
+			x, z = pos[1], pos[3]
+		else
+			-- GetPixelDir takes y from the top of the screen
+			local dx, dy, dz = spGetPixelDir(c[1], vsy - 1 - c[2])
+			local t = (dy < -1e-3) and (planeY - cy) / dy or huge
+			local hd = length(dx, 0, dz)
+			if t * hd > maxDist then
+				t = hd > 0 and maxDist / hd or 0
+			end
+			x, z = cx + dx * t, cz + dz * t
+		end
+		corners[#corners + 1] = string.format('%.0f,%.0f', x, z)
+	end
+	spEcho(string.format('rc-cam,%.0f,%.0f,%.0f,%s,%d,%s,%d,%s',
+		cx, cy, cz, display.camType or 'nil',
+		shownEvent and shownEvent.id or -1, shownEvent and shownEvent.type or 'nil',
+		userOverride and 1 or 0, table.concat(corners, ',')))
+end
 local userInactiveSeconds, lastMouseLocation = 0, { -1, 0, -1 }
 
 local function initCamera(cx, cy, cz, rx, ry, type)
@@ -1231,6 +1328,12 @@ local function updateDisplay(event)
 		commentary_cpl:SetText(commentary)
 	end
 
+	shownEvent = event
+	if STATS then
+		local x, _, z = unpack(event.location)
+		spEcho(string.format('rc-shown,%d,%s,%.0f,%.0f,%s', event.id, event.type, x, z, camType))
+	end
+
 	return true
 end
 
@@ -1311,6 +1414,9 @@ function widget:Initialize()
 		tracking = LinkedList:new(),
 		velocity = { 0, 0, 0 }
 	}
+	if STATS then
+		statsLogGame()
+	end
 	updateDisplay(addOverviewEvent(1))
 	camera = initCamera(cx, cy, cz, defaultRx, defaultRy, camTypeTracking)
 end
@@ -1321,6 +1427,10 @@ function widget:GameFrame(frame)
 
 	if frame % updateIntervalFrames ~= 0 then
 		return
+	end
+
+	if STATS then
+		statsFlush(options.user_interrupts_tracking.value and userInactiveSeconds < userInactiveSecondsThreshold)
 	end
 
 	if display.camType ~= camTypeOverview then
@@ -1525,6 +1635,10 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 		return
 	end
 
+	if STATS then
+		statsAddDamage(unitID, unitDefID, damage, paralyzer)
+	end
+
 	if paralyzer then
 		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage
 		damage = damage / 2
@@ -1549,6 +1663,10 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 	-- First do some cleanup, if we can
 	if not unitID then
 		return
+	end
+
+	if STATS and unitDefID and unitTeam then
+		statsLogDeath(unitID, unitDefID, unitTeam)
 	end
 
 	local destroyedLocation, _, importance, destroyedName = unitInfo:get(unitID)
