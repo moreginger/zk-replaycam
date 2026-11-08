@@ -44,7 +44,7 @@ PINGPONG_S = 10
 PINGPONG_RANGE = 512
 SHORT_SHOT_S = 3            # shots this long or shorter count as quick cuts
 SAME_SPOT_RANGE = 256       # elmos between consecutive shots that count as the same spot
-FAR_CUT_RANGE = 1536        # the widget teleports rather than pans beyond this (maxPanDistance)
+FAR_CUT_RANGE = 1536        # long cuts; the widget's teleport distance before maxPanDistance rose to 2048
 FAR_CUT_HIT = (10, 800)     # a far cut "hits" if a death follows within this many seconds and elmos
 
 

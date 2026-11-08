@@ -943,7 +943,7 @@ local eventStatistics = EventStatistics:new({
 		hotspot = 0.7,
 		move = 5.0,
 		-- High as overview competes every second, mostly against a weak field.
-		overview = 15.0,
+		overview = 20.0,
 		unitBuilt = 1.7,
 		unitDamaged = 0.8,
 		unitDestroyed = 0.5,
@@ -1171,7 +1171,7 @@ local camTypeOverview = 'overview'
 local camDiagMin = 1000
 local cameraAccel = worldGridSize * 1.2
 local cameraRAccel =  pi / 16
-local maxPanDistance = worldGridSize * 3
+local maxPanDistance = worldGridSize * 4
 local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 2
 
