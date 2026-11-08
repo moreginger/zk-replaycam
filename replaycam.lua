@@ -941,7 +941,7 @@ local eventStatistics = EventStatistics:new({
 		building = 3.4,
 		hotspot = 0.7,
 		move = 5.0,
-		overview = 1.9,
+		overview = 6.0,
 		unitBuilt = 1.7,
 		unitDamaged = 0.8,
 		unitDestroyed = 0.5,
@@ -954,15 +954,21 @@ local lastEventId = 0
 local events = SpatialLookup:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, capacity = 128 })
 local mie, pendingMie
 
+local function _getInterestModifier(event)
+	if event.type == overviewEventType then
+		-- Overview has a pseudo-location in the centre of the map, but should ignore what is happening there.
+		return 1
+	end
+	local x, _, z = unpack(event.location)
+	return interestGrid:getScore(x, z)
+end
+
 local function _getEventPercentile(currentFrame, event, eventBoost)
 	eventBoost = eventBoost or 1
 	local importance = event:valueAtFrame(event.importance, currentFrame) * eventBoost
-	local x, _, z = unpack(event.location)
-	local interestModifier = interestGrid:getScore(x, z)
-	return eventStatistics:getPercentile(event.type, importance * interestModifier)
+	return eventStatistics:getPercentile(event.type, importance * _getInterestModifier(event))
 end
 
-local ADD_EVENT_OPTS_NO_MERGE = { noMerge = true }
 local ADD_EVENT_OPTS_NO_GRID_NO_MERGE = { noGrid = true, noMerge = true }
 
 -- updateFunc - Optional function taking the event as a parameter.
@@ -1053,8 +1059,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 		event.updateFunc(event)
 	end
 
-	local x, _, z = unpack(event.location)
-	eventStatistics:logEvent(event.type, event.importance * interestGrid:getScore(x, z))
+	eventStatistics:logEvent(event.type, event.importance * _getInterestModifier(event))
 
 	local pendingPercentile = pendingMie and _getEventPercentile(gameFrame, pendingMie, (pendingMie == mie and 2.0 or 1.0)) or 0
 	local eventPercentile = _getEventPercentile(gameFrame, event, (event == mie and 2.0 or 1.0))
@@ -1068,7 +1073,8 @@ end
 local function addOverviewEvent(importance)
 	local x, z = mapSizeX / 2, mapSizeZ / 2
 	local overviewY = spGetGroundHeight(x, z)
-	local event = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, ADD_EVENT_OPTS_NO_MERGE)
+	-- Not added to the interest grid: it would inflate the centre and so damp its own importance.
+	local event = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, ADD_EVENT_OPTS_NO_GRID_NO_MERGE)
 
 	-- Add two fake units to get the right zoom level
 	local sx, sy = spGetViewGeometry()
