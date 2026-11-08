@@ -29,6 +29,7 @@ local atan2 = math.atan2
 local cos = math.cos
 local deg = math.deg
 local exp = math.exp
+local log10 = math.log10
 local floor = math.floor
 local huge = math.huge
 local max = math.max
@@ -938,10 +939,11 @@ local eventStatistics = EventStatistics:new({
 	-- < 1: make each event seem less likely (more interesting)
 	eventMeanAdj = {
 		attack = 1.0,
-		building = 3.4,
+		building = 2.4,
 		hotspot = 0.7,
 		move = 5.0,
-		overview = 6.0,
+		-- High as overview competes every second, mostly against a weak field.
+		overview = 15.0,
 		unitBuilt = 1.7,
 		unitDamaged = 0.8,
 		unitDestroyed = 0.5,
@@ -953,6 +955,11 @@ local eventStatistics = EventStatistics:new({
 local lastEventId = 0
 local events = SpatialLookup:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, capacity = 128 })
 local mie, pendingMie
+-- Overview scores quietness against this game's recent log10(igMax), so grid scale doesn't matter.
+local overviewBaselineUpdates = 120
+-- Overview scores zero this many decades above the baseline.
+local overviewBusyDecades = 1.0
+local overviewBaseline
 
 local function _getInterestModifier(event)
 	if event.type == overviewEventType then
@@ -1096,6 +1103,10 @@ local function purgeEvents(eventProcessor, opts)
 	local event = events._items.head
 	while event ~= nil do
 		if eventProcessor(event, opts) then
+			if event == pendingMie then
+				-- Its subjects are gone, don't show it.
+				pendingMie = nil
+			end
 			event, _ = events:remove(event)
 		else
 			event = event.prev
@@ -1466,7 +1477,10 @@ function widget:GameFrame(frame)
 		end
 	end
 
-	addOverviewEvent(100 / igMax)
+	-- Log scale, as igMax spans orders of magnitude. Kept above 0 for the running mean.
+	local igMaxLog = log10(max(igMax, 1e-6))
+	overviewBaseline = overviewBaseline and overviewBaseline + (igMaxLog - overviewBaseline) / overviewBaselineUpdates or igMaxLog
+	addOverviewEvent(max(0.001, overviewBaseline + overviewBusyDecades - igMaxLog))
 
 
 	if pendingMie and pendingMie ~= mie then
@@ -1774,6 +1788,11 @@ local function updateCamera(dt, userCameraOverride)
 	-- HACK: It appears that translation occurs 1 render frame later than rotation,
 	-- this is used to defer rotation by a frame when reorienting
 	local deferRotationRenderFrames = camera.deferRotationRenderFrames and camera.deferRotationRenderFrames - 1
+
+	if trackedLocationCount == 0 then
+		-- Shouldn't happen, but avoid dividing by zero.
+		return
+	end
 
 	-- Update the location being displayed
 	local tlocation = _apply(_multiply, { xSum, ySum, zSum }, 1 / trackedLocationCount)

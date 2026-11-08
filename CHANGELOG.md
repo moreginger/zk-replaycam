@@ -7,6 +7,8 @@
 - Less janky instant camera transitions
 - Show attacker information for unitDamaged event
 - Stats logging (`STATS`) and `scripts/generate-stats.py` metrics for comparing camera runs
+- Overview shown mostly in lulls rather than during fights, and less in the opening
+- Fix camera crash when the event about to be shown lost its units
 
 ## [0.2.1] - 2023-04-02
 

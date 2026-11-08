@@ -29,7 +29,7 @@ re_merge = re.compile(r'\] merging events, (?P<type>.+?)$')
 re_mie = re.compile(r'\] mie, (?P<type>.+?),')
 re_opening = re.compile(r'Opening demofile (?P<demofile>.+)$')
 re_connecting = re.compile(r'Connecting to battle, Zero-K v[^,]+, (?P<map>.+?),')
-re_wins = re.compile(r'game_message: .+ wins!')
+re_wins = re.compile(r'game_message: (.+ wins!|The game ended in a draw!)')
 
 # Metric tuning
 LEAD_WINDOW = (5, 1)        # seconds before an event that count as "anticipation"
