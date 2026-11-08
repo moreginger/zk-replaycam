@@ -9,6 +9,7 @@
 - Stats logging (`STATS`) and `scripts/generate-stats.py` metrics for comparing camera runs
 - Time-to-frame, unframed-cut and yaw-rate camera metrics
 - New camera model: a drone orbiting the event on damped springs, so pans settle in ~1-2s whatever the distance, arc up over long moves, and the event can no longer be zoomed out of frame
+- Shot lock: a new shot holds until it frames its event and for 2s after, unless something much bigger happens, and its screen time starts once framed
 - Overview shown mostly in lulls rather than during fights, and less in the opening
 - Fix camera crash when the event about to be shown lost its units
 - Fewer quick cuts: the shown event keeps absorbing similar nearby events, and distant cuts need a bigger event

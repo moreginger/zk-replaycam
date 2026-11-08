@@ -1020,7 +1020,8 @@ local function _getRarity(event)
 end
 
 -- Boosting importance by b raises rarity to the power b, so a decayed pick still gives way.
-local function _beatsPick(event, rarity)
+-- boostScale multiplies the boost, e.g. while the shot is locked.
+local function _beatsPick(event, rarity, boostScale)
 	if not mie then
 		return true
 	end
@@ -1031,7 +1032,7 @@ local function _beatsPick(event, rarity)
 		local d = length(ex - mx, ez - mz)
 		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * min(1, d / switchBoostRange)
 	end
-	return rarity < _getRarity(mie) ^ boost
+	return rarity < _getRarity(mie) ^ (boost * (boostScale or 1))
 end
 
 local ADD_EVENT_OPTS_NO_GRID_NO_MERGE = { noGrid = true, noMerge = true }
@@ -1222,8 +1223,17 @@ local panArcRise, panArcMax = 0.4, 0.75
 local maxShotYawChange = pi / 3
 -- Cut rather than pan when the pan would take longer than this
 local maxPanSeconds = 1.8
+-- Shot lock: a new shot holds until it has framed its event, then for minShotFrames more. Only a
+-- challenger that beats it with the pick boost multiplied by shotLockBoost can cut in sooner.
+-- If framing never happens (e.g. user control), the lock gives up after maxShotLockFrames.
+local minShotFrames = 2 * framesPerSecond
+local maxShotLockFrames = 3 * framesPerSecond
+local shotLockBoost = 2
 local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 2
+
+-- A shot counts as framed once its tracking box is on screen and its centre is in the middle half.
+local framedCentre = 0.25
 
 local display, initialCameraState, camera
 -- Event the camera is actually showing (updateDisplay may refuse to switch)
@@ -1237,8 +1247,6 @@ local statsCellSize = 256
 local statsDamage = {}
 -- Fastest yaw seen since the last flush (rad/s), ignoring cuts
 local statsMaxYawRate = 0
--- A shot counts as framed once its tracking box is on screen and its centre is in the middle half.
-local statsFramedCentre = 0.25
 
 local function statsLogGame()
 	local vsx, vsy = spGetViewGeometry()
@@ -1334,8 +1342,8 @@ local function statsTrackYaw(dt, oldRy, newRy, isCut)
 	statsMaxYawRate = max(statsMaxYawRate, math.abs(d) / dt)
 end
 
--- Logs rc-framed once per shot, when the tracking box first sits in frame.
-local function statsCheckFramed(xMin, zMin, xMax, zMax)
+-- Marks the shot framed once its tracking box first sits in frame (and logs rc-framed).
+local function checkFramed(xMin, zMin, xMax, zMax)
 	if not shownEvent or display.framedId == shownEvent.id then
 		return
 	end
@@ -1344,7 +1352,7 @@ local function statsCheckFramed(xMin, zMin, xMax, zMax)
 	local gy = spGetGroundHeight(cxw, czw)
 	local sx, sy, sz = spWorldToScreenCoords(cxw, gy, czw)
 	if not sx or sz < 0 or sz > 1
-	    or math.abs(sx / vsx - 0.5) > statsFramedCentre or math.abs(sy / vsy - 0.5) > statsFramedCentre then
+	    or math.abs(sx / vsx - 0.5) > framedCentre or math.abs(sy / vsy - 0.5) > framedCentre then
 		return
 	end
 	-- Overview's box deliberately reaches past the map edges, so only its centre counts.
@@ -1356,8 +1364,14 @@ local function statsCheckFramed(xMin, zMin, xMax, zMax)
 			end
 		end
 	end
-	display.framedId = shownEvent.id
-	spEcho(string.format('rc-framed,%d,%s', shownEvent.id, shownEvent.type))
+	display.framedId, display.framedFrame = shownEvent.id, gameFrame
+	if shownEvent == mie then
+		-- Restart the pick's decay, so that travel doesn't eat into its screen time
+		mie.started = gameFrame
+	end
+	if STATS then
+		spEcho(string.format('rc-framed,%d,%s', shownEvent.id, shownEvent.type))
+	end
 end
 local userInactiveSeconds, lastMouseLocation = 0, { -1, 0, -1 }
 
@@ -1482,12 +1496,24 @@ local function updateDisplay(event)
 	end
 
 	shownEvent = event
+	display.shotFrame = gameFrame
 	if STATS then
 		local x, _, z = unpack(event.location)
 		spEcho(string.format('rc-shown,%d,%s,%.0f,%.0f,%s', event.id, event.type, x, z, camType))
 	end
 
 	return true
+end
+
+-- Whether the shown pick is still settling in or within its minimum hold (see minShotFrames)
+local function shotLocked()
+	if not shownEvent or shownEvent ~= mie then
+		return false
+	end
+	if display.framedId == shownEvent.id then
+		return gameFrame < display.framedFrame + minShotFrames
+	end
+	return gameFrame < display.shotFrame + maxShotLockFrames
 end
 
 function widget:Shutdown()
@@ -1564,6 +1590,7 @@ function widget:Initialize()
 		diag = 0,
 		location = { mapSizeX / 2, -1000, mapSizeZ / 2 },
 		noUpdateBeforeFrame = 0,
+		shotFrame = 0,
 		tracking = LinkedList:new(),
 		velocity = { 0, 0, 0 }
 	}
@@ -1619,7 +1646,17 @@ function widget:GameFrame(frame)
 	addOverviewEvent(max(0.001, overviewBaseline + overviewBusyDecades - igMaxLog))
 
 
+	local cut = false
 	if pendingMie and pendingMie ~= mie then
+		-- While the shot is locked a cut needs a bigger margin. A cut may also have decayed while
+		-- it waited out the lock, so check it still beats the pick.
+		local locked = shotLocked()
+		cut = _beatsPick(pendingMie, _getRarity(pendingMie), locked and shotLockBoost or 1)
+		if not cut and not locked then
+			pendingMie = mie
+		end
+	end
+	if cut then
 		if mie then
 			-- Avoid showing current event again
 			events:remove(mie)
@@ -2023,9 +2060,7 @@ local function updateCamera(dt, userCameraOverride)
 		fov = camera.fov
   }, 0)
 
-	if STATS then
-		statsCheckFramed(xMin, zMin, xMax, zMax)
-	end
+	checkFramed(xMin, zMin, xMax, zMax)
 end
 
 function widget:Update(dt)
