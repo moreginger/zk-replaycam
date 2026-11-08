@@ -1012,8 +1012,12 @@ local function _getEventPercentile(currentFrame, event)
 	return eventStatistics:getPercentile(event.type, importance * _getInterestModifier(event))
 end
 
--- Against a challenger the pick's importance counts this many times over, more for distant ones.
-local switchBoostNear, switchBoostFar, switchBoostRange = 2, 3.3, 3000
+-- Against a challenger the pick's importance counts this many times over, more for ones that
+-- take longer to get to (see transitionCost).
+local switchBoostNear, switchBoostFar = 2, 3.3
+-- transitionCost(location) returns 0 for something already framed, up to 1 for a cut. Defined
+-- with the camera.
+local transitionCost
 
 local function _getRarity(event)
 	return 1 - _getEventPercentile(gameFrame, event)
@@ -1027,10 +1031,7 @@ local function _beatsPick(event, rarity, boostScale)
 	end
 	local boost = switchBoostNear
 	if mie.type ~= overviewEventType and event.type ~= overviewEventType then
-		local ex, _, ez = unpack(event.location)
-		local mx, _, mz = unpack(mie.location)
-		local d = length(ex - mx, ez - mz)
-		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * min(1, d / switchBoostRange)
+		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * transitionCost(event.location)
 	end
 	return rarity < _getRarity(mie) ^ (boost * (boostScale or 1))
 end
@@ -1377,6 +1378,31 @@ local userInactiveSeconds, lastMouseLocation = 0, { -1, 0, -1 }
 
 local function calcCamRange(diag, fov)
 	return diag / 2 / tan(rad(fov / 2))
+end
+
+-- Seconds for the rig to pan its look-at point by distance d (see smoothDamp)
+local function panSeconds(d)
+	return 2 * lookSmoothTime + d / lookMaxSpeed
+end
+
+-- How costly it is to show a location, from where the camera is looking now rather than where it
+-- is: 0 if no pan is needed, rising with the pan time, and 1 for a cut. Something already on screen
+-- costs half as much, as it stays in view throughout the pan.
+transitionCost = function(location)
+	if not camera then
+		return 1
+	end
+	local pan = panSeconds(distance(camera.look, location))
+	if pan > maxPanSeconds then
+		return 1
+	end
+	local vsx, vsy = spGetViewGeometry()
+	local sx, sy, sz = spWorldToScreenCoords(location[1], location[2], location[3])
+	if sx and sz >= 0 and sz <= 1 and sx >= 0 and sx <= vsx and sy >= 0 and sy <= vsy then
+		pan = pan / 2
+	end
+	-- Even a tiny pan takes about the look-at smooth time, so measure from there
+	return bound((pan - lookSmoothTime) / (maxPanSeconds - lookSmoothTime), 0, 1)
 end
 
 local function initCamera(cx, cy, cz)
@@ -1996,7 +2022,7 @@ local function updateCamera(dt, userCameraOverride)
 	-- Cut when a pan would take too long. A critically damped spring at capped speed takes roughly
 	-- 2x its smooth time plus the distance at full speed.
 	local remaining = distance(c.look, tlook)
-	local isCut = c.cutNext or 2 * lookSmoothTime + remaining / lookMaxSpeed > maxPanSeconds
+	local isCut = c.cutNext or panSeconds(remaining) > maxPanSeconds
 
 	if shownEvent ~= c.shot then
 		c.shot = shownEvent
@@ -2013,6 +2039,7 @@ local function updateCamera(dt, userCameraOverride)
 		c.look, c.lookv = tlook, { 0, 0, 0 }
 		c.dist, c.distv = tdist, 0
 		c.pitch, c.pitchv = tpitch, 0
+		-- Face north again after a cut, so the viewer doesn't lose their bearings
 		c.yaw, c.yawv, c.tyaw = defaultRy, 0, defaultRy
 	else
 		smoothDampVec(c.look, tlook, c.lookv, lookSmoothTime, dt, lookMaxSpeed)
