@@ -1,0 +1,1 @@
+The intent is to make watching a Zero-K battle feel cinematic, highlighting interesting and exciting moments. The camera movement mirrors that of a drone watching the action, but it permits teleporting over larger distances to avoid overly rapid pans.

@@ -1,7 +1,7 @@
 function widget:GetInfo()
 	return {
-		name    = "Action Tracking Camera",
-		desc    = "Automated camera for spectator mode",
+		name    = "Action Tracking Camera DEV",
+		desc    = "Automated camera for spectator mode DEV",
 		author  = "fiendicus_prime",
 		date    = "2023-11-24",
 		license = "GNU GPL v2",
@@ -9,6 +9,21 @@ function widget:GetInfo()
 		enabled = false
 	}
 end
+
+-- PURPOSE AND STRATEGY
+--
+-- A widget that moves the camera to show the action in a game, in a cinematic and exciting way.
+--
+-- Strategy:
+--
+-- 1. Events are generated from different callins (UnitDamaged etc), merging with other events
+--    of the same type
+-- 2. Maintain a low resolution grid of hotspots of activity, and where we have recently been
+--    watching (interestGrid)
+-- 
+-- The most interesting event is selected by comparison to other events of the same type,
+-- adjusting by type (e.g. combat is generally more interesting than manufacture), and by the
+-- interest grid.
 
 local atan2 = math.atan2
 local cos = math.cos
@@ -78,8 +93,10 @@ local gameFrame = 0
 
 -- CONFIGURATION
 
+-- Must ship with false
+local DEBUG = false
 local LOG_ERROR, LOG_DEBUG = 1, 2
-local logging = LOG_ERROR
+local logging = DEBUG and LOG_DEBUG or LOG_ERROR
 local updateIntervalFrames = framesPerSecond
 local defaultFov, defaultRx, defaultRy = 45, -1.0, pi
 -- Time until we think the user is watching, not playing
@@ -317,10 +334,9 @@ function WorldGrid:new(o)
 	for x = 1, o.xSize do
 		o.data[x] = {}
 		for y = 1, o.ySize do
-			o.data[x][y] = {}
+			o.data[x][y] = { 1, {}, 0, 0 }
 		end
 	end
-	o:reset()
 
 	return o
 end
@@ -337,8 +353,25 @@ function WorldGrid:__toWorldCoords(gx, gy)
 	return gx * self.gridSize - halfGrid, gy * self.gridSize - halfGrid
 end
 
+-- Lazily synchronize grid cell to game frame
+function WorldGrid:_syncCell(data)
+	local framesPassed = gameFrame - data[4]
+	if framesPassed > 0 then
+		data[1] = 1 + (data[1] - 1) * (0.95 ^ framesPassed)
+		data[3] = max(0, data[3] - framesPassed / framesPerSecond)
+		for team, expiry in pairs(data[2]) do
+			if gameFrame >= expiry then
+				data[2][team] = nil
+			end
+		end
+		data[4] = gameFrame
+	end
+end
+
 function WorldGrid:_getScoreGridCoords(x, y)
-	local interest, allyTeams, passe = unpack(self.data[x][y])
+	local data = self.data[x][y]
+	self:_syncCell(data)
+	local interest, allyTeams, passe = unpack(data)
 	local allyTeamCount = 0
 	for _, _ in pairs(allyTeams) do
 		allyTeamCount = allyTeamCount + 1
@@ -392,6 +425,7 @@ function WorldGrid:_addInternal(x, y, area, opts, func)
 		for iy = gy - 1, gy + 1 do
 			if areas[i] then
 				local data = self.data[ix][iy]
+				self:_syncCell(data)
 				func(data, areas[i] / totalArea, opts)
 			end
 			i = i + 1
@@ -402,7 +436,7 @@ end
 local function _addInterest(data, f, opts)
 	data[1] = data[1] + opts.interest * f
 	if opts.allyTeam then
-		data[2][opts.allyTeam] = true
+		data[2][opts.allyTeam] = gameFrame + framesPerSecond
 	end
 end
 
@@ -426,17 +460,7 @@ function WorldGrid:_intersectArea(x1, y1, x2, y2, x3, y3, x4, y4)
 	return (x6 - x5) * (y6 - y5)
 end
 
-function WorldGrid:reset()
-	for x = 1, self.xSize do
-		for y = 1, self.ySize do
-			local data = self.data[x][y]
-			data[1] = 1
-			data[2] = {}
-			-- Reduce passe to min of 0
-			data[3] = max(0, (data[3] or 0) - 1)
-		end
-	end
-end
+
 
 -- Call this exactly once between each reset.
 -- When watching an area we apply a fixed boost to make things sticky,
@@ -493,6 +517,90 @@ function WorldGrid:statistics()
 	end
 
 	return total, maxValue, centerX + dX, centerY + dY
+end
+
+-- SPATIAL LOOKUP CLASS
+-- Manages items in a grid for fast proximity searches, keeping only the N most recent items.
+-- Assumes any item added has a `location` property (a table where location[1] is x and location[3] is z)
+
+SpatialLookup = { xSize = 0, ySize = 0, gridSize = 0, capacity = 0, data = {}, _items = nil }
+
+function SpatialLookup:new(o)
+	o = o or {}
+	setmetatable(o, self)
+	self.__index = self
+
+	o.data = o.data or {}
+	for x = 1, o.xSize do
+		o.data[x] = {}
+		for y = 1, o.ySize do
+			o.data[x][y] = {}
+		end
+	end
+	o._items = LinkedList:new({ capacity = o.capacity })
+
+	return o
+end
+
+function SpatialLookup:__toGridCoords(x, y)
+	x = 1 + bound(floor(x / self.gridSize), 0, self.xSize - 1)
+	y = 1 + bound(floor(y / self.gridSize), 0, self.ySize - 1)
+	return x, y
+end
+
+function SpatialLookup:add(item)
+	local gx, gy = self:__toGridCoords(item.location[1], item.location[3])
+	
+	if item.prev or item.next or self._items.head == item then
+		self._items:remove(item)
+		local oldGx, oldGy = self:__toGridCoords(item.location[1], item.location[3])
+		self.data[oldGx][oldGy][item] = nil
+	elseif self.capacity > 0 and self._items.size == self.capacity then
+		local oldest = self._items._tail
+		self._items:remove(oldest)
+		local oldGx, oldGy = self:__toGridCoords(oldest.location[1], oldest.location[3])
+		self.data[oldGx][oldGy][oldest] = nil
+	end
+
+	self.data[gx][gy][item] = true
+	self._items:add(item)
+end
+
+function SpatialLookup:remove(item)
+	local prev, next
+	if item.location then
+		if item.prev or item.next or self._items.head == item then
+			prev, next = self._items:remove(item)
+		end
+		local gx, gy = self:__toGridCoords(item.location[1], item.location[3])
+		self.data[gx][gy][item] = nil
+	end
+	return prev, next
+end
+
+-- If evalFunc is provided, it should return a numerical score for the item, or nil to filter it out.
+-- getNearby will return the item with the highest score.
+function SpatialLookup:getNearby(x, y, range, evalFunc)
+	local minGx, minGy = self:__toGridCoords(x - range, y - range)
+	local maxGx, maxGy = self:__toGridCoords(x + range, y + range)
+	local rangeSq = range * range
+	local bestItem = nil
+	local bestScore = -huge
+	for gx = minGx, maxGx do
+		for gy = minGy, maxGy do
+			for item, _ in pairs(self.data[gx][gy]) do
+				local dx, dy = item.location[1] - x, item.location[3] - y
+				if dx * dx + dy * dy <= rangeSq and evalFunc(item) then
+					local score = evalFunc(item)
+					if score and score > bestScore then
+						bestItem = item
+						bestScore = score
+					end
+				end
+			end
+		end
+	end
+	return bestItem
 end
 
 -- UNIT INFO CACHE
@@ -712,10 +820,6 @@ function Event:removeSubject(unitID)
 	return true
 end
 
-function Event:shouldMerge(type, sbjName, location, actorAllyTeam)
-	return self.type == type and self.sbjName == sbjName and self.actorAllyTeam == actorAllyTeam and distance(self.location, location) < eventMergeRange
-end
-
 function Event:subjectCount()
 	local count = 0
 	for _, _ in pairs(self._sbjUnits) do
@@ -833,7 +937,7 @@ local eventStatistics = EventStatistics:new({
 		building = 3.4,
 		hotspot = 0.7,
 		move = 5.0,
-		overview = 1.7,
+		overview = 1.9,
 		unitBuilt = 1.7,
 		unitDamaged = 0.8,
 		unitDestroyed = 0.5,
@@ -843,8 +947,19 @@ local eventStatistics = EventStatistics:new({
 }, eventTypes)
 
 local lastEventId = 0
-local events = LinkedList:new({ capacity = 128 })
-local showingEvent
+local events = SpatialLookup:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, capacity = 128 })
+local mie, pendingMie
+
+local function _getEventPercentile(currentFrame, event, eventBoost)
+	eventBoost = eventBoost or 1
+	local importance = event:valueAtFrame(event.importance, currentFrame) * eventBoost
+	local x, _, z = unpack(event.location)
+	local interestModifier = interestGrid:getScore(x, z)
+	return eventStatistics:getPercentile(event.type, importance * interestModifier)
+end
+
+local ADD_EVENT_OPTS_NO_MERGE = { noMerge = true }
+local ADD_EVENT_OPTS_NO_GRID_NO_MERGE = { noGrid = true, noMerge = true }
 
 -- updateFunc - Optional function taking the event as a parameter.
 -- returns event {}
@@ -852,50 +967,59 @@ local showingEvent
 local function addEvent(actor, importance, location, meta, sbjName, type, unitID, updateFunc, opts)
 	if not importance or not location or not sbjName or not type then
 		spEcho("ERROR! addEvent failed", importance, location, sbjName, type)
-		return
+		return Event:new({ id = -1, importance = 0, type = type or "nil", location = location or {0, 0, 0}, started = 0 })
+	end
+	if importance > 10000000 then
+	    -- Safety net, should not happen
+		spEcho('ERROR! addEvent with extreme importance', importance, type)
+		if not DEBUG then
+			return Event:new({ id = -1, importance = 0, type = type, location = location, started = 0 })
+		end
 	end
 	opts = opts or {}
 
 	local decay = eventDecayFactors[type]
 	local actorAllyTeam = actor and teamInfo[actor].allyTeam
 
-	-- Try to merge into recent events.
-	local considerForMergeAfterFrame = gameFrame - framesPerSecond
-	local event = (not opts.noMerge and events.head) or nil
-	while event ~= nil do
-		local nextEvent = event.prev
-		if event.started < considerForMergeAfterFrame then
-			-- Don't want to check further back, so break.
-			event = nil
-			break
-		end
-		if event:shouldMerge(type, sbjName, location, actorAllyTeam) then
-			if logging >= LOG_DEBUG then
-				spEcho('merging events', type)
-			end
-			-- Merge new event into old.
-			event.importance = event:valueAtFrame(event.importance, gameFrame) + importance
-			event.decay = decay
-			event.location = location
-			event.started = gameFrame
-			if actor and not event.actors[actor] then
-				event.actorCount = event.actorCount + 1
-				event.actors[actor] = actor
-			end
-			if unitID then
-				event:addSubject(unitID, location)
-			end
-
-			-- Remove it and attach at head later.
-			events:remove(event)
-
-			-- We merged, so break.
-			break
-		end
-		event = nextEvent
+	if not opts.noGrid then
+		interestGrid:add(location[1], location[3], actorAllyTeam, importance)
 	end
 
-	if not event then
+	-- Try to merge into recent events.
+	local considerForMergeAfterFrame = gameFrame - framesPerSecond
+	local event = nil
+	if not opts.noMerge then
+		event = events:getNearby(location[1], location[3], eventMergeRange, function(e)
+			return e.started >= considerForMergeAfterFrame
+		        and e.type == type
+				and e.sbjName == sbjName
+				and e.actorAllyTeam == actorAllyTeam
+				and e.started
+				or nil
+		end)
+	end
+
+	if event then
+		if logging >= LOG_DEBUG then
+			spEcho('merging events', type)
+		end
+
+		-- Remove it and attach at head later. Must do this before mutating event.location
+		events:remove(event)
+
+		-- Merge new event into old.
+		event.importance = event:valueAtFrame(event.importance, gameFrame) + importance
+		event.decay = decay
+		event.location = location
+		event.started = gameFrame
+		if actor and not event.actors[actor] then
+			event.actorCount = event.actorCount + 1
+			event.actors[actor] = actor
+		end
+		if unitID then
+			event:addSubject(unitID, location)
+		end
+	else
 		if logging == LOG_DEBUG then
 			spEcho('event', type, sbjName, importance, location)
 		end
@@ -921,13 +1045,26 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 
 	events:add(event)
 
+	if event.updateFunc then
+		event.updateFunc(event)
+	end
+
+	local x, _, z = unpack(event.location)
+	eventStatistics:logEvent(event.type, event.importance * interestGrid:getScore(x, z))
+
+	local pendingPercentile = pendingMie and _getEventPercentile(gameFrame, pendingMie, (pendingMie == mie and 2.0 or 1.0)) or 0
+	local eventPercentile = _getEventPercentile(gameFrame, event, (event == mie and 2.0 or 1.0))
+	if eventTypes[event.type] and eventPercentile > pendingPercentile then
+		pendingMie = event
+	end
+
 	return event
 end
 
 local function addOverviewEvent(importance)
 	local x, z = mapSizeX / 2, mapSizeZ / 2
 	local overviewY = spGetGroundHeight(x, z)
-	local event = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, { noMerge = true })
+	local event = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, ADD_EVENT_OPTS_NO_MERGE)
 
 	-- Add two fake units to get the right zoom level
 	local sx, sy = spGetViewGeometry()
@@ -946,7 +1083,7 @@ end
 
 -- eventProcessor - perform processing and return truthy to remove the event
 local function purgeEvents(eventProcessor, opts)
-	local event = events.head
+	local event = events._items.head
 	while event ~= nil do
 		if eventProcessor(event, opts) then
 			event, _ = events:remove(event)
@@ -972,60 +1109,7 @@ local function __purgeCommands(event, opts)
 end
 
 
-local function _getEventPercentile(currentFrame, event, eventBoost)
-	eventBoost = eventBoost or 1
-	local importance = event:valueAtFrame(event.importance, currentFrame) * eventBoost
-	local x, _, z = unpack(event.location)
-	local interestModifier = interestGrid:getScore(x, z)
-	return eventStatistics:getPercentile(event.type, importance * interestModifier)
-end
 
-local function selectMostInterestingEvent(currentFrame)
-	-- Process events and update interest grid
-	local event = events.head
-	while event ~= nil do
-		if event.updateFunc then
-			event.updateFunc(event)
-		end
-		if event.interest then
-			local x, _, z = unpack(event.location)
-			interestGrid:add(x, z, event.actorAllyTeam, event:valueAtFrame(event.interest, currentFrame))
-		end
-		event = event.prev
-	end
-
-	-- Update event statistics
-	event = events.head
-	while event ~= nil do
-		local x, _, z = unpack(event.location)
-		eventStatistics:logEvent(event.type, event.importance * interestGrid:getScore(x, z))
-		event = event.prev
-	end
-
-	-- Make sure we always include current event even if it's not in the list
-	local mie, mostPercentile = showingEvent, showingEvent and _getEventPercentile(currentFrame, showingEvent, 2.0) or 0
-	event = events.head
-	local checkedEvents = 0
-	while event ~= nil do
-		checkedEvents = checkedEvents + 1
-		local eventPercentile = _getEventPercentile(currentFrame, event)
-		if eventPercentile <= 0.1 and not event.updateFunc then
-			-- Note updateFunc expected to play nicely and nil itself out at some point
-			event, _ = events:remove(event)
-		else
-			if eventTypes[event.type] and eventPercentile > mostPercentile then
-				mie, mostPercentile = event, eventPercentile
-			end
-			event = event.prev
-		end
-	end
-	if logging >= LOG_DEBUG and mie then
-		spEcho('checked ' .. checkedEvents .. ' events')
-		spEcho('eventStats', eventStatistics:summary())
-		spEcho('mie', mie.type, mie.sbjName, mie.importance, mie.started, mostPercentile)
-	end
-	return mie
-end
 
 -- EVENT DISPLAY
 
@@ -1260,7 +1344,7 @@ function widget:GameFrame(frame)
 		for _, unitID in pairs(units) do
 			local location, _, _, _, isStatic = unitInfo:get(unitID)
 			if not isStatic then
-				hotspotEvent = hotspotEvent or addEvent(nil, 10 * igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, hotspotEventType, nil, nil, { noMerge = true })
+				hotspotEvent = hotspotEvent or addEvent(nil, igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, hotspotEventType, nil, nil, ADD_EVENT_OPTS_NO_GRID_NO_MERGE)
 				hotspotEvent:addSubject(unitID, location)
 			end
 		end
@@ -1268,11 +1352,16 @@ function widget:GameFrame(frame)
 
 	addOverviewEvent(100 / igMax)
 
-	local mie = selectMostInterestingEvent(frame)
-	if mie and mie ~= showingEvent then
-		if showingEvent then
+
+	if pendingMie and pendingMie ~= mie then
+		if mie then
 			-- Avoid showing current event again
-			events:remove(showingEvent)
+			events:remove(mie)
+		end
+
+		mie = pendingMie
+		if logging >= LOG_DEBUG then
+			spEcho('mie', mie.type, mie.sbjName, mie.importance, mie.started, _getEventPercentile(gameFrame, mie))
 		end
 		updateDisplay(mie);
 		purgeEvents(__purgeExcludes, { excluder = mie })
@@ -1280,10 +1369,7 @@ function widget:GameFrame(frame)
 		mie.updateFunc = nil
 		-- Set a standard decay so that we don't show the event for too long.
 		mie.decay, mie.started = 3 * framesPerSecond, frame
-		showingEvent = mie
 	end
-
-	interestGrid:reset()
 end
 
 local function userAction()
