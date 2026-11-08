@@ -48,6 +48,8 @@ This writes per-game timelines and metrics to `run.json` and prints summary tabl
 python3 scripts/generate-stats.py --compare base.json new.json
 ```
 
+An infolog holds every replay watched in one session; `--game -1` keeps just the latest.
+
 Key metrics, weighted by metal value:
 
 - `seen` - the death was inside the camera's ground footprint
@@ -56,3 +58,10 @@ Key metrics, weighted by metal value:
 - `frame` - share of nearby action in view × how close the footprint is to that action's size
 - `lead s` / `late` - how long the spot was framed beforehand, or how often the camera arrived after
 - `missed` - share of losses never seen within 5s before to 2s after
+
+Transition metrics (per shot, not value-weighted):
+
+- `frm0` - share of shots framed at the cut: the event was already in view, or the camera teleported
+- `frm s` / `frm90` - for the other shots, median and 90th percentile seconds from the cut to the event being framed (tracking box on screen, centre in the middle half)
+- `unfrm` - share of those shots replaced before they ever framed their event
+- `yaw90` / `yawmx` - 90th percentile and peak of the fastest yaw (deg/s) in each second, ignoring cuts and user control

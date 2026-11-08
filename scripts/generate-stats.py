@@ -40,6 +40,7 @@ CLUSTER_RADIUS = 1000       # elmos, for context-relative framing
 CLUSTER_WINDOW_S = 5
 CLUSTER_PAD = 400           # elmos padding around the action's bounding box
 JUMP_DISTANCE = 1536        # footprint centre moving further than this in 1s is a cut
+FRAMED_AT_CUT_S = 0.2      # shots framed this soon after the cut didn't need to travel
 PINGPONG_S = 10
 PINGPONG_RANGE = 512
 SHORT_SHOT_S = 3            # shots this long or shorter count as quick cuts
@@ -118,8 +119,9 @@ def new_game(name):
         'first_frame': None,
         'last_frame': None,
         'counts': {'event': {}, 'merge': {}, 'mie': {}},
-        'cam': [],      # [frame, cx, cy, cz, camType, shownId, shownType, override, [[x, z] x4]]
+        'cam': [],      # [frame, cx, cy, cz, camType, shownId, shownType, override, [[x, z] x4], yaw, maxYawRate]
         'shown': [],    # [frame, id, type, x, z, camType]
+        'framed': [],   # [frame, id]: the shot's tracking box first sat in frame
         'extends': [],  # [frame, pickId, mergedType]: merges into the current pick
         'deaths': [],   # [frame, unitDef, x, z, value, allyTeam]
         'damage': [],   # [frame, x, z, value]
@@ -196,9 +198,14 @@ def parse_rc(game, frame, kind, f):
             game['view_size'] = [int(f[-2]), int(f[-1])]
         elif kind == 'cam':
             corners = [[float(f[i]), float(f[i + 1])] for i in range(7, 15, 2)]
-            game['cam'].append([frame, float(f[0]), float(f[1]), float(f[2]), f[3], int(f[4]), f[5], int(f[6]), corners])
+            # Yaw fields were added later
+            yaw, yaw_rate = (float(f[15]), float(f[16])) if len(f) >= 17 else (None, None)
+            game['cam'].append([frame, float(f[0]), float(f[1]), float(f[2]), f[3], int(f[4]), f[5], int(f[6]), corners,
+                                yaw, yaw_rate])
         elif kind == 'extend':
             game['extends'].append([frame, int(f[0]), f[1]])
+        elif kind == 'framed':
+            game['framed'].append([frame, int(f[0])])
         elif kind == 'shown':
             game['shown'].append([frame, int(f[0]), f[1], float(f[2]), float(f[3]), f[4]])
         elif kind == 'death':
@@ -220,7 +227,7 @@ def build_views(game, ref_area):
     map_area = mx * mz
     log_span = math.log(map_area / ref_area) if map_area > ref_area else 1.0
     views, invalid = [], 0
-    for frame, cx, _, cz, cam_type, shown_id, shown_type, override, corners in game['cam']:
+    for frame, cx, _, cz, cam_type, shown_id, shown_type, override, corners, *_ in game['cam']:
         # Older widget versions logged the camera position for corners that missed the ground.
         if any(abs(x - cx) < 3 and abs(z - cz) < 3 for x, z in corners):
             invalid += 1
@@ -434,6 +441,33 @@ def compute_metrics(game, ref_area):
         for d in game['deaths'])) / len(far) if far else None
     metrics['extends_per_min'] = len(game.get('extends', [])) / minutes
 
+    # Transitions: how long a shot takes to frame its event, and how often it is cut before then
+    framed = game.get('framed', [])
+    if framed:
+        framed_at = {}
+        for frame, event_id in framed:
+            framed_at.setdefault(event_id, []).append(frame)
+        times, unframed, ended = [], 0, 0
+        for i, (start, event_id, *_) in enumerate(shown):
+            end = shown[i + 1][0] if i + 1 < len(shown) else None
+            hit = next((f for f in framed_at.get(event_id, []) if f >= start and (end is None or f < end)), None)
+            if hit is not None:
+                times.append((hit - start) / FPS)
+            elif end is not None:
+                unframed += 1
+            if end is not None:
+                ended += 1
+        # Only shots that had to travel: the rest were in view already, or arrived by teleport.
+        travel = [t for t in times if t > FRAMED_AT_CUT_S]
+        metrics['framed_at_cut_share'] = (len(times) - len(travel)) / len(shown) if shown else None
+        metrics['frame_s_median'] = statistics.median(travel) if travel else None
+        metrics['frame_s_p90'] = percentile(travel, 0.9)
+        metrics['unframed_cut_share'] = unframed / (unframed + len(travel)) if unframed + len(travel) else None
+    yaw_rates = [c[10] for c in game['cam'] if len(c) > 10 and c[10] is not None and not c[7]]
+    if yaw_rates:
+        metrics['yaw_rate_p90'] = percentile(yaw_rates, 0.9)
+        metrics['yaw_rate_max'] = max(yaw_rates)
+
     # Biggest losses the camera never showed, for checking in the replay
     missed = sorted((g for g in graded if not g['ever_seen']), key=lambda g: -g['value'])[:10]
     metrics['missed_highlights'] = [
@@ -472,6 +506,12 @@ SUMMARY_COLUMNS = [
     ('far_cuts_per_min', 'far/m', '{:.1f}', False),
     ('far_cut_hit', 'farhit', '{:.0%}', True),
     ('extends_per_min', 'ext/m', '{:.1f}', None),
+    ('framed_at_cut_share', 'frm0', '{:.0%}', None),
+    ('frame_s_median', 'frm s', '{:.1f}', False),
+    ('frame_s_p90', 'frm90', '{:.1f}', False),
+    ('unframed_cut_share', 'unfrm', '{:.0%}', False),
+    ('yaw_rate_p90', 'yaw90', '{:.0f}', False),
+    ('yaw_rate_max', 'yawmx', '{:.0f}', False),
     ('override_share', 'user', '{:.0%}', None),
     ('invalid_cam_share', 'badcam', '{:.0%}', False),
 ]
@@ -590,6 +630,8 @@ def main():
     parser.add_argument('--compare', nargs=2, metavar=('BASE', 'NEW'), help='compare two JSON outputs')
     parser.add_argument('--ref-area', type=float, default=2_500_000,
                         help='ground footprint (elmos^2) that counts as fully focused (default: 2.5e6, about the tightest tracking shot)')
+    parser.add_argument('--game', type=int, action='append',
+                        help='keep only this game index (0-based, negative counts from the end, repeatable)')
     parser.add_argument('--no-timelines', action='store_true', help='omit raw timelines from the JSON')
     args = parser.parse_args()
 
@@ -598,10 +640,12 @@ def main():
         return
 
     games = parse_infolog(args.infolog)
+    if args.game:
+        games = [games[i] for i in args.game]
     for g in games:
         g['metrics'] = compute_metrics(g, args.ref_area)
         if args.no_timelines:
-            for k in ('cam', 'shown', 'extends', 'deaths', 'damage'):
+            for k in ('cam', 'shown', 'framed', 'extends', 'deaths', 'damage'):
                 del g[k]
 
     result = {'infolog': args.infolog, 'ref_area': args.ref_area, 'games': games}

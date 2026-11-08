@@ -213,8 +213,45 @@ local function bound(x, min, max)
 	return x
 end
 
-local function signum(x)
-    return x > 0 and 1 or (x == 0 and 0 or -1)
+-- Wrap an angle to [-pi, pi)
+local function wrapAngle(a)
+	return (a + pi) % (2 * pi) - pi
+end
+
+-- Critically damped spring (Game Programming Gems 4, 1.10). Gets ~90% of the way in 2x smoothTime
+-- whatever the distance, without overshoot. maxSpeed (optional) caps the speed of the approach.
+-- Returns the new value and velocity.
+local function smoothDamp(current, target, velocity, smoothTime, dt, maxSpeed)
+	local omega = 2 / smoothTime
+	local x = omega * dt
+	local e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
+	local change = current - target
+	if maxSpeed then
+		local maxChange = maxSpeed * smoothTime
+		change = bound(change, -maxChange, maxChange)
+	end
+	local temp = (velocity + omega * change) * dt
+	return current - change + (change + temp) * e, (velocity - omega * temp) * e
+end
+
+-- smoothDamp for 3-vectors, capping the speed along the direction of travel. Updates in place.
+local function smoothDampVec(current, target, velocity, smoothTime, dt, maxSpeed)
+	local omega = 2 / smoothTime
+	local x = omega * dt
+	local e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
+	local c1, c2, c3 = current[1] - target[1], current[2] - target[2], current[3] - target[3]
+	local cl = length(c1, c2, c3)
+	local maxChange = maxSpeed * smoothTime
+	if cl > maxChange then
+		local f = maxChange / cl
+		c1, c2, c3 = c1 * f, c2 * f, c3 * f
+	end
+	local change = { c1, c2, c3 }
+	for i = 1, 3 do
+		local temp = (velocity[i] + omega * change[i]) * dt
+		current[i] = current[i] - change[i] + (change[i] + temp) * e
+		velocity[i] = (velocity[i] - omega * temp) * e
+	end
 end
 
 local function logistic(x)
@@ -1169,9 +1206,22 @@ end
 local camTypeTracking = 'tracking'
 local camTypeOverview = 'overview'
 local camDiagMin = 1000
-local cameraAccel = worldGridSize * 1.2
-local cameraRAccel =  pi / 16
-local maxPanDistance = worldGridSize * 4
+-- The camera is a drone orbiting a look-at point at some distance, pitch and yaw, and always points
+-- at it. Each of these follows its target on a critically damped spring (see smoothDamp), so the
+-- event can't be pulled out of frame by rotation and zoom lagging behind translation.
+local lookSmoothTime = 0.45
+-- Caps pan speed (elmos/s) so long pans glide rather than whip
+local lookMaxSpeed = worldGridSize * 5
+local distSmoothTime = 0.7
+local pitchSmoothTime = 0.6
+local yawSmoothTime = 1.2
+-- While panning, pull out by this share of the remaining pan, up to this share of the shot
+-- distance, so the camera arcs up and over rather than skimming the ground.
+local panArcRise, panArcMax = 0.4, 0.75
+-- A new shot turns to face its event by at most this much
+local maxShotYawChange = pi / 3
+-- Cut rather than pan when the pan would take longer than this
+local maxPanSeconds = 1.8
 local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 2
 
@@ -1185,6 +1235,10 @@ local shownEvent
 
 local statsCellSize = 256
 local statsDamage = {}
+-- Fastest yaw seen since the last flush (rad/s), ignoring cuts
+local statsMaxYawRate = 0
+-- A shot counts as framed once its tracking box is on screen and its centre is in the middle half.
+local statsFramedCentre = 0.25
 
 local function statsLogGame()
 	local vsx, vsy = spGetViewGeometry()
@@ -1264,15 +1318,65 @@ local function statsFlush(userOverride)
 		end
 		corners[#corners + 1] = string.format('%.0f,%.0f', x, z)
 	end
-	spEcho(string.format('rc-cam,%.0f,%.0f,%.0f,%s,%d,%s,%d,%s',
+	spEcho(string.format('rc-cam,%.0f,%.0f,%.0f,%s,%d,%s,%d,%s,%.3f,%.1f',
 		cx, cy, cz, display.camType or 'nil',
 		shownEvent and shownEvent.id or -1, shownEvent and shownEvent.type or 'nil',
-		userOverride and 1 or 0, table.concat(corners, ',')))
+		userOverride and 1 or 0, table.concat(corners, ','),
+		camera and camera.ry or 0, deg(statsMaxYawRate)))
+	statsMaxYawRate = 0
+end
+
+local function statsTrackYaw(dt, oldRy, newRy, isCut)
+	if isCut or dt <= 0 then
+		return
+	end
+	local d = (newRy - oldRy + pi) % (2 * pi) - pi
+	statsMaxYawRate = max(statsMaxYawRate, math.abs(d) / dt)
+end
+
+-- Logs rc-framed once per shot, when the tracking box first sits in frame.
+local function statsCheckFramed(xMin, zMin, xMax, zMax)
+	if not shownEvent or display.framedId == shownEvent.id then
+		return
+	end
+	local vsx, vsy = spGetViewGeometry()
+	local cxw, czw = (xMin + xMax) / 2, (zMin + zMax) / 2
+	local gy = spGetGroundHeight(cxw, czw)
+	local sx, sy, sz = spWorldToScreenCoords(cxw, gy, czw)
+	if not sx or sz < 0 or sz > 1
+	    or math.abs(sx / vsx - 0.5) > statsFramedCentre or math.abs(sy / vsy - 0.5) > statsFramedCentre then
+		return
+	end
+	-- Overview's box deliberately reaches past the map edges, so only its centre counts.
+	if display.camType ~= camTypeOverview then
+		for _, c in ipairs({ { xMin, zMin }, { xMin, zMax }, { xMax, zMin }, { xMax, zMax } }) do
+			local px, py, pz = spWorldToScreenCoords(c[1], gy, c[2])
+			if not px or pz < 0 or pz > 1 or px < 0 or px > vsx or py < 0 or py > vsy then
+				return
+			end
+		end
+	end
+	display.framedId = shownEvent.id
+	spEcho(string.format('rc-framed,%d,%s', shownEvent.id, shownEvent.type))
 end
 local userInactiveSeconds, lastMouseLocation = 0, { -1, 0, -1 }
 
-local function initCamera(cx, cy, cz, rx, ry, type)
-	return { x = cx, y = cy, z = cz, xv = 0, yv = 0, zv = 0, rx = rx, rxv = 0, ry = ry, ryv = 0, fov = defaultFov, type = type }
+local function calcCamRange(diag, fov)
+	return diag / 2 / tan(rad(fov / 2))
+end
+
+local function initCamera(cx, cy, cz)
+	local lx, lz = mapSizeX / 2, mapSizeZ / 2
+	return {
+		-- Rig state
+		look = { lx, spGetGroundHeight(lx, lz), lz }, lookv = { 0, 0, 0 },
+		dist = calcCamRange(camDiagMin, defaultFov), distv = 0,
+		pitch = defaultRx, pitchv = 0,
+		yaw = defaultRy, yawv = 0, tyaw = defaultRy,
+		-- Pose last sent to the engine
+		x = cx, y = cy, z = cz, rx = defaultRx, ry = defaultRy, fov = defaultFov,
+		cutNext = true,
+	}
 end
 
 local function __pluralize(noun, count)
@@ -1467,7 +1571,7 @@ function widget:Initialize()
 		statsLogGame()
 	end
 	updateDisplay(addOverviewEvent(1))
-	camera = initCamera(cx, cy, cz, defaultRx, defaultRy, camTypeTracking)
+	camera = initCamera(cx, cy, cz)
 end
 
 function widget:GameFrame(frame)
@@ -1773,10 +1877,6 @@ function widget:UnitTaken(unitID, _, _, newTeam)
 	event:addObject(captureController, capturerLocation)
 end
 
-local function calcCamRange(diag, fov)
-	return diag / 2 / tan(rad(fov / 2))
-end
-
 local function updateCamera(dt, userCameraOverride)
 	if logging >= LOG_DEBUG and dt > 0.05 then
 		spEcho('slow camera update', dt)
@@ -1817,10 +1917,6 @@ local function updateCamera(dt, userCameraOverride)
 		end
 	end
 
-	-- HACK: It appears that translation occurs 1 render frame later than rotation,
-	-- this is used to defer rotation by a frame when reorienting
-	local deferRotationRenderFrames = camera.deferRotationRenderFrames and camera.deferRotationRenderFrames - 1
-
 	if trackedLocationCount == 0 then
 		-- Shouldn't happen, but avoid dividing by zero.
 		return
@@ -1846,77 +1942,72 @@ local function updateCamera(dt, userCameraOverride)
 		display.velocity = tvelocity
 	end
 
-	local isOverview = display.camType == camTypeOverview;
-	local noRotation = isOverview or deferRotationRenderFrames == 0 or not options.camera_rotation.value
-	-- Smoothly move to the location of the event.
-	-- Camera position and vector
-	local cx, cy, cz, cxv, cyv, czv = camera.x, camera.y, camera.z, camera.xv, camera.yv, camera.zv
-	local crx, crxv, cry, cryv, cfov = camera.rx, camera.rxv, camera.ry, camera.ryv, camera.fov
-	-- Event location
+	local c = camera
+	local isOverview = display.camType == camTypeOverview
+	local rotate = options.camera_rotation.value and not isOverview
+
+	-- Where the camera should look: the event, nudged by its velocity and kept off the map edge
 	local ex, ey, ez = unpack(display.location)
 	local exv, eyv, ezv = unpack(display.velocity)
 	ex, ey, ez = ex + exv, ey + eyv, ez + ezv
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
-	-- Where do we *want* the camera to be ie: (t)arget
-	local tcDist = calcCamRange(display.diag, defaultFov)
-	local try = noRotation and defaultRy or atan2(cx - ex, cz - ez) + pi
-	local pry = cry + cryv / cameraRAccel / 2
-	cryv = noRotation and 0 or cryv + signum(try - pry) * cameraRAccel * dt
-	cry = noRotation and try or cry + cryv * dt
-	-- Calculate target position
-	local tcDist2d = tcDist * cos(-display.camAngle)
-	local tcx, tcy, tcz = ex + tcDist2d * sin(cry - pi), ey + tcDist * sin(-display.camAngle), ez + tcDist2d * cos(cry - pi)
+	local tlook = { ex, ey, ez }
+	-- Frame the event by distance rather than zoom, so the FOV stays constant
+	local tdist = calcCamRange(display.diag, defaultFov)
+	local tpitch = display.camAngle
 
-	local doInstantTransition = length(tcx - cx, tcy - cy, tcz - cz) > maxPanDistance
-	if doInstantTransition then
-		cx, cy, cz = ex + tcDist2d * sin(defaultRy - pi), tcy, ez + tcDist2d * cos(defaultRy - pi)
-		cxv, crxv, cyv, cryv, czv = 0, 0, 0, 0, 0
-		cfov = defaultFov
-		-- HACK: Need to defer rotation by 1 frame, see earlier
-		deferRotationRenderFrames = 1
-	else
-		-- Project out current vector
-		local cv = length(cxv, cyv, czv)
-		local px, py, pz = cx, cy, cz
-		if cv > 0 then
-			local time = cv / cameraAccel
-			px = px + cxv * time / 2
-			py = py + cyv * time / 2
-			pz = pz + czv * time / 2
-		end
-		-- Offset vector
-		local ox, oy, oz = tcx - px, tcy - py, tcz - pz
-		local od     = length(ox, oy, oz)
-		-- Correction vector
-		local dx, dy, dz = -cxv, -cyv, -czv
-		if od > 0 then
-			-- Not 2 x d as we want to accelerate until half way then decelerate.
-			local ov = sqrt(od * cameraAccel)
-			dx = dx + ov * ox / od
-			dy = dy + ov * oy / od
-			dz = dz + ov * oz / od
-		end
-		local dv = length(dx, dy, dz)
-		if dv > 0 then
-			cxv = cxv + dt * cameraAccel * dx / dv
-			cyv = cyv + dt * cameraAccel * dy / dv
-			czv = czv + dt * cameraAccel * dz / dv
-		end
-		cx = cx + dt * cxv
-		cy = cy + dt * cyv
-		cz = cz + dt * czv
+	-- Cut when a pan would take too long. A critically damped spring at capped speed takes roughly
+	-- 2x its smooth time plus the distance at full speed.
+	local remaining = distance(c.look, tlook)
+	local isCut = c.cutNext or 2 * lookSmoothTime + remaining / lookMaxSpeed > maxPanSeconds
 
-		-- Rotate and zoom camera
-		local trx = noRotation and display.camAngle or -atan2(cy - ey, length(cx - ex, cz - ez))
-		local prx = crx + crxv / cameraRAccel / 2
-		crxv = noRotation and 0 or crxv + signum(trx - prx) * cameraRAccel * dt
-		crx = noRotation and display.camAngle or crx + crxv * dt
-		cfov = applyDamping(cfov, deg(2 * atan2(display.diag / 2, length(ex - cx, ey - cy, ez - cz))), 0.5, dt)
+	if shownEvent ~= c.shot then
+		c.shot = shownEvent
+		if rotate and not isCut then
+			-- Turn towards the new event, as a drone pilot would, within limits
+			local hx, hz = ex - c.x, ez - c.z
+			if length(hx, hz) > 1 then
+				c.tyaw = c.yaw + bound(wrapAngle(atan2(hx, hz) - c.yaw), -maxShotYawChange, maxShotYawChange)
+			end
+		end
 	end
 
-	local showReticle = display.camType == camTypeTracking
-	camera = { x = cx, y = cy, z = cz, xv = cxv, yv = cyv, zv = czv, rx = crx, rxv = crxv, ry = cry, ryv = cryv, fov = cfov, deferRotationRenderFrames = deferRotationRenderFrames, reticle = showReticle and { xMin, zMin, xMax, zMax } }
-	
+	if isCut then
+		c.look, c.lookv = tlook, { 0, 0, 0 }
+		c.dist, c.distv = tdist, 0
+		c.pitch, c.pitchv = tpitch, 0
+		c.yaw, c.yawv, c.tyaw = defaultRy, 0, defaultRy
+	else
+		smoothDampVec(c.look, tlook, c.lookv, lookSmoothTime, dt, lookMaxSpeed)
+		local arc = min(tdist * panArcMax, remaining * panArcRise)
+		c.dist, c.distv = smoothDamp(c.dist, tdist + arc, c.distv, distSmoothTime, dt)
+		c.pitch, c.pitchv = smoothDamp(c.pitch, tpitch, c.pitchv, pitchSmoothTime, dt)
+		local tyaw = rotate and c.tyaw or defaultRy
+		c.yaw, c.yawv = smoothDamp(c.yaw, c.yaw + wrapAngle(tyaw - c.yaw), c.yawv, yawSmoothTime, dt)
+		c.yaw = wrapAngle(c.yaw)
+		c.tyaw = c.yaw + wrapAngle(c.tyaw - c.yaw)
+	end
+	c.cutNext = false
+
+	-- Camera pose from the rig: behind the look-at point along the yaw, raised by the pitch
+	local lx, ly, lz = unpack(c.look)
+	local d2 = c.dist * cos(c.pitch)
+	local rx, ry = c.pitch, c.yaw
+	-- HACK: Translation seems to apply 1 render frame later than rotation, so on a cut send the new
+	-- position with the old rotation, and the new rotation next frame.
+	if isCut then
+		rx, ry = c.rx, c.ry
+	end
+
+	if STATS then
+		statsTrackYaw(dt, c.ry, ry, isCut or c.wasCut)
+	end
+	c.wasCut = isCut
+
+	c.x, c.y, c.z = lx - d2 * sin(c.yaw), ly - c.dist * sin(c.pitch), lz - d2 * cos(c.yaw)
+	c.rx, c.ry, c.fov = rx, ry, defaultFov
+	c.reticle = display.camType == camTypeTracking and { xMin, zMin, xMax, zMax }
+
 	if userCameraOverride then
 		return
 	end
@@ -1931,6 +2022,10 @@ local function updateCamera(dt, userCameraOverride)
 		rz = 0,
 		fov = camera.fov
   }, 0)
+
+	if STATS then
+		statsCheckFramed(xMin, zMin, xMax, zMax)
+	end
 end
 
 function widget:Update(dt)
