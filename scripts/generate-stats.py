@@ -42,6 +42,10 @@ CLUSTER_PAD = 400           # elmos padding around the action's bounding box
 JUMP_DISTANCE = 1536        # footprint centre moving further than this in 1s is a cut
 PINGPONG_S = 10
 PINGPONG_RANGE = 512
+SHORT_SHOT_S = 3            # shots this long or shorter count as quick cuts
+SAME_SPOT_RANGE = 256       # elmos between consecutive shots that count as the same spot
+FAR_CUT_RANGE = 1536        # the widget teleports rather than pans beyond this (maxPanDistance)
+FAR_CUT_HIT = (10, 800)     # a far cut "hits" if a death follows within this many seconds and elmos
 
 
 # GEOMETRY
@@ -116,6 +120,7 @@ def new_game(name):
         'counts': {'event': {}, 'merge': {}, 'mie': {}},
         'cam': [],      # [frame, cx, cy, cz, camType, shownId, shownType, override, [[x, z] x4]]
         'shown': [],    # [frame, id, type, x, z, camType]
+        'extends': [],  # [frame, pickId, mergedType]: merges into the current pick
         'deaths': [],   # [frame, unitDef, x, z, value, allyTeam]
         'damage': [],   # [frame, x, z, value]
     }
@@ -192,6 +197,8 @@ def parse_rc(game, frame, kind, f):
         elif kind == 'cam':
             corners = [[float(f[i]), float(f[i + 1])] for i in range(7, 15, 2)]
             game['cam'].append([frame, float(f[0]), float(f[1]), float(f[2]), f[3], int(f[4]), f[5], int(f[6]), corners])
+        elif kind == 'extend':
+            game['extends'].append([frame, int(f[0]), f[1]])
         elif kind == 'shown':
             game['shown'].append([frame, int(f[0]), f[1], float(f[2]), float(f[3]), f[4]])
         elif kind == 'death':
@@ -414,6 +421,19 @@ def compute_metrics(game, ref_area):
             pingpong += 1
     metrics['pingpong_per_min'] = pingpong / minutes
 
+    # Fluidity: quick cuts, cuts that stay put, and long jumps that don't lead anywhere
+    metrics['short_shot_share'] = sum(1 for s in shot_lengths if s <= SHORT_SHOT_S + 0.05) / len(shot_lengths) if shot_lengths else None
+    cuts = [(a, b, math.hypot(b[3] - a[3], b[4] - a[4])) for a, b in zip(shown, shown[1:])
+            if a[5] == b[5] == 'tracking']
+    metrics['same_spot_cut_share'] = sum(1 for *_, d in cuts if d < SAME_SPOT_RANGE) / len(cuts) if cuts else None
+    far = [b for _, b, d in cuts if d >= FAR_CUT_RANGE]
+    metrics['far_cuts_per_min'] = len(far) / minutes
+    hit_s, hit_range = FAR_CUT_HIT
+    metrics['far_cut_hit'] = sum(1 for b in far if any(
+        b[0] <= d[0] <= b[0] + hit_s * FPS and math.hypot(d[2] - b[3], d[3] - b[4]) < hit_range
+        for d in game['deaths'])) / len(far) if far else None
+    metrics['extends_per_min'] = len(game.get('extends', [])) / minutes
+
     # Biggest losses the camera never showed, for checking in the replay
     missed = sorted((g for g in graded if not g['ever_seen']), key=lambda g: -g['value'])[:10]
     metrics['missed_highlights'] = [
@@ -447,6 +467,11 @@ SUMMARY_COLUMNS = [
     ('shot_s_median', 'shot s', '{:.1f}', None),
     ('jumps_per_min', 'jump/m', '{:.1f}', False),
     ('pingpong_per_min', 'ping/m', '{:.2f}', False),
+    ('short_shot_share', 'short', '{:.0%}', False),
+    ('same_spot_cut_share', 'same', '{:.0%}', False),
+    ('far_cuts_per_min', 'far/m', '{:.1f}', False),
+    ('far_cut_hit', 'farhit', '{:.0%}', True),
+    ('extends_per_min', 'ext/m', '{:.1f}', None),
     ('override_share', 'user', '{:.0%}', None),
     ('invalid_cam_share', 'badcam', '{:.0%}', False),
 ]
@@ -576,7 +601,7 @@ def main():
     for g in games:
         g['metrics'] = compute_metrics(g, args.ref_area)
         if args.no_timelines:
-            for k in ('cam', 'shown', 'deaths', 'damage'):
+            for k in ('cam', 'shown', 'extends', 'deaths', 'damage'):
                 del g[k]
 
     result = {'infolog': args.infolog, 'ref_area': args.ref_area, 'games': games}

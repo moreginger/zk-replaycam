@@ -970,10 +970,31 @@ local function _getInterestModifier(event)
 	return interestGrid:getScore(x, z)
 end
 
-local function _getEventPercentile(currentFrame, event, eventBoost)
-	eventBoost = eventBoost or 1
-	local importance = event:valueAtFrame(event.importance, currentFrame) * eventBoost
+local function _getEventPercentile(currentFrame, event)
+	local importance = event:valueAtFrame(event.importance, currentFrame)
 	return eventStatistics:getPercentile(event.type, importance * _getInterestModifier(event))
+end
+
+-- Against a challenger the pick's importance counts this many times over, more for distant ones.
+local switchBoostNear, switchBoostFar, switchBoostRange = 2, 3.3, 3000
+
+local function _getRarity(event)
+	return 1 - _getEventPercentile(gameFrame, event)
+end
+
+-- Boosting importance by b raises rarity to the power b, so a decayed pick still gives way.
+local function _beatsPick(event, rarity)
+	if not mie then
+		return true
+	end
+	local boost = switchBoostNear
+	if mie.type ~= overviewEventType and event.type ~= overviewEventType then
+		local ex, _, ez = unpack(event.location)
+		local mx, _, mz = unpack(mie.location)
+		local d = length(ex - mx, ez - mz)
+		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * min(1, d / switchBoostRange)
+	end
+	return rarity < _getRarity(mie) ^ boost
 end
 
 local ADD_EVENT_OPTS_NO_GRID_NO_MERGE = { noGrid = true, noMerge = true }
@@ -1007,7 +1028,8 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 	local event = nil
 	if not opts.noMerge then
 		event = events:getNearby(location[1], location[3], eventMergeRange, function(e)
-			return e.started >= considerForMergeAfterFrame
+			-- The current pick keeps merging for as long as it lasts.
+			return (e.started >= considerForMergeAfterFrame or e == mie)
 		        and e.type == type
 				and e.sbjName == sbjName
 				and e.actorAllyTeam == actorAllyTeam
@@ -1019,6 +1041,9 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 	if event then
 		if logging >= LOG_DEBUG then
 			spEcho('merging events', type)
+		end
+		if STATS and event == mie then
+			spEcho(string.format('rc-extend,%d,%s', event.id, type))
 		end
 
 		-- Remove it and attach at head later. Must do this before mutating event.location
@@ -1068,10 +1093,17 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 
 	eventStatistics:logEvent(event.type, event.importance * _getInterestModifier(event))
 
-	local pendingPercentile = pendingMie and _getEventPercentile(gameFrame, pendingMie, (pendingMie == mie and 2.0 or 1.0)) or 0
-	local eventPercentile = _getEventPercentile(gameFrame, event, (event == mie and 2.0 or 1.0))
-	if eventTypes[event.type] and eventPercentile > pendingPercentile then
-		pendingMie = event
+	if eventTypes[event.type] then
+		local rarity = _getRarity(event)
+		if event == mie then
+			-- A strengthened pick can win back a pending cut.
+			if pendingMie and pendingMie ~= mie and not _beatsPick(pendingMie, _getRarity(pendingMie)) then
+				pendingMie = mie
+			end
+		elseif rarity < (pendingMie and pendingMie ~= mie and _getRarity(pendingMie) or 1)
+		    and _beatsPick(event, rarity) then
+			pendingMie = event
+		end
 	end
 
 	return event
