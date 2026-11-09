@@ -431,6 +431,18 @@ function WorldGrid:getScore(x, y)
 	return self:_getScoreGridCoords(x, y)
 end
 
+-- Raw activity at a location: interest and interacting teams, ignoring how recently we watched it
+function WorldGrid:getActivity(x, y)
+	x, y = self:__toGridCoords(x, y)
+	local data = self.data[x][y]
+	self:_syncCell(data)
+	local allyTeamCount = 0
+	for _, _ in pairs(data[2]) do
+		allyTeamCount = allyTeamCount + 1
+	end
+	return data[1] * max(1, allyTeamCount * allyTeamCount)
+end
+
 function WorldGrid:getInterestingScore()
 	-- one event of the mean value, or one moving unit (per second) = 1
 	-- two interacting teams = *4	
@@ -1224,6 +1236,23 @@ local panArcRise, panArcMax = 0.4, 0.75
 local maxShotYawChange = pi / 3
 -- Cut rather than pan when the pan would take longer than this
 local maxPanSeconds = 1.8
+-- Orbits: once a shot is framed, the camera may slowly fly around the event to a heading that
+-- shows more of what's going on nearby, keeps the map on screen and isn't blocked by terrain.
+-- An orbit has to improve what's in view; heading preferences (turn, north) only pick between
+-- equally good views.
+local orbitCandidateStep = pi / 6
+local orbitSmoothTime = 3
+-- Start planning this long after framing, and replan this often
+local orbitStartFrames, orbitPlanFrames = 2 * framesPerSecond, framesPerSecond
+-- Orbit when another heading's view scores this much better, before heading preferences
+local orbitMargin = 0.4
+-- On a long hold, drift once to a heading at least orbitDriftMin away that scores nearly as well
+local orbitDriftFrames, orbitDriftMin, orbitDriftTolerance = 6 * framesPerSecond, pi / 9, 0.2
+-- activity: mean log10 activity in view; offMap: share of view off the map; occluded: terrain
+-- samples blocking the line of sight; turn: per half turn from the current heading; north: per
+-- quarter turn from north
+local headingWeights = { activity = 1, offMap = 3, occluded = 0.5, turn = 0.3, north = 0.3 }
+local headingSamples = { -0.9, -0.45, 0, 0.45, 0.9 }
 -- Shot lock: a new shot holds until it has framed its event, then for minShotFrames more. Only a
 -- challenger that beats it with the pick boost multiplied by shotLockBoost can cut in sooner.
 -- If framing never happens (e.g. user control), the lock gives up after maxShotLockFrames.
@@ -1403,6 +1432,97 @@ transitionCost = function(location)
 	end
 	-- Even a tiny pan takes about the look-at smooth time, so measure from there
 	return bound((pan - lookSmoothTime) / (maxPanSeconds - lookSmoothTime), 0, 1)
+end
+
+-- Score the view the rig would have at this yaw (see headingWeights). Returns the total, and the
+-- score of the view alone without heading preferences.
+local function scoreHeading(c, yaw)
+	local lx, ly, lz = unpack(c.look)
+	local cp, sp, cy, sy = cos(c.pitch), sin(c.pitch), cos(yaw), sin(yaw)
+	-- Camera forward, right and up
+	local fx, fy, fz = sy * cp, sp, cy * cp
+	local rx, rz = -cy, sy
+	local ux, uy, uz = -sy * sp, cp, -cy * sp
+	local px, py, pz = lx - c.dist * fx, ly - c.dist * fy, lz - c.dist * fz
+	local vsx, vsy = spGetViewGeometry()
+	local tanV = tan(rad(c.fov / 2))
+	local tanH = tanV * vsx / vsy
+
+	-- Cast a grid of rays onto the plane of the look-at point
+	local activity, offMap, n = 0, 0, 0
+	for _, su in ipairs(headingSamples) do
+		for _, sv in ipairs(headingSamples) do
+			local dx = fx + rx * su * tanH + ux * sv * tanV
+			local dy = fy + uy * sv * tanV
+			local dz = fz + rz * su * tanH + uz * sv * tanV
+			n = n + 1
+			if dy >= -1e-3 then
+				offMap = offMap + 1
+			else
+				local t = (ly - py) / dy
+				local x, z = px + dx * t, pz + dz * t
+				if x < 0 or x > mapSizeX or z < 0 or z > mapSizeZ then
+					offMap = offMap + 1
+				else
+					activity = activity + log10(max(1, interestGrid:getActivity(x, z)))
+				end
+			end
+		end
+	end
+
+	local occluded = 0
+	for i = 1, 4 do
+		local t = i / 5
+		if spGetGroundHeight(px + (lx - px) * t, pz + (lz - pz) * t) > py + (ly - py) * t then
+			occluded = occluded + 1
+		end
+	end
+
+	local w = headingWeights
+	local view = w.activity * activity / n - w.offMap * offMap / n - w.occluded * occluded
+	return view - w.turn * math.abs(wrapAngle(yaw - c.yaw)) / pi
+		- w.north * math.abs(wrapAngle(yaw - defaultRy)) / (pi / 2), view
+end
+
+-- Once the shot is framed, maybe orbit to a better heading, or drift once on a long hold
+local function planHeading(c)
+	if not shownEvent or display.framedId ~= shownEvent.id
+	    or gameFrame < display.framedFrame + orbitStartFrames
+	    or gameFrame < (c.planFrame or 0) + orbitPlanFrames
+	    -- Let an orbit finish before replanning
+	    or math.abs(wrapAngle(c.tyaw - c.yaw)) > 0.1 then
+		return
+	end
+	c.planFrame = gameFrame
+
+	local current, currentView = scoreHeading(c, c.tyaw)
+	local best, bestScore, bestView, drift, driftScore, driftView = nil, -huge, nil, nil, -huge, nil
+	for k = 0, floor(2 * pi / orbitCandidateStep + 0.5) - 1 do
+		local yaw = wrapAngle(defaultRy + k * orbitCandidateStep)
+		local score, view = scoreHeading(c, yaw)
+		if score > bestScore then
+			best, bestScore, bestView = yaw, score, view
+		end
+		if math.abs(wrapAngle(yaw - c.tyaw)) >= orbitDriftMin and score > driftScore then
+			drift, driftScore, driftView = yaw, score, view
+		end
+	end
+
+	local target, reason, view
+	if bestScore > current and bestView > currentView + orbitMargin then
+		target, reason, view = best, 'better', bestView
+	elseif not c.orbited and gameFrame >= display.framedFrame + orbitDriftFrames
+	    and drift and driftScore >= current - orbitDriftTolerance then
+		target, reason, view = drift, 'drift', driftView
+	end
+	if target then
+		c.tyaw = c.yaw + wrapAngle(target - c.yaw)
+		c.yawSmooth, c.orbited = orbitSmoothTime, true
+		if STATS then
+			-- Gain is the view score improvement (see headingWeights), before heading preferences
+			spEcho(string.format('rc-orbit,%d,%.0f,%.0f,%s,%.2f', shownEvent.id, deg(c.yaw), deg(target), reason, view - currentView))
+		end
+	end
 end
 
 local function initCamera(cx, cy, cz)
@@ -2025,7 +2145,7 @@ local function updateCamera(dt, userCameraOverride)
 	local isCut = c.cutNext or panSeconds(remaining) > maxPanSeconds
 
 	if shownEvent ~= c.shot then
-		c.shot = shownEvent
+		c.shot, c.orbited, c.yawSmooth = shownEvent, false, yawSmoothTime
 		if rotate and not isCut then
 			-- Turn towards the new event, as a drone pilot would, within limits
 			local hx, hz = ex - c.x, ez - c.z
@@ -2040,14 +2160,17 @@ local function updateCamera(dt, userCameraOverride)
 		c.dist, c.distv = tdist, 0
 		c.pitch, c.pitchv = tpitch, 0
 		-- Face north again after a cut, so the viewer doesn't lose their bearings
-		c.yaw, c.yawv, c.tyaw = defaultRy, 0, defaultRy
+		c.yaw, c.yawv, c.tyaw, c.yawSmooth = defaultRy, 0, defaultRy, yawSmoothTime
 	else
 		smoothDampVec(c.look, tlook, c.lookv, lookSmoothTime, dt, lookMaxSpeed)
 		local arc = min(tdist * panArcMax, remaining * panArcRise)
 		c.dist, c.distv = smoothDamp(c.dist, tdist + arc, c.distv, distSmoothTime, dt)
 		c.pitch, c.pitchv = smoothDamp(c.pitch, tpitch, c.pitchv, pitchSmoothTime, dt)
+		if rotate and display.camType == camTypeTracking then
+			planHeading(c)
+		end
 		local tyaw = rotate and c.tyaw or defaultRy
-		c.yaw, c.yawv = smoothDamp(c.yaw, c.yaw + wrapAngle(tyaw - c.yaw), c.yawv, yawSmoothTime, dt)
+		c.yaw, c.yawv = smoothDamp(c.yaw, c.yaw + wrapAngle(tyaw - c.yaw), c.yawv, c.yawSmooth or yawSmoothTime, dt)
 		c.yaw = wrapAngle(c.yaw)
 		c.tyaw = c.yaw + wrapAngle(c.tyaw - c.yaw)
 	end

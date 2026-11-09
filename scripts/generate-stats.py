@@ -122,6 +122,7 @@ def new_game(name):
         'cam': [],      # [frame, cx, cy, cz, camType, shownId, shownType, override, [[x, z] x4], yaw, maxYawRate]
         'shown': [],    # [frame, id, type, x, z, camType]
         'framed': [],   # [frame, id]: the shot's tracking box first sat in frame
+        'orbits': [],   # [frame, id, fromYawDeg, toYawDeg, reason, viewGain]
         'extends': [],  # [frame, pickId, mergedType]: merges into the current pick
         'deaths': [],   # [frame, unitDef, x, z, value, allyTeam]
         'damage': [],   # [frame, x, z, value]
@@ -204,6 +205,9 @@ def parse_rc(game, frame, kind, f):
                                 yaw, yaw_rate])
         elif kind == 'extend':
             game['extends'].append([frame, int(f[0]), f[1]])
+        elif kind == 'orbit':
+            # The view gain was added later
+            game['orbits'].append([frame, int(f[0]), float(f[1]), float(f[2]), f[3], float(f[4]) if len(f) > 4 else None])
         elif kind == 'framed':
             game['framed'].append([frame, int(f[0])])
         elif kind == 'shown':
@@ -463,6 +467,17 @@ def compute_metrics(game, ref_area):
         metrics['frame_s_median'] = statistics.median(travel) if travel else None
         metrics['frame_s_p90'] = percentile(travel, 0.9)
         metrics['unframed_cut_share'] = unframed / (unframed + len(travel)) if unframed + len(travel) else None
+    orbits = game.get('orbits', [])
+    if orbits:
+        metrics['orbits_per_min'] = len(orbits) / minutes
+        metrics['orbit_drift_share'] = sum(1 for o in orbits if o[4] == 'drift') / len(orbits)
+        gains = [o[5] for o in orbits if len(o) > 5 and o[5] is not None and o[4] != 'drift']
+        metrics['orbit_gain_median'] = statistics.median(gains) if gains else None
+    yaws = [c[9] for c in game['cam'] if len(c) > 9 and c[9] is not None and not c[7]]
+    if yaws:
+        # Widget yaw pi faces north
+        metrics['away_from_north_share'] = sum(
+            1 for y in yaws if abs((y - math.pi + math.pi) % (2 * math.pi) - math.pi) > math.pi / 2) / len(yaws)
     yaw_rates = [c[10] for c in game['cam'] if len(c) > 10 and c[10] is not None and not c[7]]
     if yaw_rates:
         metrics['yaw_rate_p90'] = percentile(yaw_rates, 0.9)
@@ -510,6 +525,10 @@ SUMMARY_COLUMNS = [
     ('frame_s_median', 'frm s', '{:.1f}', False),
     ('frame_s_p90', 'frm90', '{:.1f}', False),
     ('unframed_cut_share', 'unfrm', '{:.0%}', False),
+    ('orbits_per_min', 'orb/m', '{:.1f}', None),
+    ('orbit_drift_share', 'drift', '{:.0%}', None),
+    ('orbit_gain_median', 'orbgn', '{:.2f}', None),
+    ('away_from_north_share', 'south', '{:.0%}', None),
     ('yaw_rate_p90', 'yaw90', '{:.0f}', False),
     ('yaw_rate_max', 'yawmx', '{:.0f}', False),
     ('override_share', 'user', '{:.0%}', None),
@@ -645,7 +664,7 @@ def main():
     for g in games:
         g['metrics'] = compute_metrics(g, args.ref_area)
         if args.no_timelines:
-            for k in ('cam', 'shown', 'framed', 'extends', 'deaths', 'damage'):
+            for k in ('cam', 'shown', 'framed', 'orbits', 'extends', 'deaths', 'damage'):
                 del g[k]
 
     result = {'infolog': args.infolog, 'ref_area': args.ref_area, 'games': games}
