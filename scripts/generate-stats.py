@@ -123,6 +123,7 @@ def new_game(name):
         'shown': [],    # [frame, id, type, x, z, camType]
         'framed': [],   # [frame, id]: the shot's tracking box first sat in frame
         'orbits': [],   # [frame, id, fromYawDeg, toYawDeg, reason, viewGain]
+        'lulls': [],    # [frame, armed, fired, damageShort, damageLong, damagePeak]: lull event trigger, per second
         'extends': [],  # [frame, pickId, mergedType]: merges into the current pick
         'deaths': [],   # [frame, unitDef, x, z, value, allyTeam]
         'damage': [],   # [frame, x, z, value]
@@ -205,6 +206,9 @@ def parse_rc(game, frame, kind, f):
                                 yaw, yaw_rate])
         elif kind == 'extend':
             game['extends'].append([frame, int(f[0]), f[1]])
+        elif kind == 'lull':
+            if len(f) >= 5:
+                game['lulls'].append([frame, int(f[0]), int(f[1]), float(f[2]), float(f[3]), float(f[4])])
         elif kind == 'orbit':
             # The view gain was added later
             game['orbits'].append([frame, int(f[0]), float(f[1]), float(f[2]), f[3], float(f[4]) if len(f) > 4 else None])
@@ -473,6 +477,10 @@ def compute_metrics(game, ref_area):
         metrics['orbit_drift_share'] = sum(1 for o in orbits if o[4] == 'drift') / len(orbits)
         gains = [o[5] for o in orbits if len(o) > 5 and o[5] is not None and o[4] != 'drift']
         metrics['orbit_gain_median'] = statistics.median(gains) if gains else None
+    # Lull events fired: fights that died down
+    lulls = game.get('lulls', [])
+    if lulls:
+        metrics['lulls_fired_per_min'] = sum(1 for row in lulls if row[2]) / minutes
     yaws = [c[9] for c in game['cam'] if len(c) > 9 and c[9] is not None and not c[7]]
     if yaws:
         # Widget yaw pi faces north
@@ -511,6 +519,7 @@ SUMMARY_COLUMNS = [
     ('dead_air_s', 'dead s', '{:.0f}', False),
     ('ally_balance', 'bal', '{:.2f}', True),
     ('overview_share', 'ovw', '{:.0%}', None),
+    ('lulls_fired_per_min', 'lull/m', '{:.1f}', None),
     ('mean_focus', 'mfocus', '{:.2f}', None),
     ('shots_per_min', 'shot/m', '{:.1f}', None),
     ('shot_s_median', 'shot s', '{:.1f}', None),
@@ -664,7 +673,7 @@ def main():
     for g in games:
         g['metrics'] = compute_metrics(g, args.ref_area)
         if args.no_timelines:
-            for k in ('cam', 'shown', 'framed', 'orbits', 'extends', 'deaths', 'damage'):
+            for k in ('cam', 'shown', 'framed', 'orbits', 'lulls', 'extends', 'deaths', 'damage'):
                 del g[k]
 
     result = {'infolog': args.infolog, 'ref_area': args.ref_area, 'games': games}

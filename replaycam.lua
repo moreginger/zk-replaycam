@@ -944,8 +944,8 @@ local teamInfo, interestGrid, unitInfo
 local attackEventType = "attack"
 local buildingEventType = "building"
 local hotspotEventType = "hotspot"
+local lullEventType = "lull"
 local moveEventType = "move"
-local overviewEventType = "overview"
 local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
@@ -955,8 +955,8 @@ local eventTypes = {
 	attack = true,
 	building = true,
 	hotspot = true,
+	lull = true,
 	move = true,
-	overview = true,
 	unitBuilt = true,
 	unitDamaged = true,
 	unitDestroyed = true,
@@ -973,8 +973,8 @@ local eventDecayFactors = _apply(_multiply, {
 	attack = 1,
 	building = 5,
 	hotspot = 1,
+	lull = 4,
 	move = 2,
-	overview = 1,
 	unitBuilt = 5,
 	unitDamaged = 2,
 	unitDestroyed = 3,
@@ -990,10 +990,9 @@ local eventStatistics = EventStatistics:new({
 		attack = 1.0,
 		building = 2.4,
 		hotspot = 0.7,
+		lull = 1.0,
 		move = 5.0,
-		-- High as overview competes every second, mostly against a weak field.
-		overview = 20.0,
-		unitBuilt = 1.7,
+		unitBuilt = 1.9,
 		unitDamaged = 0.8,
 		unitDestroyed = 0.5,
 		unitDestroyer = 0.7,
@@ -1004,15 +1003,10 @@ local eventStatistics = EventStatistics:new({
 local lastEventId = 0
 local events = SpatialLookup:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, capacity = 128 })
 local mie, pendingMie
--- Overview scores quietness against this game's recent log10(igMax), so grid scale doesn't matter.
-local overviewBaselineUpdates = 120
--- Overview scores zero this many decades above the baseline.
-local overviewBusyDecades = 1.0
-local overviewBaseline
 
 local function _getInterestModifier(event)
-	if event.type == overviewEventType then
-		-- Overview has a pseudo-location in the centre of the map, but should ignore what is happening there.
+	if event.type == lullEventType then
+		-- Lulls have a pseudo-location in the middle of a wide area, and should ignore what is happening there.
 		return 1
 	end
 	local x, _, z = unpack(event.location)
@@ -1042,7 +1036,8 @@ local function _beatsPick(event, rarity, boostScale)
 		return true
 	end
 	local boost = switchBoostNear
-	if mie.type ~= overviewEventType and event.type ~= overviewEventType then
+	-- A wide lull shot shows the other event anyway, so moving between them costs little
+	if mie.type ~= lullEventType and event.type ~= lullEventType then
 		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * transitionCost(event.location)
 	end
 	return rarity < _getRarity(mie) ^ (boost * (boostScale or 1))
@@ -1160,27 +1155,6 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 	return event
 end
 
-local function addOverviewEvent(importance)
-	local x, z = mapSizeX / 2, mapSizeZ / 2
-	local overviewY = spGetGroundHeight(x, z)
-	-- Not added to the interest grid: it would inflate the centre and so damp its own importance.
-	local event = addEvent(nil, importance, { x, overviewY, z }, nil, overviewEventType, overviewEventType, -1, nil, ADD_EVENT_OPTS_NO_GRID_NO_MERGE)
-
-	-- Add two fake units to get the right zoom level
-	local sx, sy = spGetViewGeometry()
-	local sratio = sx / sy
-	local mratio = mapSizeX / mapSizeZ
-	local zfit = 0.8
-	if sratio < mratio then
-		zfit = zfit * sratio / mratio
-	end
-	local zoffset = mapSizeZ * (1 - zfit) / 2
-	event:addSubject(-2, { x, overviewY, -zoffset })
-	event:addSubject(-3, { x, overviewY, mapSizeZ + zoffset })
-
-	return event
-end
-
 -- eventProcessor - perform processing and return truthy to remove the event
 local function purgeEvents(eventProcessor, opts)
 	local event = events._items.head
@@ -1218,8 +1192,9 @@ end
 -- EVENT DISPLAY
 
 local camTypeTracking = 'tracking'
-local camTypeOverview = 'overview'
 local camDiagMin = 1000
+-- Share of the screen a shot's box may span, as projected, per axis (see frameBox)
+local frameFill = 0.58
 -- The camera is a drone orbiting a look-at point at some distance, pitch and yaw, and always points
 -- at it. Each of these follows its target on a critically damped spring (see smoothDamp), so the
 -- event can't be pulled out of frame by rotation and zoom lagging behind translation.
@@ -1236,23 +1211,47 @@ local panArcRise, panArcMax = 0.4, 0.75
 local maxShotYawChange = pi / 3
 -- Cut rather than pan when the pan would take longer than this
 local maxPanSeconds = 1.8
+-- Lull events: when a fight dies down, a lull event frames the spread of activity across the map in
+-- a wide, north-facing shot. It fires once per fight, when recent damage drops well below its recent
+-- peak, with that peak as its importance, so bigger fights ending are more likely to be shown.
+-- (A table, as Lua 5.1 allows only 200 locals here.)
+local lullConfig = {
+	-- Damage (metal value per second) is averaged over a short and a long window. The short
+	-- average's peak decays with this half-life.
+	damageShortSeconds = 5, damageLongSeconds = 60, peakHalfLifeSeconds = 30,
+	-- A fight is a peak of at least minPeak, and at least minPeakRatio times the long average
+	minPeak = 10, minPeakRatio = 1.5,
+	-- Fire when the short average falls to dropRatio of the peak; rearm once back over rearmRatio
+	dropRatio = 0.3, rearmRatio = 0.6,
+	-- Frame every grid cell with at least this much activity (idle is 1; a moving unit adds about 1)
+	cellMin = 1.5,
+	-- Frame at least this diagonal, and fill this share of the screen
+	minDiag = 2000, fill = 0.9,
+	pitch = -1.2,
+}
+-- Lull detection, defined with the display code. damage has this second's damage, its short and
+-- long running means and the short mean's decaying peak (metal value per second).
+local lull = { damage = { now = 0, short = 0, long = 0, peak = 0 }, armed = false }
+
 -- Orbits: once a shot is framed, the camera may slowly fly around the event to a heading that
 -- shows more of what's going on nearby, keeps the map on screen and isn't blocked by terrain.
 -- An orbit has to improve what's in view; heading preferences (turn, north) only pick between
 -- equally good views.
-local orbitCandidateStep = pi / 6
-local orbitSmoothTime = 3
--- Start planning this long after framing, and replan this often
-local orbitStartFrames, orbitPlanFrames = 2 * framesPerSecond, framesPerSecond
--- Orbit when another heading's view scores this much better, before heading preferences
-local orbitMargin = 0.4
--- On a long hold, drift once to a heading at least orbitDriftMin away that scores nearly as well
-local orbitDriftFrames, orbitDriftMin, orbitDriftTolerance = 6 * framesPerSecond, pi / 9, 0.2
--- activity: mean log10 activity in view; offMap: share of view off the map; occluded: terrain
--- samples blocking the line of sight; turn: per half turn from the current heading; north: per
--- quarter turn from north
-local headingWeights = { activity = 1, offMap = 3, occluded = 0.5, turn = 0.3, north = 0.3 }
-local headingSamples = { -0.9, -0.45, 0, 0.45, 0.9 }
+local orbitConfig = {
+	candidateStep = pi / 6,
+	smoothTime = 3,
+	-- Start planning this long after framing, and replan this often
+	startFrames = 2 * framesPerSecond, planFrames = framesPerSecond,
+	-- Orbit when another heading's view scores this much better, before heading preferences
+	margin = 0.4,
+	-- On a long hold, drift once to a heading at least driftMin away that scores nearly as well
+	driftFrames = 6 * framesPerSecond, driftMin = pi / 9, driftTolerance = 0.2,
+	-- activity: mean log10 activity in view; offMap: share of view off the map; occluded: terrain
+	-- samples blocking the line of sight; turn: per half turn from the current heading; north: per
+	-- quarter turn from north
+	headingWeights = { activity = 1, offMap = 3, occluded = 0.5, turn = 0.3, north = 0.3 },
+	headingSamples = { -0.9, -0.45, 0, 0.45, 0.9 },
+}
 -- Shot lock: a new shot holds until it has framed its event, then for minShotFrames more. Only a
 -- challenger that beats it with the pick boost multiplied by shotLockBoost can cut in sooner.
 -- If framing never happens (e.g. user control), the lock gives up after maxShotLockFrames.
@@ -1385,13 +1384,10 @@ local function checkFramed(xMin, zMin, xMax, zMax)
 	    or math.abs(sx / vsx - 0.5) > framedCentre or math.abs(sy / vsy - 0.5) > framedCentre then
 		return
 	end
-	-- Overview's box deliberately reaches past the map edges, so only its centre counts.
-	if display.camType ~= camTypeOverview then
-		for _, c in ipairs({ { xMin, zMin }, { xMin, zMax }, { xMax, zMin }, { xMax, zMax } }) do
-			local px, py, pz = spWorldToScreenCoords(c[1], gy, c[2])
-			if not px or pz < 0 or pz > 1 or px < 0 or px > vsx or py < 0 or py > vsy then
-				return
-			end
+	for _, c in ipairs({ { xMin, zMin }, { xMin, zMax }, { xMax, zMin }, { xMax, zMax } }) do
+		local px, py, pz = spWorldToScreenCoords(c[1], gy, c[2])
+		if not px or pz < 0 or pz > 1 or px < 0 or px > vsx or py < 0 or py > vsy then
+			return
 		end
 	end
 	display.framedId, display.framedFrame = shownEvent.id, gameFrame
@@ -1434,8 +1430,64 @@ transitionCost = function(location)
 	return bound((pan - lookSmoothTime) / (maxPanSeconds - lookSmoothTime), 0, 1)
 end
 
--- Score the view the rig would have at this yaw (see headingWeights). Returns the total, and the
--- score of the view alone without heading preferences.
+-- Look-at point and distance that fit ground points { x, z } (at height y) in view at this yaw and
+-- pitch, with their projection spanning at most fill of the screen and centred on it. Perspective
+-- makes the far side look smaller, so aiming at their middle would leave more space above than below.
+local function frameBox(corners, y, yaw, pitch, fill)
+	local cp, sp, cy, sy = cos(pitch), sin(pitch), cos(yaw), sin(yaw)
+	local fx, fy, fz = sy * cp, sp, cy * cp
+	local rx, rz = -cy, sy
+	local ux, uy, uz = -sy * sp, cp, -cy * sp
+	local vsx, vsy = spGetViewGeometry()
+	local tanV = tan(rad(defaultFov / 2))
+	local tanH = tanV * vsx / vsy
+
+	-- Projected extents of the box from distance d back from look-at point (lx, lz)
+	local function extents(lx, lz, d)
+		local px, py, pz = lx - d * fx, y - d * fy, lz - d * fz
+		local uMin, uMax, vMin, vMax = huge, -huge, huge, -huge
+		for _, corner in ipairs(corners) do
+			local dx, dy, dz = corner[1] - px, y - py, corner[2] - pz
+			local depth = dx * fx + dy * fy + dz * fz
+			if depth <= 1 then
+				return nil
+			end
+			local u = (dx * rx + dz * rz) / (depth * tanH)
+			local v = (dx * ux + dy * uy + dz * uz) / (depth * tanV)
+			uMin, uMax, vMin, vMax = min(uMin, u), max(uMax, u), min(vMin, v), max(vMax, v)
+		end
+		return uMin, uMax, vMin, vMax
+	end
+
+	local lx, lz, d = 0, 0, 0
+	for _, corner in ipairs(corners) do
+		lx, lz = lx + corner[1] / #corners, lz + corner[2] / #corners
+	end
+	for _ = 1, 3 do
+		-- Closest distance that fits (the projection shrinks with distance)
+		local lo, hi = 1, length(mapSizeX, mapSizeZ) * 4
+		for _ = 1, 24 do
+			d = (lo + hi) / 2
+			local uMin, uMax, vMin, vMax = extents(lx, lz, d)
+			if uMin and uMax - uMin <= 2 * fill and vMax - vMin <= 2 * fill then
+				hi = d
+			else
+				lo = d
+			end
+		end
+		d = hi
+		-- Shift the look-at point to centre the projection: sideways along the camera's right, and
+		-- along the ground in the direction it faces
+		local uMin, uMax, vMin, vMax = extents(lx, lz, d)
+		local du, dv = (uMin + uMax) / 2, (vMin + vMax) / 2
+		local side, ahead = du * d * tanH, dv * d * tanV / max(0.1, -sp)
+		lx, lz = lx + side * rx + ahead * sy, lz + side * rz + ahead * cy
+	end
+	return lx, lz, d
+end
+
+-- Score the view the rig would have at this yaw (see orbitConfig.headingWeights). Returns the
+-- total, and the score of the view alone without heading preferences.
 local function scoreHeading(c, yaw)
 	local lx, ly, lz = unpack(c.look)
 	local cp, sp, cy, sy = cos(c.pitch), sin(c.pitch), cos(yaw), sin(yaw)
@@ -1450,8 +1502,8 @@ local function scoreHeading(c, yaw)
 
 	-- Cast a grid of rays onto the plane of the look-at point
 	local activity, offMap, n = 0, 0, 0
-	for _, su in ipairs(headingSamples) do
-		for _, sv in ipairs(headingSamples) do
+	for _, su in ipairs(orbitConfig.headingSamples) do
+		for _, sv in ipairs(orbitConfig.headingSamples) do
 			local dx = fx + rx * su * tanH + ux * sv * tanV
 			local dy = fy + uy * sv * tanV
 			local dz = fz + rz * su * tanH + uz * sv * tanV
@@ -1478,7 +1530,7 @@ local function scoreHeading(c, yaw)
 		end
 	end
 
-	local w = headingWeights
+	local w = orbitConfig.headingWeights
 	local view = w.activity * activity / n - w.offMap * offMap / n - w.occluded * occluded
 	return view - w.turn * math.abs(wrapAngle(yaw - c.yaw)) / pi
 		- w.north * math.abs(wrapAngle(yaw - defaultRy)) / (pi / 2), view
@@ -1487,8 +1539,8 @@ end
 -- Once the shot is framed, maybe orbit to a better heading, or drift once on a long hold
 local function planHeading(c)
 	if not shownEvent or display.framedId ~= shownEvent.id
-	    or gameFrame < display.framedFrame + orbitStartFrames
-	    or gameFrame < (c.planFrame or 0) + orbitPlanFrames
+	    or gameFrame < display.framedFrame + orbitConfig.startFrames
+	    or gameFrame < (c.planFrame or 0) + orbitConfig.planFrames
 	    -- Let an orbit finish before replanning
 	    or math.abs(wrapAngle(c.tyaw - c.yaw)) > 0.1 then
 		return
@@ -1497,29 +1549,29 @@ local function planHeading(c)
 
 	local current, currentView = scoreHeading(c, c.tyaw)
 	local best, bestScore, bestView, drift, driftScore, driftView = nil, -huge, nil, nil, -huge, nil
-	for k = 0, floor(2 * pi / orbitCandidateStep + 0.5) - 1 do
-		local yaw = wrapAngle(defaultRy + k * orbitCandidateStep)
+	for k = 0, floor(2 * pi / orbitConfig.candidateStep + 0.5) - 1 do
+		local yaw = wrapAngle(defaultRy + k * orbitConfig.candidateStep)
 		local score, view = scoreHeading(c, yaw)
 		if score > bestScore then
 			best, bestScore, bestView = yaw, score, view
 		end
-		if math.abs(wrapAngle(yaw - c.tyaw)) >= orbitDriftMin and score > driftScore then
+		if math.abs(wrapAngle(yaw - c.tyaw)) >= orbitConfig.driftMin and score > driftScore then
 			drift, driftScore, driftView = yaw, score, view
 		end
 	end
 
 	local target, reason, view
-	if bestScore > current and bestView > currentView + orbitMargin then
+	if bestScore > current and bestView > currentView + orbitConfig.margin then
 		target, reason, view = best, 'better', bestView
-	elseif not c.orbited and gameFrame >= display.framedFrame + orbitDriftFrames
-	    and drift and driftScore >= current - orbitDriftTolerance then
+	elseif not c.orbited and gameFrame >= display.framedFrame + orbitConfig.driftFrames
+	    and drift and driftScore >= current - orbitConfig.driftTolerance then
 		target, reason, view = drift, 'drift', driftView
 	end
 	if target then
 		c.tyaw = c.yaw + wrapAngle(target - c.yaw)
-		c.yawSmooth, c.orbited = orbitSmoothTime, true
+		c.yawSmooth, c.orbited = orbitConfig.smoothTime, true
 		if STATS then
-			-- Gain is the view score improvement (see headingWeights), before heading preferences
+			-- Gain is the view score improvement (see orbitConfig.headingWeights), before heading preferences
 			spEcho(string.format('rc-orbit,%d,%.0f,%.0f,%s,%.2f', shownEvent.id, deg(c.yaw), deg(target), reason, view - currentView))
 		end
 	end
@@ -1562,11 +1614,7 @@ local function __getUnitsNameString(units)
 end
 
 local function updateDisplay(event)
-	if display.noUpdateBeforeFrame > gameFrame then
-		return false
-	end
-
-	local camAngle, camType, commentary = defaultRx, camTypeTracking, nil
+	local camAngle, commentary, isWide, fill = defaultRx, nil, false, frameFill
 
 	local actorName
 	for actorID, _ in pairs(event.actors) do
@@ -1586,11 +1634,10 @@ local function updateDisplay(event)
 		commentary = actorName .. " making " .. sbjString
 	elseif event.type == hotspotEventType then
 		commentary = "Something's going down here"
-	elseif event.type == overviewEventType then
-		-- Don't quite go to straight down, as Spring gets janky
-		camAngle = 0.01 - pi / 2
-		camType = camTypeOverview
-		commentary = "Let's get an overview of the battlefield"
+	elseif event.type == lullEventType then
+		camAngle = lullConfig.pitch
+		commentary = event.meta and event.meta.commentary or "The dust settles"
+		isWide, fill = true, lullConfig.fill
 	elseif event.type == unitBuiltEventType then
 		commentary = sbjString .. " built by " .. actorName
 	elseif event.type == unitDamagedEventType then
@@ -1607,13 +1654,8 @@ local function updateDisplay(event)
 		commentary = sbjString .. " captured by " .. actorName
 	end
 
-	display.camAngle = camAngle
-	if display.camType ~= camType then
-		-- It looks especially naff if we flip between camera types every second
-		display.noUpdateBeforeFrame = gameFrame + framesPerSecond * 4
-		display.tracking:clear()
-	end
-	display.camType = camType
+	-- Wide shots read like a map, so they keep north up and don't count as watching their centre
+	display.camAngle, display.isWide, display.fill = camAngle, isWide, fill
 
 	-- We use keepPrevious to keep runs of track infos from the same event
 	local keepPrevious = false
@@ -1645,7 +1687,7 @@ local function updateDisplay(event)
 	display.shotFrame = gameFrame
 	if STATS then
 		local x, _, z = unpack(event.location)
-		spEcho(string.format('rc-shown,%d,%s,%.0f,%.0f,%s', event.id, event.type, x, z, camType))
+		spEcho(string.format('rc-shown,%d,%s,%.0f,%.0f,%s', event.id, event.type, x, z, display.camType))
 	end
 
 	return true
@@ -1660,6 +1702,68 @@ local function shotLocked()
 		return gameFrame < display.framedFrame + minShotFrames
 	end
 	return gameFrame < display.shotFrame + maxShotLockFrames
+end
+
+function lull.addDamage(unitID, unitDefID, damage, paralyzer)
+	local value, maxHealth = statsUnitValue(unitID, unitDefID)
+	if value and maxHealth and maxHealth > 0 then
+		lull.damage.now = lull.damage.now + value * min(damage, maxHealth) / maxHealth * (paralyzer and 0.5 or 1)
+	end
+end
+
+-- Add a lull event framing grid cells with notable activity, or the whole map if there are none
+-- (e.g. at the start of the game). commentary is optional.
+function lull.addEvent(importance, commentary)
+	local cfg = lullConfig
+	local xMin, zMin, xMax, zMax = huge, huge, -huge, -huge
+	for gx = 1, mapGridX do
+		for gz = 1, mapGridZ do
+			if interestGrid:getActivity((gx - 0.5) * worldGridSize, (gz - 0.5) * worldGridSize) >= cfg.cellMin then
+				xMin, zMin = min(xMin, (gx - 1) * worldGridSize), min(zMin, (gz - 1) * worldGridSize)
+				xMax, zMax = max(xMax, gx * worldGridSize), max(zMax, gz * worldGridSize)
+			end
+		end
+	end
+	if xMin == huge then
+		xMin, zMin, xMax, zMax = 0, 0, mapSizeX, mapSizeZ
+	end
+	local x, z = (xMin + xMax) / 2, (zMin + zMax) / 2
+	local half = cfg.minDiag / 2 / sqrt(2)
+	xMin, xMax = max(0, min(xMin, x - half)), min(mapSizeX, max(xMax, x + half))
+	zMin, zMax = max(0, min(zMin, z - half)), min(mapSizeZ, max(zMax, z + half))
+	x, z = (xMin + xMax) / 2, (zMin + zMax) / 2
+
+	local y = spGetGroundHeight(x, z)
+	local meta = commentary and { commentary = commentary }
+	local event = addEvent(nil, importance, { x, y, z }, meta, lullEventType, lullEventType, nil, nil, ADD_EVENT_OPTS_NO_GRID_NO_MERGE)
+	-- Placeholder units at opposite corners give the framing
+	event:addSubject(-1000 - 2 * event.id, { xMin, y, zMin })
+	event:addSubject(-1001 - 2 * event.id, { xMax, y, zMax })
+	return event
+end
+
+-- Once a second: track damage, and add a lull event when a fight dies down
+function lull.update()
+	local d, cfg = lull.damage, lullConfig
+	d.short = d.short + (d.now - d.short) / cfg.damageShortSeconds
+	d.long = d.long + (d.now - d.long) / cfg.damageLongSeconds
+	d.now = 0
+	d.peak = max(d.short, d.peak * 0.5 ^ (1 / cfg.peakHalfLifeSeconds))
+	local isFight = d.peak >= cfg.minPeak and d.peak >= cfg.minPeakRatio * d.long
+	local fired = false
+	if not lull.armed then
+		lull.armed = isFight and d.short >= cfg.rearmRatio * d.peak
+	elseif d.short <= cfg.dropRatio * d.peak then
+		lull.armed = false
+		if isFight then
+			lull.addEvent(d.peak)
+			fired = true
+		end
+	end
+
+	if STATS then
+		spEcho(string.format('rc-lull,%d,%d,%.1f,%.1f,%.1f', lull.armed and 1 or 0, fired and 1 or 0, d.short, d.long, d.peak))
+	end
 end
 
 function widget:Shutdown()
@@ -1735,7 +1839,8 @@ function widget:Initialize()
 		camAngle = defaultRx,
 		diag = 0,
 		location = { mapSizeX / 2, -1000, mapSizeZ / 2 },
-		noUpdateBeforeFrame = 0,
+		camType = camTypeTracking,
+		fill = frameFill,
 		shotFrame = 0,
 		tracking = LinkedList:new(),
 		velocity = { 0, 0, 0 }
@@ -1743,7 +1848,8 @@ function widget:Initialize()
 	if STATS then
 		statsLogGame()
 	end
-	updateDisplay(addOverviewEvent(1))
+	-- Open on a wide shot of the map
+	updateDisplay(lull.addEvent(lullConfig.minPeak, "Let's get an overview of the battlefield"))
 	camera = initCamera(cx, cy, cz)
 end
 
@@ -1759,7 +1865,7 @@ function widget:GameFrame(frame)
 		statsFlush(options.user_interrupts_tracking.value and userInactiveSeconds < userInactiveSecondsThreshold)
 	end
 
-	if display.camType ~= camTypeOverview then
+	if not display.isWide then
 		local x, _, z = unpack(display.location)
 		interestGrid:setWatching(x, z)
 	end
@@ -1785,11 +1891,6 @@ function widget:GameFrame(frame)
 			end
 		end
 	end
-
-	-- Log scale, as igMax spans orders of magnitude. Kept above 0 for the running mean.
-	local igMaxLog = log10(max(igMax, 1e-6))
-	overviewBaseline = overviewBaseline and overviewBaseline + (igMaxLog - overviewBaseline) / overviewBaselineUpdates or igMaxLog
-	addOverviewEvent(max(0.001, overviewBaseline + overviewBusyDecades - igMaxLog))
 
 
 	local cut = false
@@ -1819,6 +1920,8 @@ function widget:GameFrame(frame)
 		-- Set a standard decay so that we don't show the event for too long.
 		mie.decay, mie.started = 3 * framesPerSecond, frame
 	end
+
+	lull.update()
 end
 
 local function userAction()
@@ -1977,6 +2080,7 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 	if STATS then
 		statsAddDamage(unitID, unitDefID, damage, paralyzer)
 	end
+	lull.addDamage(unitID, unitDefID, damage, paralyzer)
 
 	if paralyzer then
 		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage
@@ -2066,6 +2170,7 @@ local function updateCamera(dt, userCameraOverride)
 	end
 
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
+	local points = {}
 	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
 	local trackInfo, keepPrevious = display.tracking.head, false
 	while trackInfo do
@@ -2090,6 +2195,7 @@ local function updateCamera(dt, userCameraOverride)
 			xMin, xMax, zMin, zMax = nxMin, nxMax, nzMin, nzMax
 			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
 			trackedLocationCount = trackedLocationCount + 1
+			points[trackedLocationCount] = { x, z }
 			keepPrevious = trackInfo.keepPrevious
 			trackInfo = trackInfo.prev
 		else
@@ -2126,18 +2232,34 @@ local function updateCamera(dt, userCameraOverride)
 	end
 
 	local c = camera
-	local isOverview = display.camType == camTypeOverview
-	local rotate = options.camera_rotation.value and not isOverview
+	local rotate = options.camera_rotation.value
 
 	-- Where the camera should look: the event, nudged by its velocity and kept off the map edge
 	local ex, ey, ez = unpack(display.location)
 	local exv, eyv, ezv = unpack(display.velocity)
 	ex, ey, ez = ex + exv, ey + eyv, ez + ezv
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
-	local tlook = { ex, ey, ez }
-	-- Frame the event by distance rather than zoom, so the FOV stays constant
-	local tdist = calcCamRange(display.diag, defaultFov)
+	-- Frame the tracked box, at least display.diag across, by distance rather than zoom so the FOV
+	-- stays constant. frameBox centres it as projected.
 	local tpitch = display.camAngle
+	-- Measure the units across and along the view rather than along the map axes, so the zoom doesn't
+	-- depend on the heading. (Camera right is (-cos, sin) and ahead is (sin, cos) of the yaw.)
+	local cy, sy = cos(c.yaw), sin(c.yaw)
+	local half = display.diag / (2 * sqrt(2))
+	local aMin, aMax, bMin, bMax = -half, half, -half, half
+	for _, point in ipairs(points) do
+		local dx, dz = point[1] - ex, point[2] - ez
+		local a, b = dz * sy - dx * cy, dx * sy + dz * cy
+		aMin, aMax, bMin, bMax = min(aMin, a), max(aMax, a), min(bMin, b), max(bMax, b)
+	end
+	local corners = {}
+	for _, a in ipairs({ aMin, aMax }) do
+		for _, b in ipairs({ bMin, bMax }) do
+			corners[#corners + 1] = { ex - a * cy + b * sy, ez + a * sy + b * cy }
+		end
+	end
+	local lx, lz, tdist = frameBox(corners, ey, c.yaw, tpitch, display.fill)
+	local tlook = { bound(lx, mapEdgeBorder, mapSizeX - mapEdgeBorder), ey, bound(lz, mapEdgeBorder, mapSizeZ - mapEdgeBorder) }
 
 	-- Cut when a pan would take too long. A critically damped spring at capped speed takes roughly
 	-- 2x its smooth time plus the distance at full speed.
@@ -2146,7 +2268,7 @@ local function updateCamera(dt, userCameraOverride)
 
 	if shownEvent ~= c.shot then
 		c.shot, c.orbited, c.yawSmooth = shownEvent, false, yawSmoothTime
-		if rotate and not isCut then
+		if rotate and not isCut and not display.isWide then
 			-- Turn towards the new event, as a drone pilot would, within limits
 			local hx, hz = ex - c.x, ez - c.z
 			if length(hx, hz) > 1 then
@@ -2166,7 +2288,9 @@ local function updateCamera(dt, userCameraOverride)
 		local arc = min(tdist * panArcMax, remaining * panArcRise)
 		c.dist, c.distv = smoothDamp(c.dist, tdist + arc, c.distv, distSmoothTime, dt)
 		c.pitch, c.pitchv = smoothDamp(c.pitch, tpitch, c.pitchv, pitchSmoothTime, dt)
-		if rotate and display.camType == camTypeTracking then
+		if display.isWide then
+			c.tyaw = defaultRy
+		elseif rotate then
 			planHeading(c)
 		end
 		local tyaw = rotate and c.tyaw or defaultRy
@@ -2193,7 +2317,7 @@ local function updateCamera(dt, userCameraOverride)
 
 	c.x, c.y, c.z = lx - d2 * sin(c.yaw), ly - c.dist * sin(c.pitch), lz - d2 * cos(c.yaw)
 	c.rx, c.ry, c.fov = rx, ry, defaultFov
-	c.reticle = display.camType == camTypeTracking and { xMin, zMin, xMax, zMax }
+	c.reticle = { xMin, zMin, xMax, zMax }
 
 	if userCameraOverride then
 		return
