@@ -708,16 +708,15 @@ function UnitInfoCache:_weaponStats(unitDef)
 	return weaponImportance, range
 end
 
+-- Static units are less interesting just for being built, but they matter when they are fought over
+local staticAttackedBoost = 1.5
+
 function UnitInfoCache:_unitStats(unitDefID)
 	local cacheObject = self._unitStatsCache[unitDefID]
 	if not cacheObject then
 		local unitDef = UnitDefs[unitDefID]
 		local isStatic = not spGetMovetype(unitDef)
 		local importance = unitDef.metalCost
-		if isStatic then
-			-- This helps us pick static builds to show. Mobile units are going to show up anyway
-			importance = importance * 1.5
-		end
 	    if unitDef.customParams.ismex then
 			-- Give mexes a little extra buff since they are cheap but important
 			importance = importance * 1.5
@@ -2086,7 +2085,10 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage
 		damage = damage / 2
 	end
-	local sbjLocation, _, unitImportance, sbjName = unitInfo:get(unitID)
+	local sbjLocation, _, unitImportance, sbjName, isStatic = unitInfo:get(unitID)
+	if isStatic then
+		unitImportance = unitImportance * staticAttackedBoost
+	end
 	local currentHealth, maxHealth, _, _, buildProgress = spGetUnitHealth(unitID)
 	-- currentHealth can be 0, also avoid skewing the score overly much
 	currentHealth = max(currentHealth, maxHealth / 16)
@@ -2112,7 +2114,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 		statsLogDeath(unitID, unitDefID, unitTeam)
 	end
 
-	local destroyedLocation, _, importance, destroyedName = unitInfo:get(unitID)
+	local destroyedLocation, _, importance, destroyedName, isStatic = unitInfo:get(unitID)
 	unitInfo:forget(unitID)
 	purgeEvents(__purgeSubject, { unitID = unitID })
 
@@ -2127,6 +2129,9 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 		return
 	end
 
+	if isStatic then
+		importance = importance * staticAttackedBoost
+	end
 	local destroyerLocation, _, _, destroyerName = unitInfo:get(attackerID)
 	local destroyedEvent = addEvent(attackerTeam, importance, destroyedLocation, nil, destroyedName, unitDestroyedEventType, unitID)
 	destroyedEvent:addObject(attackerID, destroyerLocation)
@@ -2158,7 +2163,10 @@ function widget:UnitTaken(unitID, _, _, newTeam)
 		return
 	end
 
-	local sbjLocation, _, importance, sbjName = unitInfo:get(unitID)
+	local sbjLocation, _, importance, sbjName, isStatic = unitInfo:get(unitID)
+	if isStatic then
+		importance = importance * staticAttackedBoost
+	end
 	local event = addEvent(newTeam, importance, sbjLocation, nil, sbjName, unitTakenEventType, unitID)
 	local capturerLocation =  unitInfo:get(captureController)
 	event:addObject(captureController, capturerLocation)

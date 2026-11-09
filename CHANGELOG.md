@@ -15,6 +15,7 @@
 - Orbits: once framed, the camera may slowly fly around the event to see past terrain, keep the map in view or take in nearby action, and drifts once on long holds
 - Fix camera crash when the event about to be shown lost its units
 - Fewer quick cuts: the shown event keeps absorbing similar nearby events, and distant cuts need a bigger event
+- Static units get their 1.5x boost only when damaged, destroyed or captured, not when built, so a lone mex build is less likely to steal the shot
 
 ## [0.2.1] - 2023-04-02
 
