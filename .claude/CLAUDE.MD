@@ -1,0 +1,1 @@
+Use comments sparingly, keep them terse and human readable.
