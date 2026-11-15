@@ -2024,10 +2024,7 @@ local function updateDisplay(event)
 	end
 	actorName = actorName or "unknown"
 
-	local sbjUnitCount = 0
-	for _, _ in pairs(event._sbjUnits) do
-		sbjUnitCount = sbjUnitCount + 1
-	end
+	local sbjUnitCount = event:subjectCount()
 	local sbjString = __pluralize(event.sbjName, sbjUnitCount)
 
 	if event.type == attackEventType then
