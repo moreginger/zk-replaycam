@@ -83,11 +83,6 @@ local spSetMouseCursor = Spring.SetMouseCursor
 local spTraceScreenRay = Spring.TraceScreenRay
 local spWorldToScreenCoords = Spring.WorldToScreenCoords
 
-local Chili
-local Window
-local ScrollPanel
-local screen0
-
 local CMD_ATTACK = CMD.ATTACK
 local CMD_ATTACK_MOVE = CMD.FIGHT
 local CMD_MOVE = CMD.MOVE
@@ -111,43 +106,8 @@ local userInactiveSecondsThreshold = 2
 
 -- GUI COMPONENTS
 
-local window_cpl, panel_cpl, commentary_cpl
-
-local function setupPanels()
-	window_cpl = Window:New {
-		parent = screen0,
-		dockable = true,
-		name = "Action Tracking",
-		color = { 0, 0, 0, 0 },
-		x = 100,
-		y = 200,
-		width = 500,
-		height = 50,
-		padding = { 0, 0, 0, 0 };
-		draggable = true,
-		resizable = true,
-		tweakDraggable = true,
-		tweakResizable = true,
-		minimizable = false,
-	}
-	panel_cpl = ScrollPanel:New {
-		parent = window_cpl,
-		width = "100%",
-		height = "100%",
-		padding = { 4, 4, 4, 4 },
-		scrollbarSize = 6,
-		horizontalScrollbar = false,
-	}
-	commentary_cpl = Chili.TextBox:New {
-		parent = panel_cpl,
-		width = "100%",
-		x = 0,
-		y = 0,
-		padding = { 4, 4, 4, 4 },
-		fontSize = 16,
-		text = "The quiet before the storm.",
-	}
-end
+-- Callout and ground markings for the shot (see OVERLAY)
+local overlay = { fights = {}, allyColor = {} }
 
 i18nPrefix = 'actiontrackingcamera_'
 options_path = 'Settings/Spectating/Action Tracking Camera'
@@ -164,14 +124,6 @@ options = {
 	show_commentary = {
 		type = 'bool',
 		value = true,
-		OnChange = function(self)
-			if self.value and not window_cpl then
-				setupPanels()
-			elseif not self.value and window_cpl then
-				window_cpl:Dispose()
-				window_cpl, panel_cpl, commentary_cpl = nil, nil, nil
-			end
-		end,
 	},
 	tracking_reticle = {
 		type = 'bool',
@@ -1264,6 +1216,469 @@ local display, initialCameraState, camera
 -- Event the camera is actually showing (updateDisplay may refuse to switch)
 local shownEvent
 
+-- OVERLAY
+-- A callout pointing at the shot, with what each side has destroyed in the fight there, and markings on
+-- the ground: a ring for a scene, an arrow for a move.
+
+overlay.fightRange, overlay.fightGapFrames = worldGridSize * 1.5, 20 * framesPerSecond
+-- Text size and arrow width, the first for a 1080 high view
+overlay.textSize, overlay.arrowWidth = 16, 36
+
+-- Text in a team's colour (colour code bytes can't be 0)
+function overlay.coloured(text, color)
+	return string.char(255, max(1, color[1] * 255), max(1, color[2] * 255), max(1, color[3] * 255)) .. text .. "\008"
+end
+
+function overlay.metal(amount)
+	amount = floor(amount / 10 + 0.5) * 10
+	return amount < 1000 and tostring(amount) or string.format("%d,%03d", floor(amount / 1000), amount % 1000)
+end
+
+-- Deaths close together with no long gap between them make a fight, scored by what each side has
+-- destroyed
+function overlay.addDeath(allyTeam, location, metal)
+	local x, z, fight = location[1], location[3], nil
+	for _, f in ipairs(overlay.fights) do
+		if length(f.x - x, f.z - z) <= overlay.fightRange then
+			fight = f
+		end
+	end
+	if not fight then
+		fight = { x = x, z = z, destroyed = {} }
+		overlay.fights[#overlay.fights + 1] = fight
+	end
+	fight.frame = gameFrame
+	fight.destroyed[allyTeam] = (fight.destroyed[allyTeam] or 0) + metal
+end
+
+-- Once a second: forget finished fights, find the one in shot and word the detail line
+function overlay.update()
+	local live, nearest, nearestDistance = {}, nil, overlay.fightRange * 1.5
+	local x, _, z = unpack(display.location)
+	for _, fight in ipairs(overlay.fights) do
+		if gameFrame - fight.frame < overlay.fightGapFrames then
+			live[#live + 1] = fight
+			local d = length(fight.x - x, fight.z - z)
+			if d < nearestDistance and not display.isWide then
+				nearest, nearestDistance = fight, d
+			end
+		end
+	end
+	overlay.fights, overlay.fight = live, nearest
+
+	local event, detail = shownEvent, nil
+	if event and event.type == sceneEventType then
+		detail = overlay.metal(event.meta.stake) .. " metal at stake"
+	elseif event and event.type == buildingEventType then
+		local unitID = next(event._sbjUnits)
+		local unitDefID = unitID and spGetUnitDefID(unitID)
+		if unitDefID then
+			local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
+			detail = string.format("%d%% of %s metal", floor((buildProgress or 0) * 100), overlay.metal(UnitDefs[unitDefID].metalCost))
+		end
+	end
+	overlay.detail = detail
+
+	-- How fast a move is closing on its target, for the time to arrive
+	local left = overlay.arrowTo and event.type == moveEventType and overlay.remaining()
+	if left and overlay.left then
+		overlay.closing = ((overlay.closing or overlay.left - left) + overlay.left - left) / 2
+	end
+	overlay.left = left
+end
+
+-- How far the moving units have left to go, and their slowest top speed (elmos/s)
+function overlay.remaining()
+	local xSum, zSum, n, speed = 0, 0, 0, huge
+	for unitID, location in pairs(overlay.subjects) do
+		local unitDefID = spGetUnitDefID(unitID)
+		if unitDefID then
+			xSum, zSum, n, speed = xSum + location[1], zSum + location[3], n + 1, min(speed, UnitDefs[unitDefID].speed)
+		end
+	end
+	if n > 0 then
+		return length(overlay.arrowTo[1] - xSum / n, overlay.arrowTo[2] - zSum / n), speed
+	end
+end
+
+-- A flat arrow on the ground from one point to another
+function overlay.arrow(x1, z1, x2, z2, color)
+	local dx, dz = x2 - x1, z2 - z1
+	local len, width = length(dx, dz), overlay.arrowWidth
+	local head = min(width * 3, len * 0.4)
+	if len < width then
+		return
+	end
+	dx, dz = dx / len, dz / len
+	local function vertex(along, across)
+		local x, z = x1 + dx * along - dz * across, z1 + dz * along + dx * across
+		gl.Vertex(x, max(0, spGetGroundHeight(x, z)) + 4, z)
+	end
+	-- One strip, so nothing overlaps: the stem, then out to the barbs and in to the tip
+	gl.Color(color[1], color[2], color[3], 0.6)
+	gl.BeginEnd(GL.TRIANGLE_STRIP, function()
+		local steps = math.ceil((len - head) / 48)
+		for i = 0, steps do
+			vertex((len - head) * i / steps, width / 2)
+			vertex((len - head) * i / steps, -width / 2)
+		end
+		local barb = min(width * 1.4, head * 0.5)
+		vertex(len - head, barb)
+		vertex(len - head, -barb)
+		vertex(len, 0)
+	end)
+end
+
+-- The shown units were given a new order: the arrow follows at once, the camera stays with the shot
+function overlay.redirect(unitID, params)
+	local target = #params == 1 and unitInfo:get(params[1]) or #params >= 3 and params
+	local x, _, z = spGetUnitPosition(unitID)
+	-- Small moves are mostly unit AI
+	if target and x and length(target[1] - x, target[3] - z) >= 256 then
+		overlay.arrowFrom, overlay.arrowTo = { x, z }, { target[1], target[3] }
+		overlay.left, overlay.closing = nil, nil
+	end
+end
+
+-- A unit the headline says is under attack has died: say so
+function overlay.kill(unitID, name, destroyerName, attackerTeam)
+	if not shownEvent or shownEvent.type ~= unitDamagedEventType or not overlay.subjects[unitID] then
+		return
+	end
+	overlay.killed = overlay.killed + 1
+	local killed, total, info = overlay.killed, overlay.total, teamInfo[attackerTeam]
+	overlay.headline = (killed < total and killed .. " of " .. total .. " " .. name .. "s" or (total > 1 and total .. " " .. name .. "s" or name))
+		.. " destroyed by " .. (destroyerName or "unknown") .. " of " .. overlay.coloured(info.name .. " (" .. info.allyTeamName .. ")", info.color)
+end
+
+-- Where on screen the callout's subject is: the middle of the units the headline names, or of a
+-- scene's ring. Given (tx, ty), where the pointer from there should end: the nearest edge of the
+-- ring, or the units with a gap to leave.
+function overlay.anchor(event, tx, ty)
+	if event.type == sceneEventType then
+		local x, y, z = unpack(event.location)
+		if not tx then
+			-- With how far the ring reaches across and up the screen
+			local ax, ay = spWorldToScreenCoords(x, y, z)
+			local across, up = 0, 0
+			for i = 1, 8 do
+				local sx, sy = spWorldToScreenCoords(x + scenes.radius * sin(i * pi / 4), y, z + scenes.radius * cos(i * pi / 4))
+				across, up = max(across, math.abs(sx - ax)), max(up, math.abs(sy - ay))
+			end
+			return ax, ay, across, up
+		end
+		local ax, ay, best = nil, nil, huge
+		for i = 1, 24 do
+			local angle = i * pi / 12
+			local sx, sy = spWorldToScreenCoords(x + scenes.radius * sin(angle), y, z + scenes.radius * cos(angle))
+			local d = length(sx - tx, sy - ty)
+			if d < best then
+				ax, ay, best = sx, sy, d
+			end
+		end
+		return ax, ay, 0
+	end
+	local xSum, ySum, zSum, n = 0, 0, 0, 0
+	for unitID, location in pairs(overlay.subjects) do
+		-- A dead unit stays where it was last seen
+		local x, y, z = spGetUnitPosition(unitID)
+		if x then
+			location[1], location[2], location[3] = x, y, z
+		end
+		xSum, ySum, zSum, n = xSum + location[1], ySum + location[2], zSum + location[3], n + 1
+	end
+	if n == 0 then
+		return
+	end
+	local ax, ay = spWorldToScreenCoords(xSum / n, ySum / n, zSum / n)
+	return ax, ay, tx and overlay.textSize * 1.8 or 0, 0
+end
+
+function overlay.drawWorld()
+	local event = shownEvent
+	if not event or not options.show_commentary.value then
+		return
+	end
+	local color = overlay.color
+	gl.DepthTest(true)
+	gl.LineWidth(3)
+	local from, to = overlay.arrowFrom, overlay.arrowTo
+	if from then
+		overlay.arrow(from[1], from[2], to[1], to[2], color)
+	elseif event.type == sceneEventType then
+		local x, y, z = unpack(event.location)
+		gl.Color(color[1], color[2], color[3], 0.7)
+		gl.DrawGroundCircle(x, y, z, scenes.radius, 48)
+	end
+	local aside = display.aside
+	if aside and not display.isWide and gameFrame - aside[3] < scenes.asideFrames then
+		gl.Color(1, 1, 1, 0.5)
+		gl.DrawGroundCircle(aside[1], spGetGroundHeight(aside[1], aside[2]), aside[2], scenes.radius * 0.6, 32)
+	end
+	gl.DepthTest(false)
+	gl.LineWidth(1)
+	gl.Color(1, 1, 1, 1)
+end
+
+-- The game's own windows on screen, as { left, bottom, right, top }, so callouts can keep off them
+function overlay.scanUI(vsx, vsy)
+	local windows = {}
+	-- Other widgets' windows can go away under us
+	pcall(function()
+		for _, window in ipairs(WG.Chili.Screen0.children) do
+			local x, y, w, h = window.x, window.y, window.width, window.height
+			-- Not the invisible full screen holders
+			if w > 20 and h > 20 and w * h < vsx * vsy * 0.4 then
+				windows[#windows + 1] = { x, vsy - y - h, x + w, vsy - y }
+			end
+		end
+	end)
+	return windows
+end
+
+-- Where to put a w by h callout for a subject at (ax, ay) on screen, clear of a ring reaching
+-- (across, up) from there if there is one. It sits off the
+-- subject on whichever side covers least, looked at afresh for each shot and once a second after
+-- that, and it only changes side for a clear gain.
+function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
+	local reach, margin = vsy * 0.06, vsy * 0.02
+	local xMax, yMax = max(10, vsx - w - 10), max(10, vsy - h - 10)
+	local function corner(side)
+		local bx, by
+		if side[3] then
+			-- Towards a corner of the screen, for when a ring leaves no room around it: side[3] is
+			-- how far in from the corner
+			bx, by = side[1] > 0 and xMax or 10, side[2] > 0 and yMax or 10
+			bx, by = bx + (ax - w / 2 - bx) * side[3], by + (ay - h / 2 - by) * side[3]
+		else
+			-- Diagonally, 3/4 of the way out each way clears a ring. Straight up or across goes
+			-- further out, and off centre so that one corner is clearly the nearest.
+			local diagonal = side[1] ~= 0 and side[2] ~= 0
+			local out = across > 0 and reach * 1.6 or reach
+			local dx = (diagonal and out + across * 0.75 or out * 1.4 + across) * side[1]
+			local dy = (diagonal and out + up * 0.75 or out * 1.4 + up) * side[2]
+			bx = side[1] > 0 and ax + dx or side[1] < 0 and ax + dx - w or ax - w * 0.3
+			by = side[2] > 0 and ay + dy or side[2] < 0 and ay + dy - h or ay - h * 0.3
+		end
+		return bound(bx, 10, xMax), bound(by, 10, yMax)
+	end
+	local fresh = overlay.placedFor ~= shownEvent
+	if fresh or gameFrame - overlay.placedFrame >= framesPerSecond then
+		-- Things worth not covering: the units in shot, the move arrow and any rings
+		local points = {}
+		local function avoid(x, z)
+			points[#points + 1] = { spWorldToScreenCoords(x, spGetGroundHeight(x, z), z) }
+		end
+		local trackInfo = display.tracking.head
+		while trackInfo do
+			avoid(trackInfo.location[1], trackInfo.location[3])
+			trackInfo = trackInfo.prev
+		end
+		local from, to = overlay.arrowFrom, overlay.arrowTo
+		for i = 0, from and 6 or -1 do
+			avoid(from[1] + (to[1] - from[1]) * i / 6, from[2] + (to[2] - from[2]) * i / 6)
+		end
+		local aside = display.aside
+		local rings = { shownEvent.type == sceneEventType and { shownEvent.location[1], shownEvent.location[3], scenes.radius } or nil,
+			aside and gameFrame - aside[3] < scenes.asideFrames and { aside[1], aside[2], scenes.radius * 0.6 } or nil }
+		for _, ring in pairs(rings) do
+			for i = 1, 8 do
+				avoid(ring[1] + ring[3] * sin(i * pi / 4), ring[2] + ring[3] * cos(i * pi / 4))
+			end
+		end
+
+		-- Which way the rest of the action lies from the subject
+		local tx, ty = 0, 0
+		for _, point in ipairs(points) do
+			tx, ty = tx + point[1] - ax, ty + point[2] - ay
+		end
+		local toward = max(1, length(tx, ty))
+
+		-- Beside or above a ring is fine, but a pointer to units reads best on the diagonal
+		local sides = { { 1, 1 }, { -1, 1 }, { 1, -1 }, { -1, -1 } }
+		if across > 0 then
+			for _, side in ipairs({ { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 }, { 1, 1, 0 }, { -1, 1, 0 }, { 1, -1, 0 }, { -1, -1, 0 } }) do
+				sides[#sides + 1] = side
+			end
+		end
+		if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
+			overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
+		end
+		-- What a callout at (bx, by) costs: worst is landing on the subject or inside its ring, then
+		-- covering the game's own windows, then being far away
+		local function landing(bx, by)
+			local nx, ny = bound(ax, bx, bx + w) - ax, bound(ay, by, by + h) - ay
+			local onSubject = nx == 0 and ny == 0
+			if across > 0 then
+				-- With some room around the ring
+				onSubject = (nx / (across + reach)) ^ 2 + (ny / (up + reach)) ^ 2 < 1
+			end
+			local cost = (onSubject and 50 or 0) + 3 * length(nx, ny) / vsy
+			for _, window in ipairs(overlay.ui) do
+				if bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
+					cost = cost + 20
+				end
+			end
+			return cost
+		end
+		local best, bestCost, currentCost
+		for _, side in ipairs(sides) do
+			-- Costed where it would end up once kept on screen. From a corner, come in as far as stays
+			-- clear.
+			for step = 1, side[3] and 9 or 0 do
+				side[3] = step / 10
+				if landing(corner(side)) >= 20 then
+					side[3] = (step - 1) / 10
+					break
+				end
+			end
+			local bx, by = corner(side)
+			local cost = landing(bx, by)
+			for _, point in ipairs(points) do
+				if point[1] > bx - margin and point[1] < bx + w + margin and point[2] > by - margin and point[2] < by + h + margin then
+					cost = cost + 1
+				end
+			end
+			-- Lean away from the action, and stay on the side already in use
+			cost = cost + 0.5 * (side[1] * tx + side[2] * ty) / toward / length(side[1], side[2])
+			if overlay.side and side[1] == overlay.side[1] and side[2] == overlay.side[2] and not side[3] == not overlay.side[3] then
+				cost = cost - 0.1
+				-- The same side as now, with how far in from a corner brought up to date
+				currentCost, overlay.side = cost, side
+			end
+			if not best or cost < bestCost then
+				best, bestCost = side, cost
+			end
+		end
+		if fresh or not currentCost or currentCost >= bestCost + 1.5 then
+			overlay.side = best
+		end
+		overlay.placedFor, overlay.placedFrame = shownEvent, gameFrame
+	end
+
+	-- The callout floats: it stays where it is on screen while its place off the subject is within
+	-- some slack, so the pointer swings and stretches as units move, and is drawn back in beyond that
+	local bx, by = corner(overlay.side)
+	local box, slack = overlay.box, reach * 0.6
+	if fresh or not box then
+		box = { bx, by }
+	else
+		local d = length(bx - box[1], by - box[2])
+		if d > slack then
+			local pull = 0.1 * (1 - slack / d)
+			box = { box[1] + (bx - box[1]) * pull, box[2] + (by - box[2]) * pull }
+		end
+	end
+	overlay.box = box
+	return bound(box[1], 10, xMax), bound(box[2], 10, yMax)
+end
+
+function overlay.draw()
+	local headline = overlay.headline
+	if not shownEvent or not headline or display.isWide or not options.show_commentary.value then
+		return
+	end
+	local vsx, vsy = spGetViewGeometry()
+	local size = overlay.textSize * vsy / 1080
+	local pad, row, color = size * 0.6, size * 1.5, overlay.color
+	local detail, small = overlay.detail, size * 0.85
+	if overlay.left then
+		-- At the speed they have been closing, or flat out until that is known
+		local left, speed = overlay.remaining()
+		if left and left > 50 then
+			speed = overlay.closing and overlay.closing > speed * 0.2 and overlay.closing or speed
+			detail = string.format("arrives in %ds", math.ceil(left / max(1, speed)))
+		end
+	end
+
+	-- The fight's tally: what each side has destroyed, and a bar split the same way
+	local fight, a, b, tallyRows = overlay.fight, nil, nil, 0
+	if fight and next(fight.destroyed) then
+		for allyTeam in pairs(overlay.allyColor) do
+			a, b = a or allyTeam, a and allyTeam
+			tallyRows = tallyRows + 1
+		end
+		tallyRows = tallyRows == 2 and 1 or 0
+		if tallyRows == 1 and a > b then
+			a, b = b, a
+		end
+		if tallyRows == 0 then
+			-- More than two sides: list them
+			local parts = {}
+			for allyTeam, destroyed in pairs(fight.destroyed) do
+				parts[#parts + 1] = overlay.coloured(scenes.names[allyTeam] .. " " .. overlay.metal(destroyed), overlay.allyColor[allyTeam])
+			end
+			detail = (detail and detail .. "  |  " or "") .. "destroyed: " .. table.concat(parts, "  ")
+		end
+	end
+	local left = tallyRows == 1 and overlay.coloured(scenes.names[a] .. " " .. overlay.metal(fight.destroyed[a] or 0), overlay.allyColor[a])
+	local right = tallyRows == 1 and overlay.coloured(overlay.metal(fight.destroyed[b] or 0) .. " " .. scenes.names[b], overlay.allyColor[b])
+
+	local w = gl.GetTextWidth(headline) * size
+	if detail then
+		w = max(w, gl.GetTextWidth(detail) * small)
+	end
+	if left then
+		w = max(w, (gl.GetTextWidth(left) + gl.GetTextWidth(right)) * small + size * 2)
+	end
+	w = w + pad * 2
+	local h = row * (1 + (detail and 1 or 0) + tallyRows) + pad + tallyRows * pad
+
+	-- Placed off the subject itself, which may be well away from the middle of the shot
+	local ax, ay, across, up = overlay.anchor(shownEvent)
+	if not ax then
+		ax, ay, across, up = spWorldToScreenCoords(unpack(display.location))
+		across, up = 0, 0
+	end
+	local bx, by = overlay.place(ax, ay, w, h, vsx, vsy, across, up)
+
+	gl.Color(0, 0, 0, 0.55)
+	gl.Rect(bx, by, bx + w, by + h)
+	-- The edge facing the subject is coloured, and the pointer runs out of the middle of its end to
+	-- stop short of the units
+	local t = max(2, size * 0.2)
+	local onLeft, below = bx + w / 2 < ax, by + h / 2 < ay
+	local ex, cy = onLeft and bx + w - t or bx, below and by + h or by
+	local cx, my = ex + t / 2, below and cy - t / 2 or cy + t / 2
+	local px, py, gap = overlay.anchor(shownEvent, cx, cy)
+	local reach = px and length(px - cx, py - my)
+	gl.Color(color[1], color[2], color[3], 1)
+	gl.Rect(ex, by, ex + t, by + h)
+	if px and reach > gap * 1.5 then
+		-- Half the thickness, across the pointer
+		local nx, ny = -(py - my) / reach * t / 2, (px - cx) / reach * t / 2
+		px, py = px + (cx - px) * gap / reach, py + (my - py) * gap / reach
+		gl.BeginEnd(GL.QUADS, function()
+			gl.Vertex(cx + nx, my + ny)
+			gl.Vertex(cx - nx, my - ny)
+			gl.Vertex(px - nx, py - ny)
+			gl.Vertex(px + nx, py + ny)
+		end)
+	end
+	gl.Color(1, 1, 1, 1)
+
+	local ty = by + h - pad * 0.5 - size
+	gl.Text(headline, bx + pad, ty, size, "o")
+	if detail then
+		ty = ty - row
+		gl.Text(detail, bx + pad, ty, small, "o")
+	end
+	if left then
+		ty = ty - row
+		gl.Text(left, bx + pad, ty, small, "o")
+		gl.Text(right, bx + w - pad, ty, small, "or")
+		-- Each side's share of the bar is what it has destroyed
+		local split = bx + pad + (w - pad * 2) * (fight.destroyed[a] or 0) / ((fight.destroyed[a] or 0) + (fight.destroyed[b] or 0))
+		local ca, cb = overlay.allyColor[a], overlay.allyColor[b]
+		gl.Color(ca[1], ca[2], ca[3], 0.9)
+		gl.Rect(bx + pad, ty - pad, split, ty - pad * 0.4)
+		gl.Color(cb[1], cb[2], cb[3], 0.9)
+		gl.Rect(split, ty - pad, bx + w - pad, ty - pad * 0.4)
+	end
+	gl.LineWidth(1)
+	gl.Color(1, 1, 1, 1)
+end
+
 -- STATS LOGGING (see scripts/generate-stats.py)
 -- Ground-truth lines are logged straight from callins, independently of event scoring,
 -- so that different camera algorithms can be compared on the same replay.
@@ -1642,7 +2057,8 @@ local function updateDisplay(event)
 
 	local actorName
 	for actorID, _ in pairs(event.actors) do
-		actorName = (actorName and "multiple") or teamInfo[actorID].name .. " (" .. teamInfo[actorID].allyTeamName .. ")"
+		local info = teamInfo[actorID]
+		actorName = (actorName and "multiple") or overlay.coloured(info.name .. " (" .. info.allyTeamName .. ")", info.color)
 	end
 	actorName = actorName or "unknown"
 
@@ -1660,7 +2076,6 @@ local function updateDisplay(event)
 		commentary = event.meta.commentary
 	elseif event.type == lullEventType then
 		camAngle = lullConfig.pitch
-		commentary = event.meta and event.meta.commentary or "The dust settles"
 		isWide, fill = true, lullConfig.fill
 	elseif event.type == unitBuiltEventType then
 		commentary = sbjString .. " built by " .. actorName
@@ -1683,11 +2098,20 @@ local function updateDisplay(event)
 
 	trackEvent(event)
 
-	if options.show_commentary.value then
-		commentary_cpl:SetText(commentary)
-	end
-
 	shownEvent = event
+	local side, actor = event.meta and event.meta.side, next(event.actors)
+	-- The event drops units that are given new orders, the overlay keeps pointing at them
+	overlay.headline, overlay.subjects = commentary, {}
+	for unitID, location in pairs(event._sbjUnits) do
+		overlay.subjects[unitID] = { unpack(location) }
+	end
+	overlay.total, overlay.killed = sbjUnitCount, 0
+	overlay.left, overlay.closing = nil, nil
+	local isOrder = event.type == moveEventType or event.type == attackEventType
+	overlay.arrowFrom = isOrder and event.meta.origin
+	overlay.arrowTo = isOrder and { event.location[1], event.location[3] }
+	overlay.color = side and overlay.allyColor[side] or actor and teamInfo[actor].color or { 1, 1, 1 }
+	overlay.update()
 	display.shotFrame = gameFrame
 	if STATS then
 		local x, _, z = unpack(event.location)
@@ -1716,8 +2140,8 @@ function lull.addDamage(unitID, unitDefID, damage)
 end
 
 -- Add a lull event framing grid cells with notable activity, or the whole map if there are none
--- (e.g. at the start of the game). commentary is optional.
-function lull.addEvent(importance, commentary)
+-- (e.g. at the start of the game)
+function lull.addEvent(importance)
 	local cfg = lullConfig
 	local xMin, zMin, xMax, zMax = huge, huge, -huge, -huge
 	for gx = 1, mapGridX do
@@ -1738,8 +2162,7 @@ function lull.addEvent(importance, commentary)
 	x, z = (xMin + xMax) / 2, (zMin + zMax) / 2
 
 	local y = spGetGroundHeight(x, z)
-	local meta = commentary and { commentary = commentary }
-	local event = addEvent(nil, importance, { x, y, z }, meta, lullEventType, lullEventType, nil, nil, ADD_EVENT_OPTS_NO_GRID_NO_MERGE)
+	local event = addEvent(nil, importance, { x, y, z }, nil, lullEventType, lullEventType, nil, nil, ADD_EVENT_OPTS_NO_GRID_NO_MERGE)
 	-- Placeholder units at opposite corners give the framing
 	event:addSubject(-1000 - 2 * event.id, { xMin, y, zMin })
 	event:addSubject(-1001 - 2 * event.id, { xMax, y, zMax })
@@ -1906,9 +2329,11 @@ function scenes.update()
 			added[#added + 1] = scene
 			-- Share of the stake that is still on its way
 			local soon = 1 - stakeNow[cell] / stake[cell]
-			local commentary = (cfg.names[owner[cell]] or "Someone") .. (soon > 0.5 and " has trouble incoming" or " under pressure")
+			local side = owner[cell]
+			local commentary = (side and overlay.coloured(cfg.names[side], overlay.allyColor[side]) or "Someone")
+				.. (soon > 0.5 and " has trouble incoming" or " under pressure")
 			local event = addEvent(nil, scene.rise, { x, spGetGroundHeight(x, z), z }, nil, sceneEventType, sceneEventType, nil, nil, cfg.eventOpts)
-			event.meta, event._sbjUnits = { commentary = commentary }, subjects
+			event.meta, event._sbjUnits = { commentary = commentary, side = side, stake = max(scene.rise, stake[cell]) }, subjects
 			if event == shownEvent then
 				trackEvent(event, true)
 			elseif scene.rise >= cfg.asideStake and not display.isWide and length(x - wx, z - wz) <= cfg.asideRange
@@ -1928,16 +2353,11 @@ function widget:Shutdown()
 end
 
 function widget:Initialize()
-	if not WG.Chili or not (spIsReplay() or spGetSpectatingState()) then
+	if not (spIsReplay() or spGetSpectatingState()) then
 		spEcho("DEACTIVATING " .. widget:GetInfo().name .. " as not spec")
 		widgetHandler:RemoveWidget()
 		return
 	end
-
-	Chili = WG.Chili
-	Window = Chili.Window
-	ScrollPanel = Chili.ScrollPanel
-	screen0 = Chili.Screen0
 
 	-- Init teams.
     local gaiaTeamID = spGetGaiaTeamID()
@@ -1969,6 +2389,9 @@ function widget:Initialize()
                 end
 			end
 			scenes.names[allyTeam] = allyTeamName
+			if teamID ~= gaiaTeamID then
+				overlay.allyColor[allyTeam] = overlay.allyColor[allyTeam] or { spGetTeamColor(teamID) }
+			end
 			teamInfo[teamID] = {
 				allyTeam = allyTeam,
 				allyTeamName = allyTeamName,
@@ -1995,9 +2418,6 @@ function widget:Initialize()
 		end
 	end
 
-	if options.show_commentary then
-		setupPanels()
-	end
 
 	initialCameraState = spGetCameraState()
 
@@ -2016,7 +2436,7 @@ function widget:Initialize()
 		statsLogGame()
 	end
 	-- Open on a wide shot of the map
-	updateDisplay(lull.addEvent(lullConfig.minPeak, "Let's get an overview of the battlefield"))
+	updateDisplay(lull.addEvent(lullConfig.minPeak))
 	camera = initCamera(cx, cy, cz)
 end
 
@@ -2077,6 +2497,7 @@ function widget:GameFrame(frame)
 	end
 
 	lull.update()
+	overlay.update()
 end
 
 local function userAction()
@@ -2135,13 +2556,17 @@ local moveCommands = {
 	[CMD_RAW_MOVE] = true,
 }
 
-function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, _, _)
+function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, _)
     if not unitID or not unitDefID or not unitTeam or not cmdID or not cmdParams then
 		return
 	end
 
 	if not moveCommands[cmdID] and cmdID ~= CMD_ATTACK then
 		return
+	end
+
+	if overlay.arrowFrom and overlay.subjects[unitID] and not (cmdOpts and cmdOpts.shift) then
+		overlay.redirect(unitID, cmdParams)
 	end
 
 	local unitDef = UnitDefs[unitDefID]
@@ -2175,7 +2600,8 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, _, _)
 			return
 		end
 
-		local meta = { commandRange = worldGridSize / 2, importance = importance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
+		local meta = { commandRange = worldGridSize / 2, importance = importance, updateUntilFrame = gameFrame + framesPerSecond * 8,
+			origin = { sbjLocation[1], sbjLocation[3] } }
 		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, moveEventType, unitID, _updateCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
@@ -2196,7 +2622,8 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, _, _)
 		local sbjLocation, _, _, sbjName, _, weaponImportance, weaponRange = unitInfo:get(unitID)
 		-- HACK: Silo is weird.
 		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
-		local meta = { commandRange = weaponRange, importance = weaponImportance, updateUntilFrame = gameFrame + framesPerSecond * 8 }
+		local meta = { commandRange = weaponRange, importance = weaponImportance, updateUntilFrame = gameFrame + framesPerSecond * 8,
+			origin = { sbjLocation[1], sbjLocation[3] } }
 		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, attackEventType, unitID, _updateCommandEvent)
 		-- HACK: Event location should be the target location, not the subject location
 		event.location = trgLocation
@@ -2236,10 +2663,13 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 		return
 	end
 
+	local info = unitInfo.cache[unitID]
+	if info and attackerTeam then
+		info.hitBy, info.hitFrame = attackerTeam, gameFrame
+	end
 	if paralyzer then
 		-- A hit that stuns reports next to no damage, so count each stun once as the whole unit.
 		local health, maxHealth, paralysis = spGetUnitHealth(unitID)
-		local info = unitInfo.cache[unitID]
 		if info and health and paralysis >= health and gameFrame - (info.stunFrame or -stunFrames) >= stunFrames then
 			info.stunFrame, damage = gameFrame, max(damage, maxHealth)
 		end
@@ -2281,6 +2711,17 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 	end
 
 	local destroyedLocation, _, importance, destroyedName, isStatic = unitInfo:get(unitID)
+	-- Who gets the credit in the overlay. Fire can kill after whoever lit it has died, so with no
+	-- attacker a unit that died of damage goes to the side that last hit it.
+	local info, unitDef = unitInfo.cache[unitID], unitDefID and UnitDefs[unitDefID]
+	local health, _, _, _, buildProgress = spGetUnitHealth(unitID)
+	local killerTeam = attackerTeam or info and info.hitBy and (health or 0) <= 0
+		and gameFrame - info.hitFrame < overlay.fightGapFrames and info.hitBy
+	if killerTeam and unitTeam and destroyedLocation and unitDef and not unitDef.customParams.dontcount
+	    and teamInfo[killerTeam].allyTeam ~= teamInfo[unitTeam].allyTeam then
+		-- A unit still being built is worth what had gone into it
+		overlay.addDeath(teamInfo[killerTeam].allyTeam, destroyedLocation, unitDef.metalCost * (buildProgress or 1))
+	end
 	unitInfo:forget(unitID)
 	purgeEvents(__purgeSubject, { unitID = unitID })
 
@@ -2289,7 +2730,6 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 		return
 	end
 
-	local unitDef = UnitDefs[unitDefID]
 	if unitDef.customParams.dontcount then
 		-- Ignore dontcount units e.g. terraunit
 		return
@@ -2299,6 +2739,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 		importance = importance * staticAttackedBoost
 	end
 	local destroyerLocation, _, _, destroyerName = unitInfo:get(attackerID)
+	overlay.kill(unitID, destroyedName, destroyerName, attackerTeam)
 	local destroyedEvent = addEvent(attackerTeam, importance, destroyedLocation, nil, destroyedName, unitDestroyedEventType, unitID)
 	destroyedEvent:addObject(attackerID, destroyerLocation)
 	local destroyerEvent = addEvent(unitTeam, importance, destroyerLocation, nil, destroyerName, unitDestroyerEventType, attackerID)
@@ -2530,7 +2971,12 @@ function widget:Update(dt)
 	updateCamera(dt, options.user_interrupts_tracking.value and userInactiveSeconds < userInactiveSecondsThreshold)
 end
 
+function widget:DrawWorldPreUnit()
+	overlay.drawWorld()
+end
+
 function widget:DrawScreen()
+	overlay.draw()
 	if not options.tracking_reticle.value or not camera.reticle then
 		return
 	end

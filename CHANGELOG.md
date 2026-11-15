@@ -20,6 +20,7 @@
 - `scripts/run-replay.sh` plays replays unattended with the headless engine, and `scripts/run-harness.py` runs the widget against a stubbed game
 - EMP stuns are scored: a hit that stuns reports almost no damage, so each stun now counts once as the whole unit, at the half weight EMP already had. The stats ground truth counts them the same way
 - A big scene rising close to the shot is taken into frame for a few seconds, without cutting to it
+- Overlay replaces the commentary box. A callout points at the shot, with players and sides in their colours, the metal at stake in a scene or the progress and cost of a build, and what each side has destroyed in the fight there, with a bar split the same way. On the ground, a scene gets a ring and a tracked move or attack order gets an arrow to its target, with a move's time to arrive counting down. The callout sits on whichever side of the subject covers least, keeping off the game's own windows, and wide lull shots carry none
 - Stats ignore deaths with no damage nearby (commander upgrades, reclaim), which the camera could never have shown
 - Units that exist when the widget starts are picked up straight away
 - Static units get their 1.5x boost only when damaged, destroyed or captured, not when built, so a lone mex build is less likely to steal the shot

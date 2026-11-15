@@ -27,11 +27,18 @@ UnitDefs = {
 WeaponDefs = { { customParams = { stats_damage = '100' }, salvoSize = 1, projectiles = 1, reload = 1, impactOnly = true, damageAreaOfEffect = 0, range = 300 } }
 Game = { mapSizeX = 8192, mapSizeZ = 8192, mapName = 'Test' }
 GL = { FILL = 1, FRONT_AND_BACK = 2, LINE = 3 }
-gl = setmetatable({}, { __index = function() return function() end end })
+gl = setmetatable({
+	BeginEnd = function(_, draw) draw() end,
+	GetTextWidth = function(text) return #text * 0.5 end,
+	-- Catch what the engine would reject
+	Text = function(text, x, y, size) assert(type(text) == "string" and x + y + size) end,
+	Rect = function(a, b, c, d) assert(a + b + c + d) end,
+	Vertex = function(x, y, z) assert(x + y + (z or 0)) end,
+	Color = function(r, g, b, a) assert(r + g + b + (a or 1)) end,
+}, { __index = function() return function() end end })
 CMD = { ATTACK = 20, FIGHT = 16, MOVE = 10 }
 VFS = { Include = function() return { RAW_MOVE = 31109 } end }
-local chiliObj = { New = function(self, o) return setmetatable(o or {}, { __index = { SetText = function() end, Dispose = function() end } }) end }
-WG = { Chili = { Window = chiliObj, ScrollPanel = chiliObj, TextBox = chiliObj, Screen0 = {} } }
+WG = {}
 widgetHandler = { RemoveWidget = function() error('widget removed') end }
 widget = {}
 Spring = setmetatable({
@@ -144,6 +151,8 @@ for f = 1, 90 * 30 do
 		slowest, total, ticks = math.max(slowest, t), total + t, ticks + 1
 	end
 	widget:Update(1 / 30)
+	widget:DrawWorldPreUnit()
+	widget:DrawScreen()
 	for i = before + 1, #echoes do
 		local line = echoes[i][2]
 		if line:find('^rc%-scene') then
