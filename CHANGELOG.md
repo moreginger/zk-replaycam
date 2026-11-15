@@ -19,6 +19,7 @@
 - `setup` and scene metrics in `scripts/generate-stats.py`: was the camera, or a scene event, on a fight's opening spot before it started
 - `scripts/run-replay.sh` plays replays unattended with the headless engine, and `scripts/run-harness.py` runs the widget against a stubbed game
 - EMP stuns are scored: a hit that stuns reports almost no damage, so each stun now counts once as the whole unit, at the half weight EMP already had. The stats ground truth counts them the same way
+- A big scene rising close to the shot is taken into frame for a few seconds, without cutting to it
 - Stats ignore deaths with no damage nearby (commander upgrades, reclaim), which the camera could never have shown
 - Units that exist when the widget starts are picked up straight away
 - Static units get their 1.5x boost only when damaged, destroyed or captured, not when built, so a lone mex build is less likely to steal the shot

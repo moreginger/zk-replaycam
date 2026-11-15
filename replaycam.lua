@@ -1217,6 +1217,8 @@ local scenes = {
 	maxScenes = 2, separation = 3,
 	-- Frame the units this close to the cell centre
 	radius = worldGridSize * 0.75,
+	-- A scene this big and this close to the shot is taken into frame for a few seconds
+	asideStake = 600, asideRange = worldGridSize * 2.5, asideFrames = 3 * framesPerSecond,
 	eventOpts = { noGrid = true, mergeRange = worldGridSize * 1.5 },
 	-- Average stake by cell, and ally team names
 	baseline = {}, names = {},
@@ -1909,6 +1911,10 @@ function scenes.update()
 			event.meta, event._sbjUnits = { commentary = commentary }, subjects
 			if event == shownEvent then
 				trackEvent(event, true)
+			elseif scene.rise >= cfg.asideStake and not display.isWide and length(x - wx, z - wz) <= cfg.asideRange
+			    and (not display.aside or display.aside[3] < gameFrame) then
+				-- Scenes come biggest first, so this is the best one this second
+				display.aside = { x, z, gameFrame }
 			end
 			if STATS then
 				spEcho(string.format('rc-scene,%.0f,%.0f,%.0f,%.2f', x, z, scene.rise, soon))
@@ -2415,6 +2421,11 @@ local function updateCamera(dt, userCameraOverride)
 	local cy, sy = cos(c.yaw), sin(c.yaw)
 	local half = display.diag / (2 * sqrt(2))
 	local aMin, aMax, bMin, bMax = -half, half, -half, half
+	local aside = display.aside
+	if aside and not display.isWide and gameFrame - aside[3] < scenes.asideFrames
+	    and length(aside[1] - ex, aside[2] - ez) <= scenes.asideRange then
+		points[#points + 1] = aside
+	end
 	for _, point in ipairs(points) do
 		local dx, dz = point[1] - ex, point[2] - ez
 		local a, b = dz * sy - dx * cy, dx * sy + dz * cy
