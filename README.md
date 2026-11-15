@@ -89,6 +89,18 @@ python3 scripts/generate-stats.py run.txt -o run.json
 - The headless view is square and tiny (8x8 pixels), so framing numbers differ from a real session. Compare headless runs with each other only.
 - The map and game version of the replay must already be installed (watch any replay of them in Zero-K once).
 
+To grade a change, `scripts/run-replays.sh` plays every replay in `replays/` two at a time and compares each with an earlier run:
+
+```bash
+scripts/run-replays.sh baseline            # before the change: writes runs/<map>-baseline.json
+scripts/run-replays.sh mychange baseline   # after it: writes runs/<map>-mychange.json and compares
+```
+
+- Close Zero-K first, or there may not be enough memory for two engines.
+- `replays/` and `runs/` are not tracked. Replays can be downloaded from a battle's page on zero-k.info ("Manual download"); short games with a lot going on work best.
+- Runs of the same widget are not always identical: the camera works in real time, so one replay may differ slightly between runs. Treat small differences on a single replay as noise.
+- For a change that should not alter what is shown, compare the `rc-shown` lines of the two logs in `runs/logs/`.
+
 ## Testing offline
 
 `scripts/run-harness.py` runs the widget against a stubbed game, without Zero-K: one side sends raiders or bombers at the other's base. It catches load and runtime errors, and reports when scene events fire, what is shown and the cost per game frame. It can't judge how the camera looks.

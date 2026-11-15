@@ -95,8 +95,6 @@ local gameFrame = 0
 
 -- Must ship with false
 local DEBUG = false
-local LOG_ERROR, LOG_DEBUG = 1, 2
-local logging = DEBUG and LOG_DEBUG or LOG_ERROR
 -- Emit machine-readable "rc-*" lines for scripts/generate-stats.py. Must ship with false (or DEBUG).
 local STATS = DEBUG
 local updateIntervalFrames = framesPerSecond
@@ -644,9 +642,6 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	local location = getUnitLocation(unitID)
 	local velocity = getUnitVelocity(unitID)
 	if not location or not velocity then
-		if logging >= LOG_DEBUG then
-			spEcho("ERROR! UnitInfoCache:_updatePosition failed", unitID, cacheObject.name)
-		end
 		return false
 	end
 
@@ -800,7 +795,6 @@ function EventStatistics:new(o, types)
 	setmetatable(o, self)
 	self.__index = self
 
-	o._types = types
 	for type, _ in pairs(types) do
 		o[type] = { 0, 0 }
 	end
@@ -818,12 +812,6 @@ function EventStatistics:logEvent(type, importance)
 	self[type][2] = meanImportance
 end
 
--- Return mean importance
-function EventStatistics:getMean(type)
-	local mean = self[type][2]
-	return (mean > 0) and mean or nil
-end
-
 -- Return percentile in unit range
 function EventStatistics:getPercentile(type, importance)
 	local meanImportance = self[type][2]
@@ -833,13 +821,6 @@ function EventStatistics:getPercentile(type, importance)
 	return 1 - exp(-m * importance)
 end
 
-function EventStatistics:summary()
-	local summary = {}
-	for type, _ in pairs(self._types) do
-		summary[#summary+1] = type .. ': ' .. (self:getMean(type) or 'nil')
-	end
-	return table.concat(summary, ', ')
-end
 
 -- WORLD INFO
 
@@ -1002,9 +983,6 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 	end
 
 	if event then
-		if logging >= LOG_DEBUG then
-			spEcho('merging events', type)
-		end
 		if STATS and event == mie then
 			spEcho(string.format('rc-extend,%d,%s', event.id, type))
 		end
@@ -1025,9 +1003,6 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 			event:addSubject(unitID, location)
 		end
 	else
-		if logging == LOG_DEBUG then
-			spEcho('event', type, sbjName, importance, location[1], location[3])
-		end
 		lastEventId = lastEventId + 1
 		event = Event:new({
 			actorCount = 1,
@@ -1224,6 +1199,12 @@ overlay.fightRange, overlay.fightGapFrames = worldGridSize * 1.5, 20 * framesPer
 -- Text size and arrow width, the first for a 1080 high view
 overlay.textSize, overlay.arrowWidth = 16, 36
 
+-- A player and their side, in the player's colour
+function overlay.player(teamID)
+	local info = teamInfo[teamID]
+	return overlay.coloured(info.name .. " (" .. info.allyTeamName .. ")", info.color)
+end
+
 -- Text in a team's colour (colour code bytes can't be 0)
 function overlay.coloured(text, color)
 	return string.char(255, max(1, color[1] * 255), max(1, color[2] * 255), max(1, color[3] * 255)) .. text .. "\008"
@@ -1360,9 +1341,9 @@ function overlay.kill(unitID, name, destroyerName, attackerTeam)
 		return
 	end
 	overlay.killed = overlay.killed + 1
-	local killed, total, info = overlay.killed, overlay.total, teamInfo[attackerTeam]
-	overlay.headline = (killed < total and killed .. " of " .. total .. " " .. name .. "s" or (total > 1 and total .. " " .. name .. "s" or name))
-		.. " destroyed by " .. (destroyerName or "unknown") .. " of " .. overlay.coloured(info.name .. " (" .. info.allyTeamName .. ")", info.color)
+	local killed, total = overlay.killed, overlay.total
+	overlay.headline = (killed < total and killed .. " of " .. total .. " " .. name .. "s" or total > 1 and total .. " " .. name .. "s" or name)
+		.. " destroyed by " .. (destroyerName or "unknown") .. " of " .. overlay.player(attackerTeam)
 end
 
 function overlay.drawWorld()
@@ -1383,7 +1364,8 @@ function overlay.drawWorld()
 	end
 	local aside = display.aside
 	if aside and not display.isWide and gameFrame - aside[3] < scenes.asideFrames then
-		gl.Color(1, 1, 1, 0.5)
+		local sideColor = overlay.allyColor[aside[4].side] or { 1, 1, 1 }
+		gl.Color(sideColor[1], sideColor[2], sideColor[3], 0.5)
 		gl.DrawGroundCircle(aside[1], spGetGroundHeight(aside[1], aside[2]), aside[2], scenes.radius * 0.6, 32)
 	end
 	gl.DepthTest(false)
@@ -1636,6 +1618,17 @@ function overlay.draw()
 		gl.Rect(bx + pad, ty - pad, split, ty - pad * 0.4)
 		gl.Color(cb[1], cb[2], cb[3], 0.9)
 		gl.Rect(split, ty - pad, bx + w - pad, ty - pad * 0.4)
+	end
+	-- A nearby scene the shot has widened to take in: say what its ring is, above it
+	local aside = display.aside
+	if aside and gameFrame - aside[3] < scenes.asideFrames then
+		local topX, topY = 0, -huge
+		for _, point in ipairs(overlay.ring(aside[1], aside[2], scenes.radius * 0.6, 8)) do
+			if point[2] > topY then
+				topX, topY = point[1], point[2]
+			end
+		end
+		gl.Text(aside[4].commentary .. ": " .. overlay.metal(aside[4].stake) .. " at stake", topX, topY + small * 0.5, small, "oc")
 	end
 	gl.LineWidth(1)
 	gl.Color(1, 1, 1, 1)
@@ -2019,8 +2012,7 @@ local function updateDisplay(event)
 
 	local actorName
 	for actorID, _ in pairs(event.actors) do
-		local info = teamInfo[actorID]
-		actorName = (actorName and "multiple") or overlay.coloured(info.name .. " (" .. info.allyTeamName .. ")", info.color)
+		actorName = (actorName and "multiple") or overlay.player(actorID)
 	end
 	actorName = actorName or "unknown"
 
@@ -2298,7 +2290,7 @@ function scenes.update()
 			elseif scene.rise >= cfg.asideStake and not display.isWide and length(x - wx, z - wz) <= cfg.asideRange
 			    and (not display.aside or display.aside[3] < gameFrame) then
 				-- Scenes come biggest first, so this is the best one this second
-				display.aside = { x, z, gameFrame }
+				display.aside = { x, z, gameFrame, event.meta }
 			end
 			if STATS then
 				spEcho(string.format('rc-scene,%.0f,%.0f,%.0f,%.2f', x, z, scene.rise, soon))
@@ -2444,9 +2436,6 @@ function widget:GameFrame(frame)
 		end
 
 		mie = pendingMie
-		if logging >= LOG_DEBUG then
-			spEcho('mie', mie.type, mie.sbjName, mie.importance, mie.started, _getEventPercentile(gameFrame, mie))
-		end
 		updateDisplay(mie);
 		purgeEvents(__purgeExcludes, { excluder = mie })
 		-- Picked event should stop changing itself
@@ -2739,10 +2728,6 @@ function widget:UnitTaken(unitID, _, _, newTeam)
 end
 
 local function updateCamera(dt, userCameraOverride)
-	if logging >= LOG_DEBUG and dt > 0.05 then
-		spEcho('slow camera update', dt)
-	end
-
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local points = {}
 	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
