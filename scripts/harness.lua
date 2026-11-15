@@ -14,15 +14,15 @@ string.format = function(f, ...)  -- 5.4 is strict about %d with floats
 	return realFormat(f, unpack(a))
 end
 
-local frame, units, echoes, failed = 0, {}, {}, false
+local frame, units, echoes, failed, texts = 0, {}, {}, false, {}
 cam = { px = 4096, py = 2000, pz = 4096 }
 local teams = { [0] = 0, [1] = 1 }
 UnitDefs = {
-	{ name = 'raider', metalCost = 65, weapons = { { weaponDef = 1 } }, customParams = {}, mobile = true },
-	{ name = 'mex', metalCost = 75, weapons = {}, customParams = { ismex = 1 } },
-	{ name = 'factory', metalCost = 800, weapons = {}, customParams = {} },
-	{ name = 'bomber', metalCost = 300, weapons = { { weaponDef = 1 } }, customParams = {}, mobile = true },
-	{ name = 'turret', metalCost = 120, weapons = { { weaponDef = 1 } }, customParams = {} },
+	{ name = 'raider', speed = 90, metalCost = 65, weapons = { { weaponDef = 1 } }, customParams = {}, mobile = true },
+	{ name = 'mex', speed = 0, metalCost = 75, weapons = {}, customParams = { ismex = 1 } },
+	{ name = 'factory', speed = 0, metalCost = 800, weapons = {}, customParams = {} },
+	{ name = 'bomber', speed = 90, metalCost = 300, weapons = { { weaponDef = 1 } }, customParams = {}, mobile = true },
+	{ name = 'turret', speed = 0, metalCost = 120, weapons = { { weaponDef = 1 } }, customParams = {} },
 }
 WeaponDefs = { { customParams = { stats_damage = '100' }, salvoSize = 1, projectiles = 1, reload = 1, impactOnly = true, damageAreaOfEffect = 0, range = 300 } }
 Game = { mapSizeX = 8192, mapSizeZ = 8192, mapName = 'Test' }
@@ -31,14 +31,21 @@ gl = setmetatable({
 	BeginEnd = function(_, draw) draw() end,
 	GetTextWidth = function(text) return #text * 0.5 end,
 	-- Catch what the engine would reject
-	Text = function(text, x, y, size) assert(type(text) == "string" and x + y + size) end,
+	Text = function(text, x, y, size)
+		assert(type(text) == "string" and x + y + size)
+		texts[text:gsub("\255...", "<"):gsub("\008", ">")] = true
+	end,
 	Rect = function(a, b, c, d) assert(a + b + c + d) end,
 	Vertex = function(x, y, z) assert(x + y + (z or 0)) end,
 	Color = function(r, g, b, a) assert(r + g + b + (a or 1)) end,
 }, { __index = function() return function() end end })
 CMD = { ATTACK = 20, FIGHT = 16, MOVE = 10 }
 VFS = { Include = function() return { RAW_MOVE = 31109 } end }
-WG = {}
+-- Windows for callouts to keep off: a bar along the top, a panel, and a full screen holder to ignore
+WG = { Chili = { Screen0 = { children = {
+	{ x = 0, y = 0, width = 1920, height = 60 }, { x = 1500, y = 700, width = 400, height = 300 },
+	{ x = 0, y = 0, width = 1920, height = 1080 },
+} } } }
 widgetHandler = { RemoveWidget = function() error('widget removed') end }
 widget = {}
 Spring = setmetatable({
@@ -52,7 +59,7 @@ Spring = setmetatable({
 	Utilities = { GetHumanName = function(ud) return ud.name end, getMovetype = function(ud) return ud.mobile and 2 or nil end },
 	GetUnitPosition = function(id) local u = units[id] if u then return u.x, 0, u.z end end,
 	GetUnitVelocity = function(id) local u = units[id] if u then return u.vx, 0, u.vz end end,
-	GetUnitHealth = function(id) if units[id] then return 100, 100, 0, 0, 1 end end,
+	GetUnitHealth = function(id) if units[id] then return units[id].health or 100, 100, 0, 0, 1 end end,
 	GetUnitNoDraw = function() return false end,
 	GetUnitDefID = function(id) return units[id] and units[id].def end,
 	GetUnitTeam = function(id) return units[id] and units[id].team end,
@@ -65,7 +72,8 @@ Spring = setmetatable({
 	end,
 	GetGroundHeight = function() return 0 end,
 	GetViewGeometry = function() return 1920, 1080 end,
-	WorldToScreenCoords = function(x, y, z) return 960, 540, 0.5 end,
+	-- Flat, north up, around where the camera is
+	WorldToScreenCoords = function(x, y, z) return 960 + (x - cam.px) * 0.5, 540 - (z - cam.pz) * 0.5, 0.5 end,
 	GetCameraState = function() return {} end,
 	GetCameraPosition = function() return cam.px, cam.py, cam.pz end,
 	SetCameraState = function(st) cam = st end,
@@ -121,7 +129,12 @@ for f = 1, 90 * 30 do
 	frame = f
 	for _, id in ipairs(attackers) do
 		local u = units[id]
-		if SCENARIO == 'recall' and f == 25 * 30 then u.vx, u.vz = -u.vx, -u.vz end
+		-- Orders for the overlay's arrow: out, then (recall) back again, which redirects it
+		if f == 60 then widget:UnitCommand(id, u.def, u.team, CMD.MOVE, { 6000, 0, 6000 }, {}) end
+		if SCENARIO == 'recall' and f == 25 * 30 then
+			u.vx, u.vz = -u.vx, -u.vz
+			widget:UnitCommand(id, u.def, u.team, CMD.MOVE, { 2000, 0, 2000 }, {})
+		end
 		if math.abs(u.x - 6000) < 20 and u.vx > 0 then u.vx, u.vz = 0, 0 end
 		if u.x < 2000 and u.vx < 0 then u.vx, u.vz = 0, 0 end
 		u.x, u.z = u.x + u.vx, u.z + u.vz
@@ -139,7 +152,10 @@ for f = 1, 90 * 30 do
 		local victim = (f - arrived) / 30 - 1
 		if victim == math.floor(victim) and units[victim] and victim >= 1 and victim <= 7 then
 			widget:UnitDamaged(victim, units[victim].def, 1, 100, false, nil, nil, attackers[1], 1, 0)
-			widget:UnitDestroyed(victim, units[victim].def, 1, attackers[1], 1, 0)
+			units[victim].health = 0
+			-- Some burn to death: with only the attacker's team known, or with nothing known
+			local attacker = victim % 3 == 0 and attackers[1] or nil
+			widget:UnitDestroyed(victim, units[victim].def, 1, attacker, attacker and 1, victim % 3 ~= 1 and 0 or nil)
 			units[victim] = nil
 		end
 	end
@@ -170,6 +186,11 @@ end
 local count = 0
 for _, e in ipairs(echoes) do if e[2]:find('^rc%-scene') then count = count + 1 end end
 print('scene events: ' .. count)
+local drawn = {}
+for text in pairs(texts) do drawn[#drawn + 1] = text end
+table.sort(drawn)
+print('callout texts: ' .. #drawn)
+if os.getenv('VERBOSE') then print(table.concat(drawn, '\n')) end
 print(string.format('per game frame: mean %.2f ms, worst %.2f ms, %d units', total / ticks * 1000, slowest * 1000, nextId - 1))
 if os.getenv('LOG') then
 	local out = io.open(os.getenv('LOG'), 'w')

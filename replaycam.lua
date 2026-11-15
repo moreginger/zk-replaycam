@@ -1280,25 +1280,39 @@ function overlay.update()
 	overlay.detail = detail
 
 	-- How fast a move is closing on its target, for the time to arrive
-	local left = overlay.arrowTo and event.type == moveEventType and overlay.remaining()
+	local x, _, z = overlay.centre()
+	local left = overlay.arrowTo and x and event.type == moveEventType and length(overlay.arrowTo[1] - x, overlay.arrowTo[2] - z)
 	if left and overlay.left then
 		overlay.closing = ((overlay.closing or overlay.left - left) + overlay.left - left) / 2
 	end
 	overlay.left = left
 end
 
--- How far the moving units have left to go, and their slowest top speed (elmos/s)
-function overlay.remaining()
-	local xSum, zSum, n, speed = 0, 0, 0, huge
+-- The middle of the units the headline names, and the top speed (elmos/s) of the slowest. A dead
+-- unit stays where it was last seen.
+function overlay.centre()
+	local xSum, ySum, zSum, n, speed = 0, 0, 0, 0, huge
 	for unitID, location in pairs(overlay.subjects) do
-		local unitDefID = spGetUnitDefID(unitID)
-		if unitDefID then
-			xSum, zSum, n, speed = xSum + location[1], zSum + location[3], n + 1, min(speed, UnitDefs[unitDefID].speed)
+		local x, y, z = spGetUnitPosition(unitID)
+		if x then
+			location[1], location[2], location[3] = x, y, z
+			speed = min(speed, UnitDefs[spGetUnitDefID(unitID)].speed)
 		end
+		xSum, ySum, zSum, n = xSum + location[1], ySum + location[2], zSum + location[3], n + 1
 	end
 	if n > 0 then
-		return length(overlay.arrowTo[1] - xSum / n, overlay.arrowTo[2] - zSum / n), speed
+		return xSum / n, ySum / n, zSum / n, speed
 	end
+end
+
+-- Where n points round a ring on the ground are on screen
+function overlay.ring(x, z, radius, n)
+	local points, y = {}, spGetGroundHeight(x, z)
+	for i = 1, n do
+		local angle = i * 2 * pi / n
+		points[i] = { spWorldToScreenCoords(x + radius * sin(angle), y, z + radius * cos(angle)) }
+	end
+	return points
 end
 
 -- A flat arrow on the ground from one point to another
@@ -1351,49 +1365,6 @@ function overlay.kill(unitID, name, destroyerName, attackerTeam)
 		.. " destroyed by " .. (destroyerName or "unknown") .. " of " .. overlay.coloured(info.name .. " (" .. info.allyTeamName .. ")", info.color)
 end
 
--- Where on screen the callout's subject is: the middle of the units the headline names, or of a
--- scene's ring. Given (tx, ty), where the pointer from there should end: the nearest edge of the
--- ring, or the units with a gap to leave.
-function overlay.anchor(event, tx, ty)
-	if event.type == sceneEventType then
-		local x, y, z = unpack(event.location)
-		if not tx then
-			-- With how far the ring reaches across and up the screen
-			local ax, ay = spWorldToScreenCoords(x, y, z)
-			local across, up = 0, 0
-			for i = 1, 8 do
-				local sx, sy = spWorldToScreenCoords(x + scenes.radius * sin(i * pi / 4), y, z + scenes.radius * cos(i * pi / 4))
-				across, up = max(across, math.abs(sx - ax)), max(up, math.abs(sy - ay))
-			end
-			return ax, ay, across, up
-		end
-		local ax, ay, best = nil, nil, huge
-		for i = 1, 24 do
-			local angle = i * pi / 12
-			local sx, sy = spWorldToScreenCoords(x + scenes.radius * sin(angle), y, z + scenes.radius * cos(angle))
-			local d = length(sx - tx, sy - ty)
-			if d < best then
-				ax, ay, best = sx, sy, d
-			end
-		end
-		return ax, ay, 0
-	end
-	local xSum, ySum, zSum, n = 0, 0, 0, 0
-	for unitID, location in pairs(overlay.subjects) do
-		-- A dead unit stays where it was last seen
-		local x, y, z = spGetUnitPosition(unitID)
-		if x then
-			location[1], location[2], location[3] = x, y, z
-		end
-		xSum, ySum, zSum, n = xSum + location[1], ySum + location[2], zSum + location[3], n + 1
-	end
-	if n == 0 then
-		return
-	end
-	local ax, ay = spWorldToScreenCoords(xSum / n, ySum / n, zSum / n)
-	return ax, ay, tx and overlay.textSize * 1.8 or 0, 0
-end
-
 function overlay.drawWorld()
 	local event = shownEvent
 	if not event or not options.show_commentary.value then
@@ -1437,35 +1408,20 @@ function overlay.scanUI(vsx, vsy)
 end
 
 -- Where to put a w by h callout for a subject at (ax, ay) on screen, clear of a ring reaching
--- (across, up) from there if there is one. It sits off the
--- subject on whichever side covers least, looked at afresh for each shot and once a second after
--- that, and it only changes side for a clear gain.
+-- (across, up) from there if there is one. It is looked at afresh for each shot and once a second
+-- after that, and only moves for a clear gain.
 function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 	local reach, margin = vsy * 0.06, vsy * 0.02
 	local xMax, yMax = max(10, vsx - w - 10), max(10, vsy - h - 10)
-	local function corner(side)
-		local bx, by
-		if side[3] then
-			-- Towards a corner of the screen, for when a ring leaves no room around it: side[3] is
-			-- how far in from the corner
-			bx, by = side[1] > 0 and xMax or 10, side[2] > 0 and yMax or 10
-			bx, by = bx + (ax - w / 2 - bx) * side[3], by + (ay - h / 2 - by) * side[3]
-		else
-			-- Diagonally, 3/4 of the way out each way clears a ring. Straight up or across goes
-			-- further out, and off centre so that one corner is clearly the nearest.
-			local diagonal = side[1] ~= 0 and side[2] ~= 0
-			local out = across > 0 and reach * 1.6 or reach
-			local dx = (diagonal and out + across * 0.75 or out * 1.4 + across) * side[1]
-			local dy = (diagonal and out + up * 0.75 or out * 1.4 + up) * side[2]
-			bx = side[1] > 0 and ax + dx or side[1] < 0 and ax + dx - w or ax - w * 0.3
-			by = side[2] > 0 and ay + dy or side[2] < 0 and ay + dy - h or ay - h * 0.3
-		end
-		return bound(bx, 10, xMax), bound(by, 10, yMax)
-	end
 	local fresh = overlay.placedFor ~= shownEvent
 	if fresh or gameFrame - overlay.placedFrame >= framesPerSecond then
+		overlay.placedFor, overlay.placedFrame = shownEvent, gameFrame
+		if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
+			overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
+		end
+
 		-- Things worth not covering: the units in shot, the move arrow and any rings
-		local points = {}
+		local points = shownEvent.type == sceneEventType and overlay.ring(shownEvent.location[1], shownEvent.location[3], scenes.radius, 8) or {}
 		local function avoid(x, z)
 			points[#points + 1] = { spWorldToScreenCoords(x, spGetGroundHeight(x, z), z) }
 		end
@@ -1474,19 +1430,15 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 			avoid(trackInfo.location[1], trackInfo.location[3])
 			trackInfo = trackInfo.prev
 		end
-		local from, to = overlay.arrowFrom, overlay.arrowTo
+		local from, to, aside = overlay.arrowFrom, overlay.arrowTo, display.aside
 		for i = 0, from and 6 or -1 do
 			avoid(from[1] + (to[1] - from[1]) * i / 6, from[2] + (to[2] - from[2]) * i / 6)
 		end
-		local aside = display.aside
-		local rings = { shownEvent.type == sceneEventType and { shownEvent.location[1], shownEvent.location[3], scenes.radius } or nil,
-			aside and gameFrame - aside[3] < scenes.asideFrames and { aside[1], aside[2], scenes.radius * 0.6 } or nil }
-		for _, ring in pairs(rings) do
-			for i = 1, 8 do
-				avoid(ring[1] + ring[3] * sin(i * pi / 4), ring[2] + ring[3] * cos(i * pi / 4))
+		if aside and gameFrame - aside[3] < scenes.asideFrames then
+			for _, point in ipairs(overlay.ring(aside[1], aside[2], scenes.radius * 0.6, 8)) do
+				points[#points + 1] = point
 			end
 		end
-
 		-- Which way the rest of the action lies from the subject
 		local tx, ty = 0, 0
 		for _, point in ipairs(points) do
@@ -1494,71 +1446,72 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 		end
 		local toward = max(1, length(tx, ty))
 
-		-- Beside or above a ring is fine, but a pointer to units reads best on the diagonal
-		local sides = { { 1, 1 }, { -1, 1 }, { 1, -1 }, { -1, -1 } }
-		if across > 0 then
-			for _, side in ipairs({ { 0, 1 }, { 0, -1 }, { 1, 0 }, { -1, 0 }, { 1, 1, 0 }, { -1, 1, 0 }, { 1, -1, 0 }, { -1, -1, 0 } }) do
-				sides[#sides + 1] = side
-			end
-		end
-		if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
-			overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
-		end
-		-- What a callout at (bx, by) costs: worst is landing on the subject or inside its ring, then
-		-- covering the game's own windows, then being far away
-		local function landing(bx, by)
+		-- What putting the callout's corner at (ox, oy) from the subject costs, once kept on screen.
+		-- Worst is landing on the subject or in its ring, then on the game's own windows, then
+		-- covering things, then being far away or on the side the action is.
+		local function cost(ox, oy)
+			local bx, by = bound(ax + ox, 10, xMax), bound(ay + oy, 10, yMax)
 			local nx, ny = bound(ax, bx, bx + w) - ax, bound(ay, by, by + h) - ay
 			local onSubject = nx == 0 and ny == 0
 			if across > 0 then
 				-- With some room around the ring
 				onSubject = (nx / (across + reach)) ^ 2 + (ny / (up + reach)) ^ 2 < 1
 			end
-			local cost = (onSubject and 50 or 0) + 3 * length(nx, ny) / vsy
+			local total = (onSubject and 50 or 0) + 3 * length(nx, ny) / vsy
 			for _, window in ipairs(overlay.ui) do
 				if bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
-					cost = cost + 20
+					total = total + 20
 				end
 			end
-			return cost
-		end
-		local best, bestCost, currentCost
-		for _, side in ipairs(sides) do
-			-- Costed where it would end up once kept on screen. From a corner, come in as far as stays
-			-- clear.
-			for step = 1, side[3] and 9 or 0 do
-				side[3] = step / 10
-				if landing(corner(side)) >= 20 then
-					side[3] = (step - 1) / 10
-					break
-				end
-			end
-			local bx, by = corner(side)
-			local cost = landing(bx, by)
 			for _, point in ipairs(points) do
 				if point[1] > bx - margin and point[1] < bx + w + margin and point[2] > by - margin and point[2] < by + h + margin then
-					cost = cost + 1
+					total = total + 1
 				end
 			end
-			-- Lean away from the action, and stay on the side already in use
-			cost = cost + 0.5 * (side[1] * tx + side[2] * ty) / toward / length(side[1], side[2])
-			if overlay.side and side[1] == overlay.side[1] and side[2] == overlay.side[2] and not side[3] == not overlay.side[3] then
-				cost = cost - 0.1
-				-- The same side as now, with how far in from a corner brought up to date
-				currentCost, overlay.side = cost, side
-			end
-			if not best or cost < bestCost then
-				best, bestCost = side, cost
+			local cx, cy = bx + w / 2 - ax, by + h / 2 - ay
+			return total + 0.5 * (cx * tx + cy * ty) / toward / max(1, length(cx, cy))
+		end
+
+		local current, best, bestCost = overlay.offset, nil, nil
+		local function try(ox, oy)
+			-- All else equal, the side it is already on
+			local sameSide = current and (ox + w / 2) * (current[1] + w / 2) > 0 and (oy + h / 2) * (current[2] + h / 2) > 0
+			local total = cost(ox, oy) - (sameSide and 0.1 or 0)
+			if not best or total < bestCost then
+				best, bestCost = { ox, oy }, total
 			end
 		end
-		if fresh or not currentCost or currentCost >= bestCost + 1.5 then
-			overlay.side = best
+		local out = across > 0 and reach * 1.6 or reach
+		for sx = 1, -1, -1 do
+			for sy = 1, -1, -1 do
+				-- A pointer to units reads best on the diagonal. Round a ring, straight up or across
+				-- will do too: further out, and off centre so that one corner is clearly the nearest.
+				local diagonal = sx ~= 0 and sy ~= 0
+				if diagonal or across > 0 and (sx ~= 0 or sy ~= 0) then
+					-- Diagonally, 3/4 of the way out each way clears a ring
+					local dx = diagonal and out + across * 0.75 or out * 1.4 + across
+					local dy = diagonal and out + up * 0.75 or out * 1.4 + up
+					try(sx > 0 and dx or sx < 0 and -dx - w or -w * 0.3, sy > 0 and dy or sy < 0 and -dy - h or -h * 0.3)
+				end
+				if diagonal and across > 0 then
+					-- When a ring leaves no room around it: in from a corner of the screen, as far as
+					-- stays clear
+					local cx, cy, t = (sx > 0 and xMax or 10) - ax, (sy > 0 and yMax or 10) - ay, 0
+					while t < 0.9 and cost(cx - (cx + w / 2) * (t + 0.1), cy - (cy + h / 2) * (t + 0.1)) < 20 do
+						t = t + 0.1
+					end
+					try(cx - (cx + w / 2) * t, cy - (cy + h / 2) * t)
+				end
+			end
 		end
-		overlay.placedFor, overlay.placedFrame = shownEvent, gameFrame
+		if fresh or not current or cost(current[1], current[2]) >= bestCost + 1.5 then
+			overlay.offset = best
+		end
 	end
 
 	-- The callout floats: it stays where it is on screen while its place off the subject is within
 	-- some slack, so the pointer swings and stretches as units move, and is drawn back in beyond that
-	local bx, by = corner(overlay.side)
+	local bx, by = bound(ax + overlay.offset[1], 10, xMax), bound(ay + overlay.offset[2], 10, yMax)
 	local box, slack = overlay.box, reach * 0.6
 	if fresh or not box then
 		box = { bx, by }
@@ -1582,13 +1535,22 @@ function overlay.draw()
 	local size = overlay.textSize * vsy / 1080
 	local pad, row, color = size * 0.6, size * 1.5, overlay.color
 	local detail, small = overlay.detail, size * 0.85
-	if overlay.left then
+	-- The subject on screen: the units the headline names, or a scene and its ring
+	local event, ring = shownEvent, nil
+	local sx, sy, sz, speed = overlay.centre()
+	if event.type == sceneEventType or not sx then
+		sx, sy, sz = unpack(event.type == sceneEventType and event.location or display.location)
+		ring = event.type == sceneEventType and overlay.ring(sx, sz, scenes.radius, 24)
+	end
+	local ax, ay = spWorldToScreenCoords(sx, sy, sz)
+	local across, up = 0, 0
+	for _, point in ipairs(ring or {}) do
+		across, up = max(across, math.abs(point[1] - ax)), max(up, math.abs(point[2] - ay))
+	end
+	if overlay.left and overlay.left > 50 and speed and speed < huge then
 		-- At the speed they have been closing, or flat out until that is known
-		local left, speed = overlay.remaining()
-		if left and left > 50 then
-			speed = overlay.closing and overlay.closing > speed * 0.2 and overlay.closing or speed
-			detail = string.format("arrives in %ds", math.ceil(left / max(1, speed)))
-		end
+		speed = overlay.closing and overlay.closing > speed * 0.2 and overlay.closing or speed
+		detail = string.format("arrives in %ds", math.ceil(length(overlay.arrowTo[1] - sx, overlay.arrowTo[2] - sz) / max(1, speed)))
 	end
 
 	-- The fight's tally: what each side has destroyed, and a bar split the same way
@@ -1624,27 +1586,27 @@ function overlay.draw()
 	w = w + pad * 2
 	local h = row * (1 + (detail and 1 or 0) + tallyRows) + pad + tallyRows * pad
 
-	-- Placed off the subject itself, which may be well away from the middle of the shot
-	local ax, ay, across, up = overlay.anchor(shownEvent)
-	if not ax then
-		ax, ay, across, up = spWorldToScreenCoords(unpack(display.location))
-		across, up = 0, 0
-	end
 	local bx, by = overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 
 	gl.Color(0, 0, 0, 0.55)
 	gl.Rect(bx, by, bx + w, by + h)
 	-- The edge facing the subject is coloured, and the pointer runs out of the middle of its end to
-	-- stop short of the units
+	-- stop short of the units, or on the nearest part of the ring
 	local t = max(2, size * 0.2)
 	local onLeft, below = bx + w / 2 < ax, by + h / 2 < ay
 	local ex, cy = onLeft and bx + w - t or bx, below and by + h or by
 	local cx, my = ex + t / 2, below and cy - t / 2 or cy + t / 2
-	local px, py, gap = overlay.anchor(shownEvent, cx, cy)
-	local reach = px and length(px - cx, py - my)
+	local px, py, gap = ax, ay, size * 1.8
+	local reach = ring and huge or length(px - cx, py - my)
+	for _, point in ipairs(ring or {}) do
+		local d = length(point[1] - cx, point[2] - my)
+		if d < reach then
+			px, py, gap, reach = point[1], point[2], 0, d
+		end
+	end
 	gl.Color(color[1], color[2], color[3], 1)
 	gl.Rect(ex, by, ex + t, by + h)
-	if px and reach > gap * 1.5 then
+	if reach > gap * 1.5 then
 		-- Half the thickness, across the pointer
 		local nx, ny = -(py - my) / reach * t / 2, (px - cx) / reach * t / 2
 		px, py = px + (cx - px) * gap / reach, py + (my - py) * gap / reach
