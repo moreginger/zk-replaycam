@@ -1250,6 +1250,8 @@ local orbitConfig = {
 local minShotFrames = 2 * framesPerSecond
 local maxShotLockFrames = 3 * framesPerSecond
 local shotLockBoost = 2
+-- A unit can be counted as stunned again after this long
+local stunFrames = 10 * framesPerSecond
 local mapEdgeBorder = worldGridSize * 0.5
 local keepTrackingRange = worldGridSize * 2
 
@@ -1294,14 +1296,14 @@ local function statsLogDeath(unitID, unitDefID, unitTeam)
 end
 
 -- Damage is aggregated per cell and flushed once per update interval to keep the log small.
-local function statsAddDamage(unitID, unitDefID, damage, paralyzer)
+local function statsAddDamage(unitID, unitDefID, damage)
 	local value, maxHealth = statsUnitValue(unitID, unitDefID)
 	local x, _, z = spGetUnitPosition(unitID)
 	if not value or not maxHealth or maxHealth <= 0 or not x then
 		return
 	end
-	-- Metal-equivalent of the damage dealt. Paralysis counts for half, as in event scoring.
-	value = value * min(damage, maxHealth) / maxHealth * (paralyzer and 0.5 or 1)
+	-- Metal-equivalent of the damage dealt
+	value = value * min(damage, maxHealth) / maxHealth
 	if value <= 0 then
 		return
 	end
@@ -1704,10 +1706,10 @@ local function shotLocked()
 	return gameFrame < display.shotFrame + maxShotLockFrames
 end
 
-function lull.addDamage(unitID, unitDefID, damage, paralyzer)
+function lull.addDamage(unitID, unitDefID, damage)
 	local value, maxHealth = statsUnitValue(unitID, unitDefID)
 	if value and maxHealth and maxHealth > 0 then
-		lull.damage.now = lull.damage.now + value * min(damage, maxHealth) / maxHealth * (paralyzer and 0.5 or 1)
+		lull.damage.now = lull.damage.now + value * min(damage, maxHealth) / maxHealth
 	end
 end
 
@@ -2228,15 +2230,21 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 		return
 	end
 
-	if STATS then
-		statsAddDamage(unitID, unitDefID, damage, paralyzer)
-	end
-	lull.addDamage(unitID, unitDefID, damage, paralyzer)
-
 	if paralyzer then
-		-- Paralyzer weapons deal very high "damage", but it's not as important as real damage
+		-- A hit that stuns reports next to no damage, so count each stun once as the whole unit.
+		local health, maxHealth, paralysis = spGetUnitHealth(unitID)
+		local info = unitInfo.cache[unitID]
+		if info and health and paralysis >= health and gameFrame - (info.stunFrame or -stunFrames) >= stunFrames then
+			info.stunFrame, damage = gameFrame, max(damage, maxHealth)
+		end
+		-- Paralysis is not as important as real damage
 		damage = damage / 2
 	end
+
+	if STATS then
+		statsAddDamage(unitID, unitDefID, damage)
+	end
+	lull.addDamage(unitID, unitDefID, damage)
 	local sbjLocation, _, unitImportance, sbjName, isStatic = unitInfo:get(unitID)
 	if isStatic then
 		unitImportance = unitImportance * staticAttackedBoost
