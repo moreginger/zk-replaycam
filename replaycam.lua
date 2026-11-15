@@ -979,6 +979,7 @@ end
 -- Against a challenger the pick's importance counts this many times over, more for ones that
 -- take longer to get to (see transitionCost).
 local switchBoostNear, switchBoostFar = 2, 3.3
+local lockedRarity = 0.5
 -- transitionCost(location) returns 0 for something already framed, up to 1 for a cut. Defined
 -- with the camera.
 local transitionCost
@@ -998,7 +999,13 @@ local function _beatsPick(event, rarity, boostScale)
 	if mie.type ~= lullEventType and event.type ~= lullEventType then
 		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * transitionCost(event.location)
 	end
-	return rarity < _getRarity(mie) ^ (boost * (boostScale or 1))
+	local pickRarity = _getRarity(mie)
+	if boostScale then
+		-- A locked shot holds like a fair pick, however weak it was
+		pickRarity = min(pickRarity, lockedRarity)
+		boost = boost * boostScale
+	end
+	return rarity < pickRarity ^ boost
 end
 
 local ADD_EVENT_OPTS_NO_GRID_NO_MERGE = { noGrid = true, noMerge = true }
@@ -2038,7 +2045,7 @@ function widget:GameFrame(frame)
 		-- While the shot is locked a cut needs a bigger margin. A cut may also have decayed while
 		-- it waited out the lock, so check it still beats the pick.
 		local locked = shotLocked()
-		cut = _beatsPick(pendingMie, _getRarity(pendingMie), locked and shotLockBoost or 1)
+		cut = _beatsPick(pendingMie, _getRarity(pendingMie), locked and shotLockBoost)
 		if not cut and not locked then
 			pendingMie = mie
 		end

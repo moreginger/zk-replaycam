@@ -9,7 +9,7 @@
 - Stats logging (`STATS`) and `scripts/generate-stats.py` metrics for comparing camera runs
 - Time-to-frame, unframed-cut and yaw-rate camera metrics
 - New camera model: a drone orbiting the event on damped springs, so pans settle in ~1-2s whatever the distance, arc up over long moves, and the event can no longer be zoomed out of frame
-- Shot lock: a new shot holds until it frames its event and for 2s after, unless something much bigger happens, and its screen time starts once framed
+- Shot lock: a new shot holds until it frames its event and for 2s after, unless something much bigger happens, and its screen time starts once framed. A weak pick is held as firmly as a fair one, so it is not replaced a second later
 - Switching cost is measured from where the camera is looking: events already on screen are cheap to switch to, ones needing a cut cost the most
 - Lull events replace the overview: when a fight dies down, a wide north-up shot frames the spread of activity, more likely after bigger fights. The game opens on a wide lull shot of the map.
 - Orbits: once framed, the camera may slowly fly around the event to see past terrain, keep the map in view or take in nearby action, and drifts once on long holds
