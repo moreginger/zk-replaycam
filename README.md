@@ -14,6 +14,7 @@ The strategy is fairly basic. It listens to a bunch of callins e.g for a unit be
 
 - Show a unit under attack, especially if near death
 - Show areas where there is a lot of activity from opposing teams
+- Anticipate fights, raids and bombing runs by watching for armed units closing on enemy value
 - Dynamically track and zoom multiple units of interest
 
 There's a lot that it doesn't do well that I will hopefully get around to improving
@@ -42,7 +43,7 @@ Set `STATS = true` (or `DEBUG = true`) in `replaycam.lua`, watch one or more rep
 python3 scripts/generate-stats.py path/to/infolog.txt -o run.json
 ```
 
-This writes per-game timelines and metrics to `run.json` and prints summary tables. Metrics are graded against ground truth (unit deaths and damage valued in metal), so two runs over the same replays can be compared directly:
+This writes per-game timelines and metrics to `run.json` and prints summary tables. Metrics are graded against ground truth (unit deaths and damage valued in metal; deaths with no damage nearby, such as commander upgrades, are ignored), so two runs over the same replays can be compared directly:
 
 ```bash
 python3 scripts/generate-stats.py --compare base.json new.json
@@ -58,6 +59,9 @@ Key metrics, weighted by metal value:
 - `frame` - share of nearby action in view × how close the footprint is to that action's size
 - `lead s` / `late` - how long the spot was framed beforehand, or how often the camera arrived after
 - `missed` - share of losses never seen within 5s before to 2s after
+- `fights` / `setup` / `setup s` - fights are runs of deaths and damage near each other, counted when at least 300 metal is lost. `setup` is the share of them (by metal lost) whose opening spot was framed for at least 2s in the 10s before the first hit, and `setup s` is the mean time it was framed
+- `scnhit` / `scn s` - share of those fights (by metal lost) that a scene event flagged beforehand, and how many seconds ahead. Grades the prediction, whether or not the camera went there
+- `scnprc` - share of scene events followed by action nearby within 10s
 
 Transition metrics (per shot, not value-weighted):
 
@@ -69,3 +73,28 @@ Transition metrics (per shot, not value-weighted):
 - `orbgn` - median view-score gain of orbits to a better heading (the threshold is `orbitConfig.margin`)
 - `south` - share of time the camera faces more than 90 degrees from north
 - `yaw90` / `yawmx` - 90th percentile and peak of the fastest yaw (deg/s) in each second, ignoring cuts and user control
+
+## Running replays unattended
+
+`scripts/run-replay.sh` plays a replay through the widget with the headless engine and saves the log for `generate-stats.py`. Nothing is shown, and your own Zero-K settings and infolog are left alone.
+
+```bash
+scripts/run-replay.sh replays/some-replay.sdfz run.txt
+python3 scripts/generate-stats.py run.txt -o run.json
+```
+
+- The replay plays at normal speed, so a run takes as long as the game plus about 40s to load. The pregame is fast-forwarded and the engine quits when the game ends.
+- Pass another widget file as the third argument to compare versions on the same replay.
+- Each engine needs about 3.5GB of memory, which limits how many can run side by side.
+- The headless view is square and tiny (8x8 pixels), so framing numbers differ from a real session. Compare headless runs with each other only.
+- The map and game version of the replay must already be installed (watch any replay of them in Zero-K once).
+
+## Testing offline
+
+`scripts/run-harness.py` runs the widget against a stubbed game, without Zero-K: one side sends raiders or bombers at the other's base. It catches load and runtime errors, and reports when scene events fire, what is shown and the cost per game frame. It can't judge how the camera looks.
+
+```bash
+python3 scripts/run-harness.py raid --crowd 2000
+```
+
+It needs the Lua 5.4 shared library (`liblua5.4`), and so runs Lua 5.4 rather than the engine's 5.1.

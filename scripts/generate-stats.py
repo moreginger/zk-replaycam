@@ -47,6 +47,11 @@ SHORT_SHOT_S = 3            # shots this long or shorter count as quick cuts
 SAME_SPOT_RANGE = 256       # elmos between consecutive shots that count as the same spot
 FAR_CUT_RANGE = 1536        # long cuts; the widget's teleport distance before maxPanDistance rose to 2048
 FAR_CUT_HIT = (10, 800)     # a far cut "hits" if a death follows within this many seconds and elmos
+FIGHT_GAP_S = 10            # action this long after a fight's last action starts a new fight
+FIGHT_MIN_VALUE = 300       # metal lost for a fight to count as a payoff worth setting up
+SETUP_WINDOW = (10, 1)      # seconds before a fight starts in which its setup can be shown
+SETUP_MIN_S = 2             # seconds framed in that window for the setup to count as shown
+COMBAT_DEATH = (5, 1, 400)  # a death counts if damage was logged this many seconds before/after, this close
 
 
 # GEOMETRY
@@ -125,6 +130,7 @@ def new_game(name):
         'orbits': [],   # [frame, id, fromYawDeg, toYawDeg, reason, viewGain]
         'lulls': [],    # [frame, armed, fired, damageShort, damageLong, damagePeak]: lull event trigger, per second
         'extends': [],  # [frame, pickId, mergedType]: merges into the current pick
+        'scenes': [],   # [frame, x, z, rise, soonShare]: scene events added
         'deaths': [],   # [frame, unitDef, x, z, value, allyTeam]
         'damage': [],   # [frame, x, z, value]
     }
@@ -209,6 +215,8 @@ def parse_rc(game, frame, kind, f):
         elif kind == 'lull':
             if len(f) >= 5:
                 game['lulls'].append([frame, int(f[0]), int(f[1]), float(f[2]), float(f[3]), float(f[4])])
+        elif kind == 'scene':
+            game['scenes'].append([frame] + [float(v) for v in f[:4]])
         elif kind == 'orbit':
             # The view gain was added later
             game['orbits'].append([frame, int(f[0]), float(f[1]), float(f[2]), f[3], float(f[4]) if len(f) > 4 else None])
@@ -269,10 +277,39 @@ def fmt_time(frame):
     return f'{s // 60}:{s % 60:02d}'
 
 
+def combat_deaths(game):
+    """Deaths with damage nearby just beforehand. The rest (commander upgrades, reclaim, cancelled
+    builds) aren't losses the camera could have shown."""
+    before, after, radius = COMBAT_DEATH
+    damage = sorted(game['damage'])
+    frames = [d[0] for d in damage]
+    return [d for d in game['deaths'] if any(
+        math.hypot(x - d[2], z - d[3]) <= radius
+        for _, x, z, _ in damage[bisect.bisect_left(frames, d[0] - before * FPS):bisect.bisect_right(frames, d[0] + after * FPS)])]
+
+
+def find_fights(game):
+    """Group deaths and damage into fights: runs of action near each other with no long gap.
+    A fight is located where it started and valued by the metal lost in it."""
+    action = sorted([(d[0], d[2], d[3], d[4]) for d in game['deaths']] + [(d[0], d[1], d[2], 0.0) for d in game['damage']])
+    fights = []
+    for frame, x, z, value in action:
+        fight = next((f for f in reversed(fights) if frame - f['last'] <= FIGHT_GAP_S * FPS
+                      and math.hypot(x - f['lx'], z - f['lz']) <= CLUSTER_RADIUS), None)
+        if fight is None:
+            fight = {'frame': frame, 'x': x, 'z': z, 'value': 0.0}
+            fights.append(fight)
+        # Follow the fight as it moves
+        fight['last'], fight['lx'], fight['lz'] = frame, x, z
+        fight['value'] += value
+    return fights
+
+
 def compute_metrics(game, ref_area):
     duration_s = max(1, (game['last_frame'] - game['first_frame']) / FPS)
     minutes = duration_s / 60
     metrics = {'duration_s': round(duration_s)}
+    game = dict(game, deaths=combat_deaths(game))
 
     # Event type stats (DEBUG logging), available for old logs too
     types = sorted(set().union(*[set(c) for c in game['counts'].values()]))
@@ -375,6 +412,33 @@ def compute_metrics(game, ref_area):
     leads = [g for g in graded if g['lead'] is not None]
     metrics['lead_s'] = wm('lead', [g for g in leads if g['lead'] >= 0])
     metrics['late_share'] = sum(g['value'] for g in leads if g['lead'] < 0) / sum(g['value'] for g in leads) if leads else None
+
+    # Setups: was the camera (or a scene event) on a fight's opening spot before it kicked off?
+    fights = find_fights(game)
+    big = [f for f in fights if f['value'] >= FIGHT_MIN_VALUE]
+    scenes = game.get('scenes', [])
+    scene_frames = [s[0] for s in scenes]
+    for f in big:
+        f0, f1 = f['frame'] - SETUP_WINDOW[0] * FPS, f['frame'] - SETUP_WINDOW[1] * FPS
+        before = views_between(f0, f1)
+        framed = sum(1 for v in before if v.focus >= FRAMED_FOCUS and sees(v, f['x'], f['z']))
+        f['setup_s'] = framed * (f1 - f0) / FPS / len(before) if before else 0.0
+        near = [s for s in scenes[bisect.bisect_left(scene_frames, f0):bisect.bisect_right(scene_frames, f['frame'])]
+                if math.hypot(s[1] - f['x'], s[2] - f['z']) <= CLUSTER_RADIUS]
+        f['scene_lead'] = (f['frame'] - near[0][0]) / FPS if near else None
+    big_value = sum(f['value'] for f in big)
+    metrics['fights'] = len(big)
+    if big:
+        metrics['setup_share'] = sum(f['value'] for f in big if f['setup_s'] >= SETUP_MIN_S) / big_value
+        metrics['setup_s'] = weighted_mean([(f['setup_s'], f['value']) for f in big])
+    if big and scenes:
+        metrics['scene_hit'] = sum(f['value'] for f in big if f['scene_lead'] is not None) / big_value
+        metrics['scene_lead_s'] = weighted_mean([(f['scene_lead'], f['value']) for f in big if f['scene_lead'] is not None])
+        # Share of scene events with action nearby soon after
+        metrics['scene_precision'] = sum(1 for s in scenes if any(
+            math.hypot(ax - s[1], az - s[2]) <= CLUSTER_RADIUS
+            for _, ax, az in action[bisect.bisect_left(action_frames, s[0]):
+                                    bisect.bisect_right(action_frames, s[0] + SETUP_WINDOW[0] * FPS)])) / len(scenes)
 
     # Fairness between ally teams: share of each side's losses that was seen
     by_ally = {}
@@ -515,6 +579,12 @@ SUMMARY_COLUMNS = [
     ('lead_s', 'lead s', '{:.1f}', True),
     ('late_share', 'late', '{:.0%}', False),
     ('missed_value', 'missed', '{:.0%}', False),
+    ('fights', 'fights', '{:.0f}', None),
+    ('setup_share', 'setup', '{:.0%}', True),
+    ('setup_s', 'setup s', '{:.1f}', True),
+    ('scene_hit', 'scnhit', '{:.0%}', True),
+    ('scene_lead_s', 'scn s', '{:.1f}', True),
+    ('scene_precision', 'scnprc', '{:.0%}', True),
     ('damage_on_screen', 'dmg', '{:.2f}', True),
     ('dead_air_s', 'dead s', '{:.0f}', False),
     ('ally_balance', 'bal', '{:.2f}', True),
@@ -673,7 +743,7 @@ def main():
     for g in games:
         g['metrics'] = compute_metrics(g, args.ref_area)
         if args.no_timelines:
-            for k in ('cam', 'shown', 'framed', 'orbits', 'lulls', 'extends', 'deaths', 'damage'):
+            for k in ('cam', 'shown', 'framed', 'orbits', 'lulls', 'extends', 'scenes', 'deaths', 'damage'):
                 del g[k]
 
     result = {'infolog': args.infolog, 'ref_area': args.ref_area, 'games': games}

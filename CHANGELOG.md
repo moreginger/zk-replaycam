@@ -15,6 +15,11 @@
 - Orbits: once framed, the camera may slowly fly around the event to see past terrain, keep the map in view or take in nearby action, and drifts once on long holds
 - Fix camera crash when the event about to be shown lost its units
 - Fewer quick cuts: the shown event keeps absorbing similar nearby events, and distant cuts need a bigger event
+- Scene events replace hotspots: a scene is a place where one side's metal is coming within reach of the other's armed units, now or up to ~9s ahead on their current heading (orders are ignored). Clashes, raids and bombing runs score the same way, by how much the metal at stake has risen. A scene on show holds the camera only while its stake keeps growing
+- `setup` and scene metrics in `scripts/generate-stats.py`: was the camera, or a scene event, on a fight's opening spot before it started
+- `scripts/run-replay.sh` plays replays unattended with the headless engine, and `scripts/run-harness.py` runs the widget against a stubbed game
+- Stats ignore deaths with no damage nearby (commander upgrades, reclaim), which the camera could never have shown
+- Units that exist when the widget starts are picked up straight away
 - Static units get their 1.5x boost only when damaged, destroyed or captured, not when built, so a lone mex build is less likely to steal the shot
 
 ## [0.2.1] - 2023-04-02

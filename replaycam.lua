@@ -20,6 +20,8 @@ end
 --    of the same type
 -- 2. Maintain a low resolution grid of hotspots of activity, and where we have recently been
 --    watching (interestGrid)
+-- 3. Scene events anticipate the action: places where one side's value is coming within reach
+--    of the other's armed units (scenes)
 -- 
 -- The most interesting event is selected by comparison to other events of the same type,
 -- adjusting by type (e.g. combat is generally more interesting than manufacture), and by the
@@ -443,12 +445,6 @@ function WorldGrid:getActivity(x, y)
 	return data[1] * max(1, allyTeamCount * allyTeamCount)
 end
 
-function WorldGrid:getInterestingScore()
-	-- one event of the mean value, or one moving unit (per second) = 1
-	-- two interacting teams = *4	
-	return 5 * updateIntervalFrames / framesPerSecond
-end
-
 function WorldGrid:_addInternal(x, y, area, opts, func)
 	if not area then
 		area = self.gridSize
@@ -529,48 +525,6 @@ end
 
 function WorldGrid:setCursor(x, y)
 	self:_addInternal(x, y, self.gridSize, { boost = 10 / self.teamCount }, _boostInterest)
-end
-
--- Return mean, max, maxX, maxY
-function WorldGrid:statistics()
-	local maxValue, maxX, maxY, total = -1, nil, nil, 0
-	for gx = 1, self.xSize do
-		for gy = 1, self.ySize do
-			local value = self:_getScoreGridCoords(gx, gy)
-			total = total + value
-			if maxValue < value then
-				maxValue = value
-				maxX = gx
-				maxY = gy
-			end
-		end
-	end
-
-	-- Displace the coordinates according to the scores of neighbouring squares,
-	-- this avoids the problem of a hard stop at the edge of a square.
-	local centerX, centerY = self:__toWorldCoords(maxX, maxY)
-	local gridsToAverage = {}
-	local totalScore = 0
-	for gx = max(1, maxX - 1), min(self.xSize, maxX + 1) do
-		for gy = max(1, maxY - 1), min(self.ySize, maxY + 1) do
-			if gx ~= maxX or gy ~= maxY then
-				local wX, wY = self:__toWorldCoords(gx, gy)
-				-- Displace according to the inverse of the distance
-				local distanceFactor = 1 / length(maxX - gx, maxY - gy)
-				local dX, dY = (wX - centerX) * distanceFactor, (wY - centerY) * distanceFactor
-				local score = self:_getScoreGridCoords(gx, gy)
-				gridsToAverage[#gridsToAverage + 1] = { dX = dX, dY = dY, score = score }
-				totalScore = totalScore + score
-			end
-		end
-	end
-
-	local dX, dY = 0, 0
-	for _, grid in pairs(gridsToAverage) do
-		dX, dY = dX + (grid.dX * grid.score / totalScore), dY + (grid.dY * grid.score / totalScore)
-	end
-
-	return total, maxValue, centerX + dX, centerY + dY
 end
 
 -- SPATIAL LOOKUP CLASS
@@ -661,7 +615,9 @@ end
 
 local unitInfoCacheFrames = framesPerSecond
 
-UnitInfoCache = { locationListener = nil }
+-- locationListener is called whenever a position is read, updateListener exactly once per unit
+-- per unitInfoCacheFrames
+UnitInfoCache = { locationListener = nil, updateListener = nil }
 
 function UnitInfoCache:new(o)
 	o = o or {} -- create object if user does not provide one
@@ -811,11 +767,13 @@ function UnitInfoCache:update(currentFrame)
 			if currentFrame > cacheObject.removeAfterFrame then
 				self.cache[unitID] = nil
 			end
-		elseif currentFrame - cacheObject.lastUpdatedFrame > unitInfoCacheFrames then
+		elseif currentFrame - cacheObject.lastUpdatedFrame >= unitInfoCacheFrames then
 			cacheObject.lastUpdatedFrame = currentFrame
 			if not self:_updatePosition(unitID, cacheObject) then
 				-- Something went wrong, drop from cache.
 				self.cache[unitID] = nil
+			elseif self.updateListener then
+				self.updateListener(cacheObject)
 			end
 		end
 	end
@@ -942,9 +900,9 @@ local teamInfo, interestGrid, unitInfo
 
 local attackEventType = "attack"
 local buildingEventType = "building"
-local hotspotEventType = "hotspot"
 local lullEventType = "lull"
 local moveEventType = "move"
+local sceneEventType = "scene"
 local unitBuiltEventType = "unitBuilt"
 local unitDamagedEventType = "unitDamaged"
 local unitDestroyedEventType = "unitDestroyed"
@@ -953,9 +911,9 @@ local unitTakenEventType = "unitTaken"
 local eventTypes = {
 	attack = true,
 	building = true,
-	hotspot = true,
 	lull = true,
 	move = true,
+	scene = true,
 	unitBuilt = true,
 	unitDamaged = true,
 	unitDestroyed = true,
@@ -971,9 +929,9 @@ end
 local eventDecayFactors = _apply(_multiply, {
 	attack = 1,
 	building = 5,
-	hotspot = 1,
 	lull = 4,
 	move = 2,
+	scene = 2,
 	unitBuilt = 5,
 	unitDamaged = 2,
 	unitDestroyed = 3,
@@ -988,9 +946,9 @@ local eventStatistics = EventStatistics:new({
 	eventMeanAdj = {
 		attack = 1.0,
 		building = 2.4,
-		hotspot = 0.7,
 		lull = 1.0,
 		move = 5.0,
+		scene = 1.0,
 		unitBuilt = 1.9,
 		unitDamaged = 0.8,
 		unitDestroyed = 0.5,
@@ -1004,8 +962,9 @@ local events = SpatialLookup:new({ xSize = mapGridX, ySize = mapGridZ, gridSize 
 local mie, pendingMie
 
 local function _getInterestModifier(event)
-	if event.type == lullEventType then
-		-- Lulls have a pseudo-location in the middle of a wide area, and should ignore what is happening there.
+	if event.type == lullEventType or event.type == sceneEventType then
+		-- Lulls have a pseudo-location in the middle of a wide area, and should ignore what is happening
+		-- there. Scenes do their own accounting of what's new (see scenes).
 		return 1
 	end
 	local x, _, z = unpack(event.location)
@@ -1072,7 +1031,7 @@ local function addEvent(actor, importance, location, meta, sbjName, type, unitID
 	local considerForMergeAfterFrame = gameFrame - framesPerSecond
 	local event = nil
 	if not opts.noMerge then
-		event = events:getNearby(location[1], location[3], eventMergeRange, function(e)
+		event = events:getNearby(location[1], location[3], opts.mergeRange or eventMergeRange, function(e)
 			-- The current pick keeps merging for as long as it lasts.
 			return (e.started >= considerForMergeAfterFrame or e == mie)
 		        and e.type == type
@@ -1231,6 +1190,33 @@ local lullConfig = {
 -- Lull detection, defined with the display code. damage has this second's damage, its short and
 -- long running means and the short mean's decaying peak (metal value per second).
 local lull = { damage = { now = 0, short = 0, long = 0, peak = 0 }, armed = false }
+
+-- Scenes: a scene is a place where value is at stake, i.e. one side's metal within reach of the
+-- other's armed units, now or in the next few seconds on their current heading. Clashes, raids and
+-- bombing runs all score the same way, in metal. Orders are ignored: players change their minds,
+-- so only where units are actually going counts, and less the further ahead it is.
+local scenes = {
+	-- Armed units are projected along their velocity to these times (s), with these weights
+	horizon = { 0, 3, 6, 9 }, discount = { 1, 0.6, 0.3, 0.15 },
+	-- Metal an armed unit puts at stake, per metal of its own cost
+	leverage = 2,
+	-- A cell's stake counts by how far it has risen over its average of this many seconds, so a
+	-- standoff fades. Ignore rises below minStake.
+	baselineSeconds = 30, minStake = 150,
+	-- ... or of this many seconds, within watchedRange of where the camera is looking. A scene on
+	-- show holds the camera only while its stake keeps growing.
+	watchedSeconds = 3, watchedRange = worldGridSize,
+	-- Add events for at most this many scenes a second, at least this many cells apart
+	maxScenes = 2, separation = 3,
+	-- Frame the units this close to the cell centre
+	radius = worldGridSize * 0.75,
+	eventOpts = { noGrid = true, mergeRange = worldGridSize * 1.5 },
+	-- Average stake by cell, and ally team names
+	baseline = {}, names = {},
+	-- This second's metal value, armed strength over the horizon and armed strength now, by ally
+	-- team and cell
+	value = {}, power = {}, powerNow = {},
+}
 
 -- Orbits: once a shot is framed, the camera may slowly fly around the event to a heading that
 -- shows more of what's going on nearby, keeps the map on screen and isn't blocked by terrain.
@@ -1612,6 +1598,34 @@ local function __getUnitsNameString(units)
 	return result or "unknown"
 end
 
+-- Track the event's units, ahead of those already tracked or (fresh) in their place
+local function trackEvent(event, fresh)
+	if fresh then
+		display.tracking:clear()
+	end
+	-- We use keepPrevious to keep runs of track infos from the same event
+	local keepPrevious = false
+	for k, v in pairs(event._sbjUnits) do
+		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
+		keepPrevious = true
+	end
+	for k, v in pairs(event._objUnits) do
+		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
+		keepPrevious = true
+	end
+
+	-- Remove duplicates from tracking
+	local tracked, trackInfo = {}, display.tracking.head
+	while trackInfo do
+		if tracked[trackInfo.unitID] then
+			trackInfo, _ = display.tracking:remove(trackInfo)
+		else
+			tracked[trackInfo.unitID] = true
+			trackInfo = trackInfo.prev
+		end
+	end
+end
+
 local function updateDisplay(event)
 	local camAngle, commentary, isWide, fill = defaultRx, nil, false, frameFill
 
@@ -1631,8 +1645,8 @@ local function updateDisplay(event)
 		commentary = sbjString .. " attacking"
 	elseif event.type == buildingEventType then
 		commentary = actorName .. " making " .. sbjString
-	elseif event.type == hotspotEventType then
-		commentary = "Something's going down here"
+	elseif event.type == sceneEventType then
+		commentary = event.meta.commentary
 	elseif event.type == lullEventType then
 		camAngle = lullConfig.pitch
 		commentary = event.meta and event.meta.commentary or "The dust settles"
@@ -1656,27 +1670,7 @@ local function updateDisplay(event)
 	-- Wide shots read like a map, so they keep north up and don't count as watching their centre
 	display.camAngle, display.isWide, display.fill = camAngle, isWide, fill
 
-	-- We use keepPrevious to keep runs of track infos from the same event
-	local keepPrevious = false
-	for k, v in pairs(event._sbjUnits) do
-		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
-		keepPrevious = true
-	end
-	for k, v in pairs(event._objUnits) do
-		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
-		keepPrevious = true
-	end
-
-	-- Remove duplicates from tracking
-	local tracked, trackInfo = {}, display.tracking.head
-	while trackInfo do
-		if tracked[trackInfo.unitID] then
-			trackInfo, _ = display.tracking:remove(trackInfo)
-		else
-			tracked[trackInfo.unitID] = true
-			trackInfo = trackInfo.prev
-		end
-	end
+	trackEvent(event)
 
 	if options.show_commentary.value then
 		commentary_cpl:SetText(commentary)
@@ -1765,6 +1759,155 @@ function lull.update()
 	end
 end
 
+-- Spread amount over the four cells nearest (x, z), by closeness to their centres, so that scores
+-- don't jump as units cross cell edges. With best, keep the largest amount per cell instead of adding.
+function scenes.spread(cells, x, z, amount, best)
+	local fx, fz = x / worldGridSize - 0.5, z / worldGridSize - 0.5
+	local gx, gz = floor(fx), floor(fz)
+	for ix = 0, 1 do
+		for iz = 0, 1 do
+			local weight = (1 - math.abs(fx - gx - ix)) * (1 - math.abs(fz - gz - iz))
+			local cell = 1 + bound(gx + ix, 0, mapGridX - 1) + bound(gz + iz, 0, mapGridZ - 1) * mapGridX
+			if best then
+				cells[cell] = max(cells[cell] or 0, amount * weight)
+			else
+				cells[cell] = (cells[cell] or 0) + amount * weight
+			end
+		end
+	end
+end
+
+-- Add a unit to this second's value and strength grids. Called as each unit's position is
+-- refreshed, which spreads the work over the second.
+function scenes.observe(info)
+	local cfg, allyTeam = scenes, info.allyTeam
+	if not cfg.value[allyTeam] then
+		cfg.value[allyTeam], cfg.power[allyTeam], cfg.powerNow[allyTeam] = {}, {}, {}
+	end
+	local x, _, z = unpack(info.location)
+	scenes.spread(cfg.value[allyTeam], x, z, info.importance)
+	local _, _, weaponImportance = unitInfo:_unitStats(info.unitDefID)
+	if weaponImportance <= 0 or info.unfinished then
+		return
+	end
+	scenes.spread(cfg.powerNow[allyTeam], x, z, info.importance)
+	-- Strength along the unit's path: in each cell, the most it will bring to bear
+	-- (velocity is per frame)
+	local vx, _, vz = unpack(info.velocity)
+	local power, path = cfg.power[allyTeam], {}
+	for i, seconds in ipairs(cfg.horizon) do
+		local frames = seconds * framesPerSecond
+		scenes.spread(path, x + vx * frames, z + vz * frames, info.importance * cfg.discount[i], true)
+		if vx == 0 and vz == 0 then
+			break
+		end
+	end
+	for cell, amount in pairs(path) do
+		power[cell] = (power[cell] or 0) + amount
+	end
+end
+
+-- Returns, by cell: metal at stake, the same counting only where armed units are now, and the
+-- ally team with most at stake
+function scenes.survey()
+	local cfg, value, power, powerNow = scenes, scenes.value, scenes.power, scenes.powerNow
+	cfg.value, cfg.power, cfg.powerNow = {}, {}, {}
+
+	local stake, stakeNow, owner, ownerStake = {}, {}, {}, {}
+	for allyTeam, cells in pairs(value) do
+		for cell, v in pairs(cells) do
+			local threat, threatNow = 0, 0
+			for enemy, enemyPower in pairs(power) do
+				if enemy ~= allyTeam then
+					threat = threat + (enemyPower[cell] or 0)
+					threatNow = threatNow + (powerNow[enemy][cell] or 0)
+				end
+			end
+			local atStake = min(v, cfg.leverage * threat)
+			if atStake > 0 then
+				stake[cell] = (stake[cell] or 0) + atStake
+				stakeNow[cell] = (stakeNow[cell] or 0) + min(v, cfg.leverage * threatNow)
+				if atStake > (ownerStake[cell] or 0) then
+					owner[cell], ownerStake[cell] = allyTeam, atStake
+				end
+			end
+		end
+	end
+	return stake, stakeNow, owner
+end
+
+-- Once a second: add events where the stake has risen most
+function scenes.update()
+	local cfg = scenes
+	local stake, stakeNow, owner = scenes.survey()
+	for cell in pairs(cfg.baseline) do
+		stake[cell] = stake[cell] or 0
+	end
+	local rise = {}
+	local wx, _, wz = unpack(display.location)
+	for cell, s in pairs(stake) do
+		local base = cfg.baseline[cell] or 0
+		rise[cell] = s > base and s - base or nil
+		-- What the camera is on stops being news much sooner
+		local x, z = ((cell - 1) % mapGridX + 0.5) * worldGridSize, (floor((cell - 1) / mapGridX) + 0.5) * worldGridSize
+		local watched = not display.isWide and max(math.abs(x - wx), math.abs(z - wz)) <= cfg.watchedRange
+		base = base + (s - base) / (watched and cfg.watchedSeconds or cfg.baselineSeconds)
+		cfg.baseline[cell] = base >= 1 and base or nil
+	end
+
+	-- A scene is a cell and its neighbours, centred on where the rise is
+	local risen = {}
+	for cell in pairs(rise) do
+		local gx, gz = (cell - 1) % mapGridX + 1, floor((cell - 1) / mapGridX) + 1
+		local total, xSum, zSum = 0, 0, 0
+		for ix = max(1, gx - 1), min(mapGridX, gx + 1) do
+			for iz = max(1, gz - 1), min(mapGridZ, gz + 1) do
+				local r = rise[ix + (iz - 1) * mapGridX] or 0
+				total, xSum, zSum = total + r, xSum + r * (ix - 0.5), zSum + r * (iz - 0.5)
+			end
+		end
+		if total >= cfg.minStake then
+			risen[#risen + 1] = { cell = cell, gx = gx, gz = gz, rise = total,
+				x = xSum / total * worldGridSize, z = zSum / total * worldGridSize }
+		end
+	end
+	table.sort(risen, function(a, b) return a.rise > b.rise end)
+
+	local added = {}
+	for _, scene in ipairs(risen) do
+		local apart = #added < cfg.maxScenes
+		for _, other in ipairs(added) do
+			apart = apart and max(math.abs(scene.gx - other.gx), math.abs(scene.gz - other.gz)) >= cfg.separation
+		end
+
+		-- Frame the mobile units there, or failing that the buildings
+		local x, z, cell = scene.x, scene.z, scene.cell
+		local subjects, statics = {}, {}
+		for _, unitID in ipairs(apart and spGetUnitsInCylinder(x, z, cfg.radius) or {}) do
+			local location, _, _, _, isStatic = unitInfo:get(unitID)
+			if location then
+				local units = isStatic and statics or subjects
+				units[unitID] = location
+			end
+		end
+		subjects = next(subjects) and subjects or statics
+		if next(subjects) then
+			added[#added + 1] = scene
+			-- Share of the stake that is still on its way
+			local soon = 1 - stakeNow[cell] / stake[cell]
+			local commentary = (cfg.names[owner[cell]] or "Someone") .. (soon > 0.5 and " has trouble incoming" or " under pressure")
+			local event = addEvent(nil, scene.rise, { x, spGetGroundHeight(x, z), z }, nil, sceneEventType, sceneEventType, nil, nil, cfg.eventOpts)
+			event.meta, event._sbjUnits = { commentary = commentary }, subjects
+			if event == shownEvent then
+				trackEvent(event, true)
+			end
+			if STATS then
+				spEcho(string.format('rc-scene,%.0f,%.0f,%.0f,%.2f', x, z, scene.rise, soon))
+			end
+		end
+	end
+end
+
 function widget:Shutdown()
   spSetCameraState(initialCameraState, 0)
 end
@@ -1810,6 +1953,7 @@ function widget:Initialize()
 				    teamName = spGetPlayerInfo(teamLeader)
                 end
 			end
+			scenes.names[allyTeam] = allyTeamName
 			teamInfo[teamID] = {
 				allyTeam = allyTeam,
 				allyTeamName = allyTeamName,
@@ -1825,7 +1969,16 @@ function widget:Initialize()
 		-- Static things are less interesting, but with allyTeams multiplier can still be relevant
 		local interest = isMoving and 1 or 0.16
 		interestGrid:add(location[1], location[3], allyTeam, interest)
-	end})
+	end, updateListener = scenes.observe })
+
+	-- Catch up on units made before the widget started, staggering their position updates
+	gameFrame = Spring.GetGameFrame()
+	for _, unitID in ipairs(Spring.GetAllUnits()) do
+		unitInfo:get(unitID)
+		if unitInfo.cache[unitID] then
+			unitInfo.cache[unitID].lastUpdatedFrame = gameFrame - unitID % unitInfoCacheFrames
+		end
+	end
 
 	if options.show_commentary then
 		setupPanels()
@@ -1878,19 +2031,7 @@ function widget:GameFrame(frame)
 		end
     end
 
-	local _, igMax, igX, igZ = interestGrid:statistics()
-	if igMax >= interestGrid:getInterestingScore() then
-		local units = spGetUnitsInCylinder(igX, igZ, length(worldGridSize / 2, worldGridSize / 2))
-		local hotspotEvent
-		for _, unitID in pairs(units) do
-			local location, _, _, _, isStatic = unitInfo:get(unitID)
-			if not isStatic then
-				hotspotEvent = hotspotEvent or addEvent(nil, igMax, { igX, spGetGroundHeight(igX, igZ), igZ }, nil, hotspotEventType, hotspotEventType, nil, nil, ADD_EVENT_OPTS_NO_GRID_NO_MERGE)
-				hotspotEvent:addSubject(unitID, location)
-			end
-		end
-	end
-
+	scenes.update()
 
 	local cut = false
 	if pendingMie and pendingMie ~= mie then
@@ -2066,6 +2207,10 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam, _)
 	
 	local allyTeam = teamInfo[unitTeam].allyTeam
 	local sbjLocation, _, importance, sbjName = unitInfo:watch(unitID, allyTeam, unitDefID)
+	if unitInfo.cache[unitID] then
+		-- Not a threat until finished (see scenes)
+		unitInfo.cache[unitID].unfinished = true
+	end
 	local meta = { sbjUnitID = unitID }
 	addEvent(unitTeam, importance, sbjLocation, meta, sbjName, buildingEventType, unitID, _updateBuildingEvent)
 end
