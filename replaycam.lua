@@ -106,7 +106,7 @@ local userInactiveSecondsThreshold = 2
 -- GUI COMPONENTS
 
 -- Callout and ground markings for the shot (see OVERLAY)
-local overlay = { fights = {}, allyColor = {} }
+local overlay = { tally = {}, allyColor = {} }
 
 i18nPrefix = 'actiontrackingcamera_'
 options_path = 'Settings/Spectating/Action Tracking Camera'
@@ -671,12 +671,16 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	local unitDef = UnitDefs[unitDefID]
 	local name = spGetHumanName(unitDef, unitID)
 	local importance, _, _, _ = self:_unitStats(unitDefID)
+	-- What it cost, unlike importance, which is how much the camera cares about it
+	local metal = unitDef.metalCost
 	if unitDef.name == 'terraunit' then
 		-- FIXME: This is set in unit_terraform.lua, but not accessible here?
 		importance = spGetUnitRulesParam(unitID, 'terraform_estimate') or importance
+		metal = importance
 		spEcho('terraform_estimate', importance)
 	end
-	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, importance = importance, lastUpdatedFrame = gameFrame }
+	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, importance = importance, metal = metal,
+		lastUpdatedFrame = gameFrame }
 	if not self:_updatePosition(unitID, cacheObject) then
 		return
 	end
@@ -1145,6 +1149,8 @@ local scenes = {
 	maxScenes = 2, separation = 3,
 	-- Frame the units this close to the cell centre
 	radius = worldGridSize * 0.75,
+	-- The stake on show is steadied over about this many seconds
+	shownStakeSeconds = 3,
 	-- A scene already under way only moves as far as the rise moves beyond this
 	deadZone = 128,
 	-- A scene this big and this close to the shot is taken into frame for a few seconds
@@ -1152,9 +1158,9 @@ local scenes = {
 	eventOpts = { noGrid = true, mergeRange = worldGridSize * 1.5 },
 	-- Average stake by cell, and ally team names
 	baseline = {}, names = {},
-	-- This second's metal value, armed strength over the horizon and armed strength now, by ally
-	-- team and cell
-	value = {}, power = {}, powerNow = {},
+	-- This second's value (importance, for scoring), metal (what it cost, for the callout), armed
+	-- strength over the horizon and armed strength now, by ally team and cell
+	value = {}, metal = {}, power = {}, powerNow = {},
 }
 
 -- Orbits: once a shot is framed, the camera may slowly fly around the event to a heading that
@@ -1194,11 +1200,19 @@ local display, initialCameraState, camera
 -- Event the camera is actually showing (updateDisplay may refuse to switch)
 local shownEvent
 
--- OVERLAY
--- A callout pointing at the shot, with what each side has destroyed in the fight there, and markings on
--- the ground: a ring for a scene, an arrow for a move.
+-- Whether a world location is in view
+local function onScreen(location)
+	local vsx, vsy = spGetViewGeometry()
+	local sx, sy, sz = spWorldToScreenCoords(location[1], location[2], location[3])
+	return sx and sz >= 0 and sz <= 1 and sx >= 0 and sx <= vsx and sy >= 0 and sy <= vsy or false
+end
 
-overlay.fightRange, overlay.fightGapFrames = worldGridSize * 1.5, 20 * framesPerSecond
+-- OVERLAY
+-- A callout pointing at the shot, with what each side has killed on screen since the last cut, and
+-- markings on the ground: a ring for a scene, an arrow for a move.
+
+-- A unit dying with no attacker is credited to whoever hit it this recently
+overlay.creditFrames = 20 * framesPerSecond
 -- Text size and arrow width, the first for a 1080 high view
 overlay.textSize, overlay.arrowWidth = 16, 36
 
@@ -1218,41 +1232,20 @@ function overlay.metal(amount)
 	return amount < 1000 and tostring(amount) or string.format("%d,%03d", floor(amount / 1000), amount % 1000)
 end
 
--- Deaths close together with no long gap between them make a fight, scored by what each side has
--- destroyed
+-- The tally counts what the viewer could have seen die: on screen, in a close shot. A cut or a wide
+-- shot starts it again, as the viewer sees those as a new scene; a pan carries on.
 function overlay.addDeath(allyTeam, location, metal)
-	local x, z, fight = location[1], location[3], nil
-	for _, f in ipairs(overlay.fights) do
-		if length(f.x - x, f.z - z) <= overlay.fightRange then
-			fight = f
-		end
+	if not display.isWide and onScreen(location) then
+		overlay.tally[allyTeam] = (overlay.tally[allyTeam] or 0) + metal
 	end
-	if not fight then
-		fight = { x = x, z = z, destroyed = {} }
-		overlay.fights[#overlay.fights + 1] = fight
-	end
-	fight.frame = gameFrame
-	fight.destroyed[allyTeam] = (fight.destroyed[allyTeam] or 0) + metal
 end
 
--- Once a second: forget finished fights, find the one in shot and word the detail line
+-- Once a second: word the detail line
 function overlay.update()
-	local live, nearest, nearestDistance = {}, nil, overlay.fightRange * 1.5
-	local x, _, z = unpack(display.location)
-	for _, fight in ipairs(overlay.fights) do
-		if gameFrame - fight.frame < overlay.fightGapFrames then
-			live[#live + 1] = fight
-			local d = length(fight.x - x, fight.z - z)
-			if d < nearestDistance and not display.isWide then
-				nearest, nearestDistance = fight, d
-			end
-		end
-	end
-	overlay.fights, overlay.fight = live, nearest
 
 	local event, detail = shownEvent, nil
 	if event and event.type == sceneEventType then
-		detail = overlay.metal(event.meta.stake) .. " metal at stake"
+		detail = event.shownStake and overlay.metal(event.shownStake) .. " metal at stake"
 	elseif event and event.type == buildingEventType then
 		local unitID = next(event._sbjUnits)
 		local unitDefID = unitID and spGetUnitDefID(unitID)
@@ -1563,9 +1556,9 @@ function overlay.draw()
 		detail = string.format("arrives in %ds", math.ceil(length(overlay.arrowTo[1] - sx, overlay.arrowTo[2] - sz) / max(1, speed)))
 	end
 
-	-- The fight's tally: what each side has destroyed, and a bar split the same way
-	local fight, a, b, tallyRows = overlay.fight, nil, nil, 0
-	if fight and next(fight.destroyed) then
+	-- The tally: what each side has killed, and a bar split the same way
+	local tally, a, b, tallyRows = overlay.tally, nil, nil, 0
+	if next(tally) then
 		for allyTeam in pairs(overlay.allyColor) do
 			a, b = a or allyTeam, a and allyTeam
 			tallyRows = tallyRows + 1
@@ -1577,21 +1570,22 @@ function overlay.draw()
 		if tallyRows == 0 then
 			-- More than two sides: list them
 			local parts = {}
-			for allyTeam, destroyed in pairs(fight.destroyed) do
+			for allyTeam, destroyed in pairs(tally) do
 				parts[#parts + 1] = overlay.coloured(scenes.names[allyTeam] .. " " .. overlay.metal(destroyed), overlay.allyColor[allyTeam])
 			end
-			detail = (detail and detail .. "  |  " or "") .. "destroyed: " .. table.concat(parts, "  ")
+			detail = (detail and detail .. "  |  " or "") .. "killed: " .. table.concat(parts, "  ")
 		end
 	end
-	local left = tallyRows == 1 and overlay.coloured(scenes.names[a] .. " " .. overlay.metal(fight.destroyed[a] or 0), overlay.allyColor[a])
-	local right = tallyRows == 1 and overlay.coloured(overlay.metal(fight.destroyed[b] or 0) .. " " .. scenes.names[b], overlay.allyColor[b])
+	local left = tallyRows == 1 and overlay.coloured(scenes.names[a] .. " " .. overlay.metal(tally[a] or 0), overlay.allyColor[a])
+	local right = tallyRows == 1 and overlay.coloured(overlay.metal(tally[b] or 0) .. " " .. scenes.names[b], overlay.allyColor[b])
 
 	local w = gl.GetTextWidth(headline) * size
 	if detail then
 		w = max(w, gl.GetTextWidth(detail) * small)
 	end
 	if left then
-		w = max(w, (gl.GetTextWidth(left) + gl.GetTextWidth(right)) * small + size * 2)
+		-- "killed" sits in the middle, between each side's count
+		w = max(w, (max(gl.GetTextWidth(left), gl.GetTextWidth(right)) * 2 + gl.GetTextWidth("killed")) * small + size * 2)
 	end
 	w = w + pad * 2
 	local h = row * (1 + (detail and 1 or 0) + tallyRows) + pad + tallyRows * pad
@@ -1639,8 +1633,10 @@ function overlay.draw()
 		ty = ty - row
 		gl.Text(left, bx + pad, ty, small, "o")
 		gl.Text(right, bx + w - pad, ty, small, "or")
-		-- Each side's share of the bar is what it has destroyed
-		local split = bx + pad + (w - pad * 2) * (fight.destroyed[a] or 0) / ((fight.destroyed[a] or 0) + (fight.destroyed[b] or 0))
+		gl.Color(0.75, 0.75, 0.75, 1)
+		gl.Text("killed", bx + w / 2, ty, small, "oc")
+		-- Each side's share of the bar is what it has killed
+		local split = bx + pad + (w - pad * 2) * (tally[a] or 0) / ((tally[a] or 0) + (tally[b] or 0))
 		local ca, cb = overlay.allyColor[a], overlay.allyColor[b]
 		gl.Color(ca[1], ca[2], ca[3], 0.9)
 		gl.Rect(bx + pad, ty - pad, split, ty - pad * 0.4)
@@ -1804,9 +1800,7 @@ transitionCost = function(location)
 	if pan > maxPanSeconds then
 		return 1
 	end
-	local vsx, vsy = spGetViewGeometry()
-	local sx, sy, sz = spWorldToScreenCoords(location[1], location[2], location[3])
-	if sx and sz >= 0 and sz <= 1 and sx >= 0 and sx <= vsx and sy >= 0 and sy <= vsy then
+	if onScreen(location) then
 		pan = pan / 2
 	end
 	-- Even a tiny pan takes about the look-at smooth time, so measure from there
@@ -2063,6 +2057,9 @@ local function updateDisplay(event)
 
 	-- A wide shot's framing (placeholders at its corners) is no place to start from, or keep
 	trackEvent(event, isWide or display.isWide)
+	if isWide then
+		overlay.tally = {}
+	end
 	-- Wide shots read like a map, so they keep north up and don't count as watching their centre
 	display.camAngle, display.isWide, display.fill = camAngle, isWide, fill
 
@@ -2184,22 +2181,23 @@ end
 function scenes.observe(info)
 	local cfg, allyTeam = scenes, info.allyTeam
 	if not cfg.value[allyTeam] then
-		cfg.value[allyTeam], cfg.power[allyTeam], cfg.powerNow[allyTeam] = {}, {}, {}
+		cfg.value[allyTeam], cfg.metal[allyTeam], cfg.power[allyTeam], cfg.powerNow[allyTeam] = {}, {}, {}, {}
 	end
 	local x, _, z = unpack(info.location)
 	scenes.spread(cfg.value[allyTeam], x, z, info.importance)
+	scenes.spread(cfg.metal[allyTeam], x, z, info.metal)
 	local _, _, weaponImportance = unitInfo:_unitStats(info.unitDefID)
 	if weaponImportance <= 0 or info.unfinished then
 		return
 	end
-	scenes.spread(cfg.powerNow[allyTeam], x, z, info.importance)
+	scenes.spread(cfg.powerNow[allyTeam], x, z, info.metal)
 	-- Strength along the unit's path: in each cell, the most it will bring to bear
 	-- (velocity is per frame)
 	local vx, _, vz = unpack(info.velocity)
 	local power, path = cfg.power[allyTeam], {}
 	for i, seconds in ipairs(cfg.horizon) do
 		local frames = seconds * framesPerSecond
-		scenes.spread(path, x + vx * frames, z + vz * frames, info.importance * cfg.discount[i], true)
+		scenes.spread(path, x + vx * frames, z + vz * frames, info.metal * cfg.discount[i], true)
 		if vx == 0 and vz == 0 then
 			break
 		end
@@ -2209,13 +2207,13 @@ function scenes.observe(info)
 	end
 end
 
--- Returns, by cell: metal at stake, the same counting only where armed units are now, and the
--- ally team with most at stake
+-- Returns, by cell: value at stake, the same counting only where armed units are now, the ally team
+-- with most at stake, and the metal at stake (the same, at what the units cost)
 function scenes.survey()
-	local cfg, value, power, powerNow = scenes, scenes.value, scenes.power, scenes.powerNow
-	cfg.value, cfg.power, cfg.powerNow = {}, {}, {}
+	local cfg, value, metal, power, powerNow = scenes, scenes.value, scenes.metal, scenes.power, scenes.powerNow
+	cfg.value, cfg.metal, cfg.power, cfg.powerNow = {}, {}, {}, {}
 
-	local stake, stakeNow, owner, ownerStake = {}, {}, {}, {}
+	local stake, stakeNow, owner, ownerStake, metalStake = {}, {}, {}, {}, {}
 	for allyTeam, cells in pairs(value) do
 		for cell, v in pairs(cells) do
 			local threat, threatNow = 0, 0
@@ -2229,13 +2227,33 @@ function scenes.survey()
 			if atStake > 0 then
 				stake[cell] = (stake[cell] or 0) + atStake
 				stakeNow[cell] = (stakeNow[cell] or 0) + min(v, cfg.leverage * threatNow)
+				metalStake[cell] = (metalStake[cell] or 0) + min(metal[allyTeam][cell], cfg.leverage * threat)
 				if atStake > (ownerStake[cell] or 0) then
 					owner[cell], ownerStake[cell] = allyTeam, atStake
 				end
 			end
 		end
 	end
-	return stake, stakeNow, owner
+	return stake, stakeNow, owner, metalStake
+end
+
+-- The stake around a ring at (x, z): the cells under a square that takes in the ring and the cell
+-- each unit's value is spread over, by how much of each it covers
+function scenes.around(stake, x, z)
+	local half, total = scenes.radius + worldGridSize / 2, 0
+	local function spans(c, count)
+		local shares = {}
+		for i = max(1, floor((c - half) / worldGridSize) + 1), min(count, floor((c + half) / worldGridSize) + 1) do
+			shares[i] = max(0, min(c + half, i * worldGridSize) - max(c - half, (i - 1) * worldGridSize)) / worldGridSize
+		end
+		return shares
+	end
+	for ix, sx in pairs(spans(x, mapGridX)) do
+		for iz, sz in pairs(spans(z, mapGridZ)) do
+			total = total + (stake[ix + (iz - 1) * mapGridX] or 0) * sx * sz
+		end
+	end
+	return total
 end
 
 -- The mobile units near (x, z), or failing that the buildings, or nil
@@ -2253,7 +2271,7 @@ end
 -- Once a second: add events where the stake has risen most
 function scenes.update()
 	local cfg = scenes
-	local stake, stakeNow, owner = scenes.survey()
+	local stake, stakeNow, owner, metalStake = scenes.survey()
 	for cell in pairs(cfg.baseline) do
 		stake[cell] = stake[cell] or 0
 	end
@@ -2313,7 +2331,8 @@ function scenes.update()
 				event.location = { x, spGetGroundHeight(x, z), z }
 				subjects = scenes.subjects(x, z) or subjects
 			end
-			event.meta, event._sbjUnits = { commentary = commentary, side = side, stake = max(scene.rise, stake[cell]), x = x, z = z }, subjects
+			event.meta, event._sbjUnits = { commentary = commentary, side = side, x = x, z = z }, subjects
+			event.shownStake = event.shownStake or scenes.around(metalStake, x, z)
 			if event == shownEvent then
 				trackEvent(event, true)
 			elseif scene.rise >= cfg.asideStake and not display.isWide and length(x - wx, z - wz) <= cfg.asideRange
@@ -2325,6 +2344,13 @@ function scenes.update()
 				spEcho(string.format('rc-scene,%.0f,%.0f,%.0f,%.2f', x, z, scene.rise, soon))
 			end
 		end
+	end
+
+	-- The scene on show keeps its number up to date, whether or not it rose this second
+	local shown = shownEvent
+	if shown and shown.type == sceneEventType and shown.shownStake then
+		local now = scenes.around(metalStake, shown.location[1], shown.location[3])
+		shown.shownStake = shown.shownStake + (now - shown.shownStake) / cfg.shownStakeSeconds
 	end
 end
 
@@ -2696,7 +2722,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 	local info, unitDef = unitInfo.cache[unitID], unitDefID and UnitDefs[unitDefID]
 	local health, _, _, _, buildProgress = spGetUnitHealth(unitID)
 	local killerTeam = attackerTeam or info and info.hitBy and (health or 0) <= 0
-		and gameFrame - info.hitFrame < overlay.fightGapFrames and info.hitBy
+		and gameFrame - info.hitFrame < overlay.creditFrames and info.hitBy
 	if killerTeam and unitTeam and destroyedLocation and unitDef and not unitDef.customParams.dontcount
 	    and teamInfo[killerTeam].allyTeam ~= teamInfo[unitTeam].allyTeam then
 		-- A unit still being built is worth what had gone into it
@@ -2879,6 +2905,7 @@ local function updateCamera(dt, userCameraOverride)
 	end
 
 	if isCut then
+		overlay.tally = {}
 		c.look, c.lookv = tlook, { 0, 0, 0 }
 		c.dist, c.distv = tdist, 0
 		c.pitch, c.pitchv = tpitch, 0
