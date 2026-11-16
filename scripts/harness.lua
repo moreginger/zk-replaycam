@@ -63,7 +63,8 @@ Spring = setmetatable({
 	GetUnitNoDraw = function() return false end,
 	GetUnitDefID = function(id) return units[id] and units[id].def end,
 	GetUnitTeam = function(id) return units[id] and units[id].team end,
-	GetUnitRulesParam = function() end,
+	GetUnitRulesParam = function(id, key) return key == 'on_fire' and units[id] and units[id].onFire and 1 or nil end,
+	GetVisibleUnits = function() local t = {} for id in pairs(units) do t[#t + 1] = id end return t end,
 	GetAllUnits = function() local t = {} for id in pairs(units) do t[#t + 1] = id end return t end,
 	GetUnitsInCylinder = function(x, z, r)
 		local t = {}
@@ -151,10 +152,11 @@ for f = 1, 90 * 30 do
 		-- Kill a building a second, from 2s after arriving
 		local victim = (f - arrived) / 30 - 1
 		if victim == math.floor(victim) and units[victim] and victim >= 1 and victim <= 7 then
-			widget:UnitDamaged(victim, units[victim].def, 1, 100, false, nil, nil, attackers[1], 1, 0)
-			units[victim].health = 0
 			-- Some burn to death: with only the attacker's team known, or with nothing known
 			local attacker = victim % 3 == 0 and attackers[1] or nil
+			units[victim].onFire = not attacker
+			widget:UnitDamaged(victim, units[victim].def, 1, 100, false, nil, nil, attacker, attacker and 1, victim % 3 ~= 1 and 0 or nil)
+			units[victim].health = 0
 			widget:UnitDestroyed(victim, units[victim].def, 1, attacker, attacker and 1, victim % 3 ~= 1 and 0 or nil)
 			units[victim] = nil
 		end

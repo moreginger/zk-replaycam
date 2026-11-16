@@ -76,6 +76,7 @@ local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spGetUnitsInCylinder = Spring.GetUnitsInCylinder
 local spGetUnitTeam = Spring.GetUnitTeam
 local spGetUnitVelocity = Spring.GetUnitVelocity
+local spGetVisibleUnits = Spring.GetVisibleUnits
 local spGetViewGeometry = Spring.GetViewGeometry
 local spIsReplay = Spring.IsReplay
 local spSetCameraState = Spring.SetCameraState
@@ -1144,6 +1145,8 @@ local scenes = {
 	maxScenes = 2, separation = 3,
 	-- Frame the units this close to the cell centre
 	radius = worldGridSize * 0.75,
+	-- A scene already under way only moves as far as the rise moves beyond this
+	deadZone = 128,
 	-- A scene this big and this close to the shot is taken into frame for a few seconds
 	asideStake = 600, asideRange = worldGridSize * 2.5, asideFrames = 3 * framesPerSecond,
 	eventOpts = { noGrid = true, mergeRange = worldGridSize * 1.5 },
@@ -1286,12 +1289,14 @@ function overlay.centre()
 	end
 end
 
--- Where n points round a ring on the ground are on screen
+-- Where n points round a ring on the ground are on screen. Like the drawn ring, each follows the
+-- ground under it.
 function overlay.ring(x, z, radius, n)
-	local points, y = {}, spGetGroundHeight(x, z)
+	local points = {}
 	for i = 1, n do
 		local angle = i * 2 * pi / n
-		points[i] = { spWorldToScreenCoords(x + radius * sin(angle), y, z + radius * cos(angle)) }
+		local px, pz = x + radius * sin(angle), z + radius * cos(angle)
+		points[i] = { spWorldToScreenCoords(px, spGetGroundHeight(px, pz), pz) }
 	end
 	return points
 end
@@ -1335,15 +1340,25 @@ function overlay.redirect(unitID, params)
 	end
 end
 
+-- How a unit is being hurt, from what is known: "under attack by Rogue of Player", or with no one
+-- to blame, "burning" or on its own
+function overlay.blame(destroyed, burning, unitName, player)
+	local by = unitName and player and unitName .. " of " .. player or unitName or player
+	if by then
+		return (destroyed and " destroyed by " or " under attack by ") .. by
+	end
+	return burning and (destroyed and " destroyed by fire" or " burning") or (destroyed and " destroyed" or " under attack")
+end
+
 -- A unit the headline says is under attack has died: say so
-function overlay.kill(unitID, name, destroyerName, attackerTeam)
+function overlay.kill(unitID, name, destroyerName, attackerTeam, burning)
 	if not shownEvent or shownEvent.type ~= unitDamagedEventType or not overlay.subjects[unitID] then
 		return
 	end
 	overlay.killed = overlay.killed + 1
 	local killed, total = overlay.killed, overlay.total
-	overlay.headline = (killed < total and killed .. " of " .. total .. " " .. name .. "s" or total > 1 and total .. " " .. name .. "s" or name)
-		.. " destroyed by " .. (destroyerName or "unknown") .. " of " .. overlay.player(attackerTeam)
+	local subject = killed < total and killed .. " of " .. total .. " " .. name .. "s" or total > 1 and total .. " " .. name .. "s" or name
+	overlay.headline = subject .. overlay.blame(true, burning, destroyerName, attackerTeam and overlay.player(attackerTeam))
 end
 
 function overlay.drawWorld()
@@ -1361,12 +1376,6 @@ function overlay.drawWorld()
 		local x, y, z = unpack(event.location)
 		gl.Color(color[1], color[2], color[3], 0.7)
 		gl.DrawGroundCircle(x, y, z, scenes.radius, 48)
-	end
-	local aside = display.aside
-	if aside and not display.isWide and gameFrame - aside[3] < scenes.asideFrames then
-		local sideColor = overlay.allyColor[aside[4].side] or { 1, 1, 1 }
-		gl.Color(sideColor[1], sideColor[2], sideColor[3], 0.5)
-		gl.DrawGroundCircle(aside[1], spGetGroundHeight(aside[1], aside[2]), aside[2], scenes.radius * 0.6, 32)
 	end
 	gl.DepthTest(false)
 	gl.LineWidth(1)
@@ -1402,7 +1411,7 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 			overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
 		end
 
-		-- Things worth not covering: the units in shot, the move arrow and any rings
+		-- Things worth not covering: the units in shot, the move arrow and a scene's ring
 		local points = shownEvent.type == sceneEventType and overlay.ring(shownEvent.location[1], shownEvent.location[3], scenes.radius, 8) or {}
 		local function avoid(x, z)
 			points[#points + 1] = { spWorldToScreenCoords(x, spGetGroundHeight(x, z), z) }
@@ -1412,13 +1421,19 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 			avoid(trackInfo.location[1], trackInfo.location[3])
 			trackInfo = trackInfo.prev
 		end
-		local from, to, aside = overlay.arrowFrom, overlay.arrowTo, display.aside
+		local from, to = overlay.arrowFrom, overlay.arrowTo
 		for i = 0, from and 6 or -1 do
 			avoid(from[1] + (to[1] - from[1]) * i / 6, from[2] + (to[2] - from[2]) * i / 6)
 		end
-		if aside and gameFrame - aside[3] < scenes.asideFrames then
-			for _, point in ipairs(overlay.ring(aside[1], aside[2], scenes.radius * 0.6, 8)) do
-				points[#points + 1] = point
+		-- Everything else on screen counts for less, and what neither moves nor shoots for less again
+		local others = {}
+		for _, unitID in ipairs(spGetVisibleUnits() or {}) do
+			local x, y, z = spGetUnitPosition(unitID)
+			local unitDefID = spGetUnitDefID(unitID)
+			if x and unitDefID then
+				local _, isStatic, weaponImportance = unitInfo:_unitStats(unitDefID)
+				local px, py = spWorldToScreenCoords(x, y, z)
+				others[#others + 1] = { px, py, (not isStatic or (weaponImportance or 0) > 0) and 0.5 or 0.15 }
 			end
 		end
 		-- Which way the rest of the action lies from the subject
@@ -1430,7 +1445,8 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 
 		-- What putting the callout's corner at (ox, oy) from the subject costs, once kept on screen.
 		-- Worst is landing on the subject or in its ring, then on the game's own windows, then
-		-- covering things, then being far away or on the side the action is.
+		-- covering things, then being far away or on the side the action is. Also returns whether it
+		-- is one of the first two.
 		local function cost(ox, oy)
 			local bx, by = bound(ax + ox, 10, xMax), bound(ay + oy, 10, yMax)
 			local nx, ny = bound(ax, bx, bx + w) - ax, bound(ay, by, by + h) - ay
@@ -1439,19 +1455,27 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 				-- With some room around the ring
 				onSubject = (nx / (across + reach)) ^ 2 + (ny / (up + reach)) ^ 2 < 1
 			end
-			local total = (onSubject and 50 or 0) + 3 * length(nx, ny) / vsy
+			local total, blocked = (onSubject and 50 or 0) + 3 * length(nx, ny) / vsy, onSubject
 			for _, window in ipairs(overlay.ui) do
 				if bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
-					total = total + 20
+					total, blocked = total + 20, true
 				end
 			end
+			local covered = 0
+			for _, other in ipairs(others) do
+				if other[1] > bx - margin and other[1] < bx + w + margin and other[2] > by - margin and other[2] < by + h + margin then
+					covered = covered + other[3]
+				end
+			end
+			-- A crowd is still better covered than a window
+			total = total + min(covered, 10)
 			for _, point in ipairs(points) do
 				if point[1] > bx - margin and point[1] < bx + w + margin and point[2] > by - margin and point[2] < by + h + margin then
 					total = total + 1
 				end
 			end
 			local cx, cy = bx + w / 2 - ax, by + h / 2 - ay
-			return total + 0.5 * (cx * tx + cy * ty) / toward / max(1, length(cx, cy))
+			return total + 0.5 * (cx * tx + cy * ty) / toward / max(1, length(cx, cy)), blocked
 		end
 
 		local current, best, bestCost = overlay.offset, nil, nil
@@ -1463,26 +1487,30 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 				best, bestCost = { ox, oy }, total
 			end
 		end
-		local out = across > 0 and reach * 1.6 or reach
-		for sx = 1, -1, -1 do
-			for sy = 1, -1, -1 do
-				-- A pointer to units reads best on the diagonal. Round a ring, straight up or across
-				-- will do too: further out, and off centre so that one corner is clearly the nearest.
-				local diagonal = sx ~= 0 and sy ~= 0
-				if diagonal or across > 0 and (sx ~= 0 or sy ~= 0) then
-					-- Diagonally, 3/4 of the way out each way clears a ring
-					local dx = diagonal and out + across * 0.75 or out * 1.4 + across
-					local dy = diagonal and out + up * 0.75 or out * 1.4 + up
-					try(sx > 0 and dx or sx < 0 and -dx - w or -w * 0.3, sy > 0 and dy or sy < 0 and -dy - h or -h * 0.3)
-				end
-				if diagonal and across > 0 then
-					-- When a ring leaves no room around it: in from a corner of the screen, as far as
-					-- stays clear
-					local cx, cy, t = (sx > 0 and xMax or 10) - ax, (sy > 0 and yMax or 10) - ay, 0
-					while t < 0.9 and cost(cx - (cx + w / 2) * (t + 0.1), cy - (cy + h / 2) * (t + 0.1)) < 20 do
-						t = t + 0.1
+		-- Close by first, then further out for when the fight is all around the subject
+		for _, far in ipairs({ 1, 2.5, 4 }) do
+			local out = (across > 0 and reach * 1.6 or reach) * far
+			for sx = 1, -1, -1 do
+				for sy = 1, -1, -1 do
+					-- A pointer to units reads best on the diagonal. Round a ring or further out,
+					-- straight up or across will do too: further out, and off centre so that one
+					-- corner is clearly the nearest.
+					local diagonal = sx ~= 0 and sy ~= 0
+					if diagonal or (across > 0 or far > 1) and (sx ~= 0 or sy ~= 0) then
+						-- Diagonally, 3/4 of the way out each way clears a ring
+						local dx = diagonal and out + across * 0.75 or out * 1.4 + across
+						local dy = diagonal and out + up * 0.75 or out * 1.4 + up
+						try(sx > 0 and dx or sx < 0 and -dx - w or -w * 0.3, sy > 0 and dy or sy < 0 and -dy - h or -h * 0.3)
 					end
-					try(cx - (cx + w / 2) * t, cy - (cy + h / 2) * t)
+					if diagonal and across > 0 and far == 1 then
+						-- When a ring leaves no room around it: in from a corner of the screen, as far
+						-- as stays clear
+						local cx, cy, t = (sx > 0 and xMax or 10) - ax, (sy > 0 and yMax or 10) - ay, 0
+						while t < 0.9 and not select(2, cost(cx - (cx + w / 2) * (t + 0.1), cy - (cy + h / 2) * (t + 0.1))) do
+							t = t + 0.1
+						end
+						try(cx - (cx + w / 2) * t, cy - (cy + h / 2) * t)
+					end
 				end
 			end
 		end
@@ -1618,17 +1646,6 @@ function overlay.draw()
 		gl.Rect(bx + pad, ty - pad, split, ty - pad * 0.4)
 		gl.Color(cb[1], cb[2], cb[3], 0.9)
 		gl.Rect(split, ty - pad, bx + w - pad, ty - pad * 0.4)
-	end
-	-- A nearby scene the shot has widened to take in: say what its ring is, above it
-	local aside = display.aside
-	if aside and gameFrame - aside[3] < scenes.asideFrames then
-		local topX, topY = 0, -huge
-		for _, point in ipairs(overlay.ring(aside[1], aside[2], scenes.radius * 0.6, 8)) do
-			if point[2] > topY then
-				topX, topY = point[1], point[2]
-			end
-		end
-		gl.Text(aside[4].commentary .. ": " .. overlay.metal(aside[4].stake) .. " at stake", topX, topY + small * 0.5, small, "oc")
 	end
 	gl.LineWidth(1)
 	gl.Color(1, 1, 1, 1)
@@ -2031,8 +2048,8 @@ local function updateDisplay(event)
 	elseif event.type == unitBuiltEventType then
 		commentary = sbjString .. " built by " .. actorName
 	elseif event.type == unitDamagedEventType then
-		local attacker = __getUnitsNameString(event._objUnits)
-		commentary = sbjString .. " under attack by " .. attacker .. " of " .. actorName
+		local attacker = next(event._objUnits) and __getUnitsNameString(event._objUnits)
+		commentary = sbjString .. overlay.blame(false, not attacker and event.burning, attacker, next(event.actors) and actorName)
 	elseif event.type == unitDestroyedEventType then
 		local destroyer = __getUnitsNameString(event._objUnits)
 		commentary = sbjString .. " destroyed by " .. destroyer .. " of " .. actorName
@@ -2044,10 +2061,10 @@ local function updateDisplay(event)
 		commentary = sbjString .. " captured by " .. actorName
 	end
 
+	-- A wide shot's framing (placeholders at its corners) is no place to start from, or keep
+	trackEvent(event, isWide or display.isWide)
 	-- Wide shots read like a map, so they keep north up and don't count as watching their centre
 	display.camAngle, display.isWide, display.fill = camAngle, isWide, fill
-
-	trackEvent(event)
 
 	shownEvent = event
 	local side, actor = event.meta and event.meta.side, next(event.actors)
@@ -2221,6 +2238,18 @@ function scenes.survey()
 	return stake, stakeNow, owner
 end
 
+-- The mobile units near (x, z), or failing that the buildings, or nil
+function scenes.subjects(x, z)
+	local mobiles, statics = {}, {}
+	for _, unitID in ipairs(spGetUnitsInCylinder(x, z, scenes.radius)) do
+		local location, _, _, _, isStatic = unitInfo:get(unitID)
+		if location then
+			(isStatic and statics or mobiles)[unitID] = location
+		end
+	end
+	return next(mobiles) and mobiles or next(statics) and statics or nil
+end
+
 -- Once a second: add events where the stake has risen most
 function scenes.update()
 	local cfg = scenes
@@ -2265,18 +2294,9 @@ function scenes.update()
 			apart = apart and max(math.abs(scene.gx - other.gx), math.abs(scene.gz - other.gz)) >= cfg.separation
 		end
 
-		-- Frame the mobile units there, or failing that the buildings
 		local x, z, cell = scene.x, scene.z, scene.cell
-		local subjects, statics = {}, {}
-		for _, unitID in ipairs(apart and spGetUnitsInCylinder(x, z, cfg.radius) or {}) do
-			local location, _, _, _, isStatic = unitInfo:get(unitID)
-			if location then
-				local units = isStatic and statics or subjects
-				units[unitID] = location
-			end
-		end
-		subjects = next(subjects) and subjects or statics
-		if next(subjects) then
+		local subjects = apart and scenes.subjects(x, z)
+		if subjects then
 			added[#added + 1] = scene
 			-- Share of the stake that is still on its way
 			local soon = 1 - stakeNow[cell] / stake[cell]
@@ -2284,13 +2304,22 @@ function scenes.update()
 			local commentary = (side and overlay.coloured(cfg.names[side], overlay.allyColor[side]) or "Someone")
 				.. (soon > 0.5 and " has trouble incoming" or " under pressure")
 			local event = addEvent(nil, scene.rise, { x, spGetGroundHeight(x, z), z }, nil, sceneEventType, sceneEventType, nil, nil, cfg.eventOpts)
-			event.meta, event._sbjUnits = { commentary = commentary, side = side, stake = max(scene.rise, stake[cell]) }, subjects
+			-- The rise wanders from cell to cell (and away from where the camera looks, as that
+			-- stops being news), so a scene under way ignores small moves
+			local last = event.meta
+			if last then
+				local follow = max(0, 1 - cfg.deadZone / max(1, length(x - last.x, z - last.z)))
+				x, z = last.x + (x - last.x) * follow, last.z + (z - last.z) * follow
+				event.location = { x, spGetGroundHeight(x, z), z }
+				subjects = scenes.subjects(x, z) or subjects
+			end
+			event.meta, event._sbjUnits = { commentary = commentary, side = side, stake = max(scene.rise, stake[cell]), x = x, z = z }, subjects
 			if event == shownEvent then
 				trackEvent(event, true)
 			elseif scene.rise >= cfg.asideStake and not display.isWide and length(x - wx, z - wz) <= cfg.asideRange
 			    and (not display.aside or display.aside[3] < gameFrame) then
 				-- Scenes come biggest first, so this is the best one this second
-				display.aside = { x, z, gameFrame, event.meta }
+				display.aside = { x, z, gameFrame }
 			end
 			if STATS then
 				spEcho(string.format('rc-scene,%.0f,%.0f,%.0f,%.2f', x, z, scene.rise, soon))
@@ -2645,6 +2674,9 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 	if attackerID then
 		local attackerLocation = unitInfo:get(attackerID)
 		event:addObject(attackerID, attackerLocation)
+	else
+		-- Fire burns on after whoever lit it has gone
+		event.burning = spGetUnitRulesParam(unitID, "on_fire") == 1
 	end
 end
 
@@ -2670,6 +2702,13 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 		-- A unit still being built is worth what had gone into it
 		overlay.addDeath(teamInfo[killerTeam].allyTeam, destroyedLocation, unitDef.metalCost * (buildProgress or 1))
 	end
+	local destroyerLocation, _, _, destroyerName
+	if attackerID then
+		destroyerLocation, _, _, destroyerName = unitInfo:get(attackerID)
+	end
+	if destroyedName and (attackerID or (health or 0) <= 0) then
+		overlay.kill(unitID, destroyedName, destroyerName, killerTeam, spGetUnitRulesParam(unitID, "on_fire") == 1)
+	end
 	unitInfo:forget(unitID)
 	purgeEvents(__purgeSubject, { unitID = unitID })
 
@@ -2686,8 +2725,6 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 	if isStatic then
 		importance = importance * staticAttackedBoost
 	end
-	local destroyerLocation, _, _, destroyerName = unitInfo:get(attackerID)
-	overlay.kill(unitID, destroyedName, destroyerName, attackerTeam)
 	local destroyedEvent = addEvent(attackerTeam, importance, destroyedLocation, nil, destroyedName, unitDestroyedEventType, unitID)
 	destroyedEvent:addObject(attackerID, destroyerLocation)
 	local destroyerEvent = addEvent(unitTeam, importance, destroyerLocation, nil, destroyerName, unitDestroyerEventType, attackerID)
