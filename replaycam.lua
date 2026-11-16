@@ -396,40 +396,26 @@ function WorldGrid:getActivity(x, y)
 	return data[1] * max(1, allyTeamCount * allyTeamCount)
 end
 
-function WorldGrid:_addInternal(x, y, area, opts, func)
-	if not area then
-		area = self.gridSize
-	end
-	local gx, gy = self:__toGridCoords(x, y)
-
-	-- Work out how to divvy the interest up around nearby grid squares.
-	local areas, i, totalArea = {}, 1, 0
-	for ix = gx - 1, gx + 1 do
-		for iy = gy - 1, gy + 1 do
-			if ix >= 1 and ix <= self.xSize and iy >= 1 and iy <= self.ySize then
-				areas[i] = self:_intersectArea(x - area / 2, y - area / 2, x + area / 2, y + area / 2,
-					(ix - 1) * self.gridSize, (iy - 1) * self.gridSize, ix * self.gridSize, iy * self.gridSize)
-				totalArea = totalArea + areas[i]
-			end
-			i = i + 1
+-- Call func on each square under a size-wide square centred on (x, y), with the share of it that
+-- falls there. Squares off the map don't count.
+function WorldGrid:_addInternal(x, y, size, opts, func)
+	local function overlaps(c, count)
+		local spans, total, g = {}, 0, 1 + bound(floor(c / self.gridSize), 0, count - 1)
+		for i = max(1, g - 1), min(count, g + 1) do
+			spans[i] = max(0, min(c + size / 2, i * self.gridSize) - max(c - size / 2, (i - 1) * self.gridSize))
+			total = total + spans[i]
 		end
+		return spans, total
 	end
-
-	if totalArea == 0 then
-		-- This can happen if the location is so far outside the map that it doesn't touch any grids
-		return
-	end
-
-	-- Divvy out the interest.
-	i = 1
-	for ix = gx - 1, gx + 1 do
-		for iy = gy - 1, gy + 1 do
-			if areas[i] then
+	local xs, xTotal = overlaps(x, self.xSize)
+	local ys, yTotal = overlaps(y, self.ySize)
+	for ix, ox in pairs(xs) do
+		for iy, oy in pairs(ys) do
+			if ox * oy > 0 then
 				local data = self.data[ix][iy]
 				self:_syncCell(data)
-				func(data, areas[i] / totalArea, opts)
+				func(data, ox * oy / (xTotal * yTotal), opts)
 			end
-			i = i + 1
 		end
 	end
 end
@@ -453,25 +439,14 @@ function WorldGrid:add(x, y, allyTeam, interest)
 	return self:_addInternal(x, y, self.gridSize, { allyTeam = allyTeam, interest = interest }, _addInterest)
 end
 
-function WorldGrid:_intersectArea(x1, y1, x2, y2, x3, y3, x4, y4)
-	local x5, y5, x6, y6 = max(x1, x3), max(y1, y3), min(x2, x4), min(y2, y4)
-	if x5 >= x6 or y5 >= y6 then
-		return 0
-	end
-	return (x6 - x5) * (y6 - y5)
-end
-
-
-
 -- Call this exactly once between each reset.
 -- When watching an area we apply a fixed boost to make things sticky,
 -- but a longer-term negative factor (passe) to encourage moving.
 function WorldGrid:setWatching(x, y)
-	-- Note: boost is spread over a 2x2 grid.
+	-- Both are spread over a 2x2 grid, so hopping to the next square doesn't escape passe. Passe
+	-- wears off by 1/s in each square, so only more than that tells.
 	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
-	-- passe will be decreased by 1 in EACH grid square in reset, therefore we MUST add more than 1 to a square to have any effect.
-	x, y =  self:__toWorldCoords(self:__toGridCoords(x, y))
-	self:_addInternal(x, y, self.gridSize * 0.5, { passe = 3 }, _addPasse)
+	self:_addInternal(x, y, self.gridSize * 2, { passe = 10 }, _addPasse)
 end
 
 function WorldGrid:setCursor(x, y)
@@ -1740,6 +1715,11 @@ local function statsFlush(userOverride)
 		userOverride and 1 or 0, table.concat(corners, ','),
 		camera and camera.ry or 0, deg(statsMaxYawRate)))
 	statsMaxYawRate = 0
+	-- The shot took in a nearby scene in the last second
+	local aside = display.aside
+	if display.asideFrame and gameFrame - display.asideFrame < updateIntervalFrames then
+		spEcho(string.format('rc-aside,%.0f,%.0f', aside[1], aside[2]))
+	end
 end
 
 local function statsTrackYaw(dt, oldRy, newRy, isCut)
@@ -2873,6 +2853,7 @@ local function updateCamera(dt, userCameraOverride)
 	if aside and not display.isWide and gameFrame - aside[3] < scenes.asideFrames
 	    and length(aside[1] - ex, aside[2] - ez) <= scenes.asideRange then
 		points[#points + 1] = aside
+		display.asideFrame = gameFrame
 	end
 	for _, point in ipairs(points) do
 		local dx, dz = point[1] - ex, point[2] - ez
