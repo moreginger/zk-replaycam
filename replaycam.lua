@@ -1185,6 +1185,7 @@ end
 -- OVERLAY
 -- A callout pointing at the shot, with what each side has killed on screen since the last cut, and
 -- markings on the ground: a ring for a scene, an arrow for a move.
+-- A wide shot gets a board instead, with what each side's units are worth.
 
 -- A unit dying with no attacker is credited to whoever hit it this recently
 overlay.creditFrames = 20 * framesPerSecond
@@ -1230,6 +1231,18 @@ function overlay.update()
 		end
 	end
 	overlay.detail = detail
+
+	-- What each side's units are worth, part-built ones as far as they have got, for the wide shot.
+	-- Zero-K's end game graphs keep these per team.
+	local worth = {}
+	for teamID, info in pairs(teamInfo) do
+		local value = spGetTeamRulesParam(teamID, "stats_history_unit_value_current")
+		if value and overlay.allyColor[info.allyTeam] then
+			value = value + (spGetTeamRulesParam(teamID, "stats_history_nano_partial_current") or 0)
+			worth[info.allyTeam] = (worth[info.allyTeam] or 0) + value
+		end
+	end
+	overlay.worth = worth
 
 	-- How fast a move is closing on its target, for the time to arrive
 	local x, _, z = overlay.centre()
@@ -1504,13 +1517,91 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 	return bound(box[1], 10, xMax), bound(box[2], 10, yMax)
 end
 
+-- On a wide shot, a board at the top of the screen with what each side's units are worth in metal.
+-- Two sides face each other across it with a bar split the same way, like the tally; more are
+-- listed a row each.
+function overlay.drawWorth(vsx, vsy, size)
+	local worth, sides = overlay.worth or {}, {}
+	for allyTeam in pairs(worth) do
+		sides[#sides + 1] = allyTeam
+	end
+	if #sides == 0 then
+		return
+	end
+	table.sort(sides)
+	local pad, row, small = size * 0.6, size * 1.5, size * 0.85
+	local title, paired = "Metal value", #sides == 2
+	local w, nameW, valueW = gl.GetTextWidth(title) * size, 0, 0
+	for _, allyTeam in ipairs(sides) do
+		nameW = max(nameW, gl.GetTextWidth(scenes.names[allyTeam]) * small)
+		valueW = max(valueW, gl.GetTextWidth(overlay.metal(worth[allyTeam])) * small)
+	end
+	if paired then
+		-- Each side's name and value, either side of the middle
+		w = max(w, (nameW + valueW + size) * 2)
+	else
+		w = max(w, nameW + valueW + size * 2)
+	end
+	w = w + pad * 2
+	local h = row * (1 + (paired and 1 or #sides)) + pad + (paired and pad or 0)
+
+	-- Top centre, below any of the game's windows in the way
+	if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
+		overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
+	end
+	local bx, by = (vsx - w) / 2, vsy - h - 10
+	local moved = true
+	while moved and by > 10 do
+		moved = false
+		for _, window in ipairs(overlay.ui) do
+			if bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
+				by, moved = window[2] - h - 10, true
+			end
+		end
+	end
+
+	gl.Color(0, 0, 0, 0.55)
+	gl.Rect(bx, by, bx + w, by + h)
+	gl.Color(1, 1, 1, 1)
+	local ty = by + h - pad * 0.5 - size
+	gl.Text(title, bx + w / 2, ty, size, "oc")
+	if paired then
+		local a, b = sides[1], sides[2]
+		ty = ty - row
+		gl.Text(overlay.coloured(scenes.names[a] .. " " .. overlay.metal(worth[a]), overlay.allyColor[a]), bx + pad, ty, small, "o")
+		gl.Text(overlay.coloured(overlay.metal(worth[b]) .. " " .. scenes.names[b], overlay.allyColor[b]), bx + w - pad, ty, small, "or")
+		local total = worth[a] + worth[b]
+		local split = bx + pad + (w - pad * 2) * (total > 0 and worth[a] / total or 0.5)
+		local ca, cb = overlay.allyColor[a], overlay.allyColor[b]
+		gl.Color(ca[1], ca[2], ca[3], 0.9)
+		gl.Rect(bx + pad, ty - pad, split, ty - pad * 0.4)
+		gl.Color(cb[1], cb[2], cb[3], 0.9)
+		gl.Rect(split, ty - pad, bx + w - pad, ty - pad * 0.4)
+	else
+		for _, allyTeam in ipairs(sides) do
+			ty = ty - row
+			local color = overlay.allyColor[allyTeam]
+			gl.Text(overlay.coloured(scenes.names[allyTeam], color), bx + pad, ty, small, "o")
+			gl.Text(overlay.coloured(overlay.metal(worth[allyTeam]), color), bx + w - pad, ty, small, "or")
+		end
+	end
+	gl.Color(1, 1, 1, 1)
+end
+
 function overlay.draw()
-	local headline = overlay.headline
-	if not shownEvent or not headline or display.isWide or not options.show_commentary.value then
+	if not shownEvent or not options.show_commentary.value then
 		return
 	end
 	local vsx, vsy = spGetViewGeometry()
 	local size = overlay.textSize * vsy / 1080
+	if display.isWide then
+		overlay.drawWorth(vsx, vsy, size)
+		return
+	end
+	local headline = overlay.headline
+	if not headline then
+		return
+	end
 	local pad, row, color = size * 0.6, size * 1.5, overlay.color
 	local detail, small = overlay.detail, size * 0.85
 	-- The subject on screen: the units the headline names, or a scene and its ring

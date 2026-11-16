@@ -88,7 +88,11 @@ Spring = setmetatable({
 	GetPlayerInfo = function(p) return 'Player' .. p end,
 	GetTeamColor = function() return 1, 1, 1, 1 end,
 	GetGameRulesParam = function(k) return k:find('long') and ('Team ' .. k:sub(-1)) or 'T' end,
-	GetTeamRulesParam = function() end,
+	-- What each side's units are worth, for the wide shot's board
+	GetTeamRulesParam = function(t, k)
+		if k == 'stats_history_unit_value_current' then return 1000 + 500 * t + frame end
+		if k == 'stats_history_nano_partial_current' then return 120 end
+	end,
 	GetMouseState = function() return 0, 0 end,
 	SetMouseCursor = function() end,
 	-- Rough footprint for a north-facing camera pitched at 1 rad
