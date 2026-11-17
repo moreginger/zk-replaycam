@@ -1191,6 +1191,8 @@ end
 overlay.creditFrames = 20 * framesPerSecond
 -- Text size and arrow width, the first for a 1080 high view
 overlay.textSize, overlay.arrowWidth = 16, 36
+-- How opaque the pointer and a scene's ring are
+overlay.lineAlpha = 0.8
 
 -- A player and their side, in the player's colour
 function overlay.player(teamID)
@@ -1374,7 +1376,7 @@ function overlay.drawWorld()
 		overlay.arrow(from[1], from[2], to[1], to[2], color)
 	elseif event.type == sceneEventType then
 		local x, y, z = unpack(event.location)
-		gl.Color(color[1], color[2], color[3], 0.7)
+		gl.Color(color[1], color[2], color[3], overlay.lineAlpha)
 		gl.DrawGroundCircle(x, y, z, scenes.radius, 48)
 	end
 	gl.DepthTest(false)
@@ -1418,21 +1420,35 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 	fresh = fresh or not box
 	-- A place off units is kept as which side of them the callout's nearest corner is on, each way,
 	-- and how far out that corner is: { sx, dx, sy, dy }, so that the callout grows away from them.
-	-- A scene's ring takes up much of the screen and its middle wanders as the camera follows its
-	-- units, so a place for a scene is kept on the screen instead: { screen = { x, y } }. These turn
+	-- A scene's ring grows and shrinks on screen as the camera follows its units, so for a scene
+	-- that corner is kept as a share of how far the ring reaches across and up from its middle,
+	-- { sx, fx, sy, fy, ring = true }, and the callout keeps its place round the ring. These turn
 	-- either into the offset of the callout's lower left from a subject at (ax, ay), and back.
-	local function toOffset(place, ax, ay)
-		if place.screen then
-			return place.screen[1] - ax, place.screen[2] - ay
+	local function toOffset(place, across, up)
+		if place.ring then
+			local cx, cy = place[2] * across, place[4] * up
+			return place[1] > 0 and cx or cx - w, place[3] > 0 and cy or cy - h
 		end
 		return place[1] > 0 and place[2] or -place[2] - w, place[3] > 0 and place[4] or -place[4] - h
 	end
-	local function fromOffset(ox, oy, ax, ay)
-		if ringed then
-			return { screen = { ax + ox, ay + oy } }
-		end
+	local function fromOffset(ox, oy, across, up)
 		local sx, sy = ox + w / 2 < 0 and -1 or 1, oy + h / 2 < 0 and -1 or 1
+		if ringed then
+			return { sx, (sx > 0 and ox or ox + w) / across, sy, (sy > 0 and oy or oy + h) / up, ring = true }
+		end
 		return { sx, sx > 0 and ox or -ox - w, sy, sy > 0 and oy or -oy - h }
+	end
+	-- How far a ring reaches across and up from its middle at (ax, ay)
+	local function extent(points, ax, ay)
+		local across, up = 1, 1
+		for _, point in ipairs(points) do
+			across, up = max(across, math.abs(point[1] - ax)), max(up, math.abs(point[2] - ay))
+		end
+		return across, up
+	end
+	local nowAcross, nowUp = 0, 0
+	if ringed then
+		nowAcross, nowUp = extent(ringed, ax, ay)
 	end
 	-- Where the callout is drawn grows the same way
 	if box and (box.w ~= w or box.h ~= h) then
@@ -1440,26 +1456,34 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		box[1], box[2] = box[1] - (left and w - box.w or 0), box[2] - (below and h - box.h or 0)
 		box.w, box.h = w, h
 	end
-	if fresh or gameFrame - overlay.placedFrame >= framesPerSecond then
+	-- Judge it all from where things will be on screen once the camera has settled on its shot,
+	-- so that a pan or turn under way doesn't decide it. Meanwhile it keeps its place off the
+	-- subject.
+	local project = camera.settled and overlay.projector(camera.settled, vsx, vsy) or spWorldToScreenCoords
+	local sax, say = project(world[1], world[2], world[3])
+	-- That is a guess, and a scene's shot changes as its units move, so it is looked at again,
+	-- as readily as for a new shot, once the camera gets there
+	if fresh then
+		overlay.arrivedFor = nil
+	end
+	local arriving = false
+	if overlay.arrivedFor ~= shownEvent and length(sax - ax, say - ay) < vsy * 0.03 then
+		overlay.arrivedFor, arriving = shownEvent, not fresh
+	end
+	if fresh or arriving or gameFrame - overlay.placedFrame >= framesPerSecond then
 		overlay.placedFor, overlay.placedFrame = shownEvent, gameFrame
 		if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
 			overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
 		end
 
 		-- Where it is off the subject; for a new shot, off the new subject from where it is on screen
-		local current = fresh and box and fromOffset(box[1] - ax, box[2] - ay, ax, ay) or offset
-		-- Judge it all from where things will be on screen once the camera has settled on its shot,
-		-- so that a pan or turn under way doesn't decide it. Meanwhile it keeps its place off the
-		-- subject.
-		local project = camera.settled and overlay.projector(camera.settled, vsx, vsy) or spWorldToScreenCoords
-		local ax, ay = project(world[1], world[2], world[3])
+		local current = fresh and box and fromOffset(box[1] - ax, box[2] - ay, nowAcross, nowUp) or offset
+		local ax, ay = sax, say
 		-- Things worth not covering: the units in shot, the move arrow and a scene's ring
 		local points, across, up = {}, 0, 0
 		if ringed then
 			points = overlay.ring(world[1], world[3], scenes.radius, 8, project)
-			for _, point in ipairs(points) do
-				across, up = max(across, math.abs(point[1] - ax)), max(up, math.abs(point[2] - ay))
-			end
+			across, up = extent(points, ax, ay)
 		end
 		local function avoid(x, z)
 			points[#points + 1] = { project(x, spGetGroundHeight(x, z), z) }
@@ -1475,9 +1499,13 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		end
 		-- Everything else on screen counts for less, by how much of it is covered. What moves counts
 		-- for less than buildings, as it moves on; and something big on screen, like a factory, for
-		-- more again.
+		-- more again. What will be on screen, that is: mid-pan, what is there now is mostly not.
 		local others, unit = {}, vsy * 0.02
-		for _, unitID in ipairs(spGetVisibleUnits() or {}) do
+		local pose, around = camera.settled, nil
+		if pose then
+			around = spGetUnitsInCylinder(pose.look[1], pose.look[3], pose.dist * 2)
+		end
+		for _, unitID in ipairs(around or spGetVisibleUnits() or {}) do
 			local x, y, z = spGetUnitPosition(unitID)
 			local unitDefID = spGetUnitDefID(unitID)
 			if x and unitDefID then
@@ -1487,8 +1515,10 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 				-- A building's footprint can be wider than its radius
 				local rx, ry = project(x + max(unitDef.radius or 20, (unitDef.xsize or 0) * 4), y, z)
 				local r = max(4, length(rx - px, ry - py))
-				local weight = (not isStatic or (weaponImportance or 0) > 0) and 0.5 or 0.6
-				others[#others + 1] = { px, py, r, weight * bound((r / unit) ^ 2, 1, 4) }
+				if px > -r and px < vsx + r and py > -r and py < vsy + r then
+					local weight = (not isStatic or (weaponImportance or 0) > 0) and 0.5 or 0.6
+					others[#others + 1] = { px, py, r, weight * bound((r / unit) ^ 2, 1, 4) }
+				end
 			end
 		end
 		-- Which way the rest of the action lies from the subject
@@ -1517,12 +1547,19 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 				-- it. A ring is only a line, so a callout is only in the way well inside it.
 				onSubject, near = inRing(-reach), inRing(reach + 0.15 * max(across, up))
 			end
-			-- Short pointers are cheap; past about a fifth of the screen, much less so
-			local long = length(nx, ny) / vsy
-			local total, blocked = (onSubject and 50 or near and 3 or 0) + 3 * long + 10 * max(0, long - 0.2), onSubject
 			-- The pointer leaves the corner nearest the subject (see overlay.draw). It reads best going
 			-- out from there on a diagonal; along an edge, or back across the callout, it looks wrong.
 			local ux, uy = overlay.pointerOut(bx, by, w, h, ax, ay)
+			-- Short pointers are cheap; past about a fifth of the screen, much less so. A ring's
+			-- pointer aims at its middle and stops at the ring, so only the part outside counts.
+			local seen = length(nx, ny)
+			if across > 0 then
+				local d = length(ux, uy)
+				local e = length(ux / across, uy / max(1, up))
+				seen = e > 1 and d * (1 - 1 / e) or 0
+			end
+			local long = seen / vsy
+			local total, blocked = (onSubject and 50 or near and 3 or 0) + 3 * long + 10 * max(0, long - 0.2), onSubject
 			if ux <= 0 or uy <= 0 then
 				total = total + 2
 			else
@@ -1559,14 +1596,14 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 
 		local best, bestCost, curX, curY = nil, nil, nil, nil
 		if current then
-			curX, curY = toOffset(current, ax, ay)
+			curX, curY = toOffset(current, across, up)
 		end
 		local function try(ox, oy)
 			-- Other things being nearly equal, the side it is already on
 			local sameSide = curX and (ox + w / 2 < 0) == (curX + w / 2 < 0) and (oy + h / 2 < 0) == (curY + h / 2 < 0)
 			local total = cost(ox, oy) - (sameSide and 0.5 or 0)
 			if not best or total < bestCost then
-				best, bestCost = fromOffset(ox, oy, ax, ay), total
+				best, bestCost = fromOffset(ox, oy, across, up), total
 			end
 		end
 		-- Out on each diagonal: close by first, then further for when the fight is all around the
@@ -1581,6 +1618,16 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 						try(sx > 0 and dx or -dx - w, sy > 0 and dy or -dy - h)
 					end
 					if across > 0 and far == 1 then
+						-- Round the ring, with the corner nearest its middle just outside it
+						for i = 0, 15 do
+							local c, s = cos(i * pi / 8), sin(i * pi / 8)
+							if (c >= 0) == (sx > 0) and (s >= 0) == (sy > 0) then
+								for _, f in ipairs({ 1.5, 3 }) do
+									local px, py = (across + reach * f) * c, (up + reach * f) * s
+									try(sx > 0 and px or px - w, sy > 0 and py or py - h)
+								end
+							end
+						end
 						-- When a ring leaves no room around it: in from a corner of the screen, as far
 						-- as stays clear
 						local cx, cy, t = (sx > 0 and xMax or 10) - ax, (sy > 0 and yMax or 10) - ay, 0
@@ -1597,12 +1644,12 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		if current then
 			currentCost, blocked = cost(curX, curY)
 		end
-		if blocked or currentCost >= bestCost + (fresh and 2 or 4) then
+		if blocked or currentCost >= bestCost + ((fresh or arriving) and 2 or 4) then
 			overlay.offset, overlay.settling = best, true
 			if DEBUG then
 				local pose = camera.settled or {}
-				local bx, by = toOffset(best, ax, ay)
-				spEcho(string.format('rc-place,%s,%.0f,%.0f,%.1f,%.1f,%s,%.0f,%.0f,%.0f,%.0f,%.0f,%.2f', fresh and 'fresh' or 'better',
+				local bx, by = toOffset(best, across, up)
+				spEcho(string.format('rc-place,%s,%.0f,%.0f,%.1f,%.1f,%s,%.0f,%.0f,%.0f,%.0f,%.0f,%.2f', fresh and 'fresh' or arriving and 'arrived' or 'better',
 					bx, by, min(currentCost, 999), bestCost, blocked and 'blocked' or '', ax, ay,
 					across, up, pose.dist or 0, pose.yaw or 0))
 			end
@@ -1615,7 +1662,7 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 	-- the subject, so the pointer swings and stretches as units and the camera move, and is drawn
 	-- back in beyond that. After a move it settles all the way, and it is never left on the subject
 	-- or with its pointer going back across it.
-	local ox, oy = toOffset(overlay.offset, ax, ay)
+	local ox, oy = toOffset(overlay.offset, nowAcross, nowUp)
 	local tx, ty = bound(ax + ox, 10, xMax), bound(ay + oy, 10, yMax)
 	if not box then
 		box = { tx, ty, 0, w = w, h = h, v = { 0, 0, 0 } }
@@ -1791,16 +1838,28 @@ function overlay.draw()
 	local ex, cy = onLeft and bx + w - t or bx, below and by + h or by
 	local cx, my = ex + t / 2, below and cy - t / 2 or cy + t / 2
 	local px, py, gap = ax, ay, size * 1.8
-	local reach = ring and huge or length(px - cx, py - my)
-	for _, point in ipairs(ring or {}) do
-		local d = length(point[1] - cx, point[2] - my)
-		if d < reach then
-			px, py, gap, reach = point[1], point[2], 0, d
+	if ring then
+		-- Towards the middle of the ring, stopping where it first crosses it
+		local dx, dy, first = ax - cx, ay - my, 1
+		for i, p in ipairs(ring) do
+			local q = ring[i % #ring + 1]
+			local qx, qy = q[1] - p[1], q[2] - p[2]
+			local denom = dx * qy - dy * qx
+			if denom ~= 0 then
+				local along = ((p[1] - cx) * qy - (p[2] - my) * qx) / denom
+				local on = ((p[1] - cx) * dy - (p[2] - my) * dx) / denom
+				if along >= 0 and on >= 0 and on <= 1 then
+					first = min(first, along)
+				end
+			end
 		end
+		px, py, gap = cx + dx * first, my + dy * first, 0
 	end
-	gl.Color(color[1], color[2], color[3], 1)
+	local reach = length(px - cx, py - my)
+	-- A little see-through, like the ring
+	gl.Color(color[1], color[2], color[3], overlay.lineAlpha)
 	gl.Rect(ex, by, ex + t, by + h)
-	if reach > gap * 1.5 then
+	if reach > max(1, gap * 1.5) then
 		-- Half the thickness, across the pointer
 		local nx, ny = -(py - my) / reach * t / 2, (px - cx) / reach * t / 2
 		px, py = px + (cx - px) * gap / reach, py + (my - py) * gap / reach
@@ -3100,9 +3159,6 @@ local function updateCamera(dt, userCameraOverride)
 		end
 	end
 
-	-- Where the camera is headed, for placing the callout
-	c.settled = { look = tlook, dist = tdist, pitch = tpitch, yaw = rotate and not display.isWide and c.tyaw or defaultRy }
-
 	if isCut then
 		-- A cut is a new scene to the viewer: the callout starts where it best fits there
 		overlay.tally, overlay.box = {}, nil
@@ -3127,6 +3183,11 @@ local function updateCamera(dt, userCameraOverride)
 		c.tyaw = c.yaw + wrapAngle(c.tyaw - c.yaw)
 	end
 	c.cutNext = false
+
+	-- Where the camera is headed, for placing the callout. An orbit takes many seconds, so for
+	-- that it is the heading now.
+	local orbiting = c.yawSmooth == orbitConfig.smoothTime
+	c.settled = { look = tlook, dist = tdist, pitch = tpitch, yaw = (not rotate or display.isWide) and defaultRy or orbiting and c.yaw or c.tyaw }
 
 	-- Camera pose from the rig: behind the look-at point along the yaw, raised by the pitch
 	local lx, ly, lz = unpack(c.look)
