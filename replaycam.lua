@@ -592,6 +592,9 @@ end
 
 -- Static units are less interesting just for being built, but they matter when they are fought over
 local staticAttackedBoost = 1.5
+-- Damage no unit can be blamed for, such as fire burning on after whoever lit it has died, lava or
+-- a shell landing after its gun is gone, is mostly not the fight itself
+local unattributedDamageFactor = 0.25
 
 function UnitInfoCache:_unitStats(unitDefID)
 	local cacheObject = self._unitStatsCache[unitDefID]
@@ -2949,6 +2952,9 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 	local importance = 100 * min(currentHealth, damage) / currentHealth
 	-- Multiply by unit importance factor
 	importance = importance * unitImportance * buildProgress
+	if not attackerID then
+		importance = importance * unattributedDamageFactor
+	end
 	
 	local event = addEvent(attackerTeam, importance, sbjLocation, nil, sbjName, unitDamagedEventType, unitID)
 	if attackerID then
