@@ -101,9 +101,19 @@ scripts/run-replays.sh mychange baseline   # after it: writes runs/<map>-mychang
 - Runs of the same widget are not always identical: the camera works in real time, so one replay may differ slightly between runs. Treat small differences on a single replay as noise.
 - For a change that should not alter what is shown, compare the `rc-shown` lines of the two logs in `runs/logs/`.
 
+To see how things look, such as where callouts go, `scripts/run-replay-headed.sh` plays a replay with the full engine in a 1600x900 window (`WIDTH` and `HEIGHT` change it) and saves a screenshot every 3 game seconds, named by game frame:
+
+```bash
+scripts/run-replay-headed.sh replays/some-replay.sdfz runs/headed/mychange "" 300
+```
+
+- The last argument stops it after that many seconds; the first few minutes are often enough.
+- The window opens on your desktop, with your graphics settings and no sound. It needs more memory than a headless run, so run one at a time with Zero-K closed.
+- With `DEBUG` on, `rc-place` lines in its `infolog.txt` say when and why the callout was moved.
+
 ## Testing offline
 
-`scripts/run-harness.py` runs the widget against a stubbed game, without Zero-K: one side sends raiders or bombers at the other's base. It catches load and runtime errors, and reports when scene events fire, what is shown and the cost per game frame. It can't judge how the camera looks.
+`scripts/run-harness.py` runs the widget against a stubbed game, without Zero-K: one side sends raiders or bombers at the other's base. It catches load and runtime errors, and reports when scene events fire, what is shown, how far the callout travels on screen and the cost per game frame. It can't judge how the camera looks.
 
 ```bash
 python3 scripts/run-harness.py raid --crowd 2000

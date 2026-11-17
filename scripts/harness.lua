@@ -10,7 +10,11 @@ math.log10 = function(x) return math.log(x, 10) end
 local realFormat = string.format
 string.format = function(f, ...)  -- 5.4 is strict about %d with floats
 	local a = { ... }
-	for i, v in ipairs(a) do if math.type(v) == 'float' and v == math.floor(v) then a[i] = math.tointeger(v) end end
+	for i, v in ipairs(a) do
+		-- The engine's format rejects infinities
+		if v == math.huge or v == -math.huge then error('infinite format argument', 2) end
+		if math.type(v) == 'float' and v == math.floor(v) then a[i] = math.tointeger(v) end
+	end
 	return realFormat(f, unpack(a))
 end
 
@@ -83,8 +87,18 @@ Spring = setmetatable({
 	end,
 	GetGroundHeight = function() return 0 end,
 	GetViewGeometry = function() return 1920, 1080 end,
-	-- Flat, north up, around where the camera is
-	WorldToScreenCoords = function(x, y, z) return 960 + (x - cam.px) * 0.5, 540 - (z - cam.pz) * 0.5, 0.5 end,
+	-- A perspective view from the camera state, as the widget's rig sets it
+	WorldToScreenCoords = function(x, y, z)
+		local p, yaw = cam.rx or -1, cam.ry or math.pi
+		local fx, fy, fz = math.cos(p) * math.sin(yaw), math.sin(p), math.cos(p) * math.cos(yaw)
+		local rx, rz = -math.cos(yaw), math.sin(yaw)
+		local ux, uy, uz = -rz * fy, rz * fx - rx * fz, rx * fy
+		local dx, dy, dz = x - cam.px, y - cam.py, z - cam.pz
+		local depth = dx * fx + dy * fy + dz * fz
+		local focal = 540 / math.tan(math.rad(cam.fov or 45) / 2)
+		depth = math.max(1, depth)
+		return 960 + focal * (dx * rx + dz * rz) / depth, 540 + focal * (dx * ux + dy * uy + dz * uz) / depth, 0.5
+	end,
 	GetCameraState = function() return {} end,
 	GetCameraPosition = function() return cam.px, cam.py, cam.pz end,
 	SetCameraState = function(st) cam = st end,
