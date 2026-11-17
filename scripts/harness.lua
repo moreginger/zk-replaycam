@@ -15,6 +15,9 @@ string.format = function(f, ...)  -- 5.4 is strict about %d with floats
 end
 
 local frame, units, echoes, failed, texts = 0, {}, {}, false, {}
+-- The callout's box this frame (the first dark rectangle drawn), and whether the wide shot's board
+-- was drawn instead
+local lastColor, box, board = nil, nil, false
 cam = { px = 4096, py = 2000, pz = 4096 }
 local teams = { [0] = 0, [1] = 1 }
 UnitDefs = {
@@ -34,10 +37,17 @@ gl = setmetatable({
 	Text = function(text, x, y, size)
 		assert(type(text) == "string" and x + y + size)
 		texts[text:gsub("\255...", "<"):gsub("\008", ">")] = true
+		board = board or text == "Metal value"
 	end,
-	Rect = function(a, b, c, d) assert(a + b + c + d) end,
+	Rect = function(a, b, c, d)
+		assert(a + b + c + d)
+		if lastColor == 0.55 and not box then box = { a, b, c, d } end
+	end,
 	Vertex = function(x, y, z) assert(x + y + (z or 0)) end,
-	Color = function(r, g, b, a) assert(r + g + b + (a or 1)) end,
+	Color = function(r, g, b, a)
+		assert(r + g + b + (a or 1))
+		lastColor = r == 0 and g == 0 and b == 0 and a or nil
+	end,
 }, { __index = function() return function() end end })
 CMD = { ATTACK = 20, FIGHT = 16, MOVE = 10 }
 VFS = { Include = function() return { RAW_MOVE = 31109 } end }
@@ -130,6 +140,10 @@ for i = 1, n do attackers[i] = spawn(def, 0, 2000 + i * 30, 2000, d, d) end
 -- Extra units milling about, to measure cost
 local crowd = tonumber(os.getenv('CROWD') or 0)
 local firstScene, arrived, slowest, total, ticks = nil, nil, 0, 0, 0
+-- How far the callout travels on screen: in all, and in snaps of over 150px in a frame (a glide
+-- is less). Measured at its middle, so a change of size counts too. Each new callout (after none or
+-- the board) starts afresh.
+local was, travel, jumps, steady = nil, 0, 0, 0
 for f = 1, 90 * 30 do
 	frame = f
 	for _, id in ipairs(attackers) do
@@ -174,7 +188,14 @@ for f = 1, 90 * 30 do
 	end
 	widget:Update(1 / 30)
 	widget:DrawWorldPreUnit()
+	box, board = nil, false
 	widget:DrawScreen()
+	local at = box and not board and { (box[1] + box[3]) / 2, (box[2] + box[4]) / 2 }
+	if at and was then
+		local d = math.sqrt((at[1] - was[1]) ^ 2 + (at[2] - was[2]) ^ 2)
+		travel, jumps, steady = travel + d, jumps + (d > 150 and 1 or 0), steady + (d < 0.5 and 1 or 0)
+	end
+	was = at
 	for i = before + 1, #echoes do
 		local line = echoes[i][2]
 		if line:find('^rc%-scene') then
@@ -196,6 +217,7 @@ local drawn = {}
 for text in pairs(texts) do drawn[#drawn + 1] = text end
 table.sort(drawn)
 print('callout texts: ' .. #drawn)
+print(string.format('callout travel: %.0f px, %d snaps, still %d frames', travel, jumps, steady))
 if os.getenv('VERBOSE') then print(table.concat(drawn, '\n')) end
 print(string.format('per game frame: mean %.2f ms, worst %.2f ms, %d units', total / ticks * 1000, slowest * 1000, nextId - 1))
 if os.getenv('LOG') then

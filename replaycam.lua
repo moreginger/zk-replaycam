@@ -1380,12 +1380,23 @@ function overlay.scanUI(vsx, vsy)
 end
 
 -- Where to put a w by h callout for a subject at (ax, ay) on screen, clear of a ring reaching
--- (across, up) from there if there is one. It is looked at afresh for each shot and once a second
--- after that, and only moves for a clear gain.
+-- (across, up) from there if there is one. It is looked at again for each shot and once a second
+-- after that, and only moves when it is in the way or for a clear gain: a new shot keeps it where
+-- it is on screen if that will do.
 function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 	local reach, margin = vsy * 0.06, vsy * 0.02
 	local xMax, yMax = max(10, vsx - w - 10), max(10, vsy - h - 10)
 	local fresh = overlay.placedFor ~= shownEvent
+	local box, offset = overlay.box, overlay.offset
+	fresh = fresh or not box
+	-- A callout that changes size grows away from the subject, keeping the corner nearest it put
+	if box and (box.w ~= w or box.h ~= h) then
+		local dw, dh = w - box.w, h - box.h
+		local left, below = offset[1] + box.w / 2 < 0, offset[2] + box.h / 2 < 0
+		box.w, box.h = w, h
+		box[1], box[2] = box[1] - (left and dw or 0), box[2] - (below and dh or 0)
+		offset[1], offset[2] = offset[1] - (left and dw or 0), offset[2] - (below and dh or 0)
+	end
 	if fresh or gameFrame - overlay.placedFrame >= framesPerSecond then
 		overlay.placedFor, overlay.placedFrame = shownEvent, gameFrame
 		if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
@@ -1459,11 +1470,15 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 			return total + 0.5 * (cx * tx + cy * ty) / toward / max(1, length(cx, cy)), blocked
 		end
 
-		local current, best, bestCost = overlay.offset, nil, nil
+		-- Where it is now off the subject; for a new shot, off the new subject from where it is on screen
+		local current, best, bestCost = offset, nil, nil
+		if fresh and box then
+			current = { box[1] - ax, box[2] - ay }
+		end
 		local function try(ox, oy)
-			-- All else equal, the side it is already on
+			-- Other things being nearly equal, the side it is already on
 			local sameSide = current and (ox + w / 2) * (current[1] + w / 2) > 0 and (oy + h / 2) * (current[2] + h / 2) > 0
-			local total = cost(ox, oy) - (sameSide and 0.1 or 0)
+			local total = cost(ox, oy) - (sameSide and 0.5 or 0)
 			if not best or total < bestCost then
 				best, bestCost = { ox, oy }, total
 			end
@@ -1495,26 +1510,39 @@ function overlay.place(ax, ay, w, h, vsx, vsy, across, up)
 				end
 			end
 		end
-		if fresh or not current or cost(current[1], current[2]) >= bestCost + 1.5 then
-			overlay.offset = best
+		-- Stay unless in the way or somewhere else is clearly better. A move glides there.
+		local currentCost, blocked = huge, true
+		if current then
+			currentCost, blocked = cost(current[1], current[2])
+		end
+		if blocked or currentCost >= bestCost + (fresh and 2 or 4) then
+			overlay.offset, overlay.settling = best, true
+		elseif fresh then
+			overlay.offset = current
 		end
 	end
 
-	-- The callout floats: it stays where it is on screen while its place off the subject is within
-	-- some slack, so the pointer swings and stretches as units move, and is drawn back in beyond that
-	local bx, by = bound(ax + overlay.offset[1], 10, xMax), bound(ay + overlay.offset[2], 10, yMax)
-	local box, slack = overlay.box, reach * 0.6
-	if fresh or not box then
-		box = { bx, by }
+	-- The callout floats: it stays where it is on screen while within some slack of its place off
+	-- the subject, so the pointer swings and stretches as units and the camera move, and is drawn
+	-- back in beyond that. After a move it settles all the way, and it never sits on the subject.
+	local tx, ty = bound(ax + overlay.offset[1], 10, xMax), bound(ay + overlay.offset[2], 10, yMax)
+	if not box then
+		box = { tx, ty, 0, w = w, h = h, v = { 0, 0, 0 } }
+		overlay.settling = false
 	else
-		local d = length(bx - box[1], by - box[2])
-		if d > slack then
-			local pull = 0.1 * (1 - slack / d)
-			box = { box[1] + (bx - box[1]) * pull, box[2] + (by - box[2]) * pull }
+		local slack = overlay.settling and 0 or vsy * 0.1
+		if ax > box[1] - margin and ax < box[1] + w + margin and ay > box[2] - margin and ay < box[2] + h + margin then
+			slack = 0
 		end
+		local dx, dy = tx - box[1], ty - box[2]
+		local d = length(dx, dy)
+		local f = d > slack and 1 - slack / d or 0
+		smoothDampVec(box, { box[1] + dx * f, box[2] + dy * f, 0 }, box.v, 0.3, overlay.dt or 1 / 30, vsy * 3)
+		overlay.settling = overlay.settling and d > 2
 	end
+	box[1], box[2] = bound(box[1], 10, xMax), bound(box[2], 10, yMax)
 	overlay.box = box
-	return bound(box[1], 10, xMax), bound(box[2], 10, yMax)
+	return box[1], box[2]
 end
 
 -- On a wide shot, a board at the top of the screen with what each side's units are worth in metal.
@@ -1589,6 +1617,11 @@ function overlay.drawWorth(vsx, vsy, size)
 end
 
 function overlay.draw()
+	-- With no callout, the next one starts where it best fits
+	local headline = overlay.headline
+	if not shownEvent or not options.show_commentary.value or display.isWide or not headline then
+		overlay.box = nil
+	end
 	if not shownEvent or not options.show_commentary.value then
 		return
 	end
@@ -1598,7 +1631,6 @@ function overlay.draw()
 		overlay.drawWorth(vsx, vsy, size)
 		return
 	end
-	local headline = overlay.headline
 	if not headline then
 		return
 	end
@@ -2977,7 +3009,8 @@ local function updateCamera(dt, userCameraOverride)
 	end
 
 	if isCut then
-		overlay.tally = {}
+		-- A cut is a new scene to the viewer: the callout starts where it best fits there
+		overlay.tally, overlay.box = {}, nil
 		c.look, c.lookv = tlook, { 0, 0, 0 }
 		c.dist, c.distv = tdist, 0
 		c.pitch, c.pitchv = tpitch, 0
@@ -3045,6 +3078,8 @@ function widget:Update(dt)
 		userAction()
 	end
 	userInactiveSeconds = userInactiveSeconds + dt
+	-- For the callout's glide, which is drawn after this
+	overlay.dt = dt
 	if userInactiveSeconds > userInactiveSecondsThreshold then
 		spSetMouseCursor('none')
 	end
