@@ -742,6 +742,11 @@ end
 -- Add a subject unit i.e. the unit doing the thing
 function Event:addSubject(unitID, location)
 	self._sbjUnits[unitID] = location
+	-- The costliest subject, noted while it is still there to ask
+	local unitDefID = spGetUnitDefID(unitID)
+	if unitDefID then
+		self.metal = max(self.metal or 0, UnitDefs[unitDefID].metalCost)
+	end
 end
 
 function Event:excludes(other)
@@ -1196,6 +1201,10 @@ overlay.creditFrames = 20 * framesPerSecond
 overlay.textSize, overlay.arrowWidth = 16, 36
 -- How opaque the pointer and a scene's ring are
 overlay.lineAlpha = 0.8
+-- The callout follows a fight rather than each pick in it: a pick close to where the camera is,
+-- within fightWindow of the callout going up, joins it instead of replacing it, unless one of its
+-- units costs fightBreakMetal or more (see overlay.show)
+overlay.fightWindow, overlay.fightBreakMetal = 8 * framesPerSecond, 750
 
 -- A player and their side, in the player's colour
 function overlay.player(teamID)
@@ -1221,11 +1230,122 @@ function overlay.addDeath(allyTeam, location, metal)
 	end
 end
 
+-- Put the callout up for a pick: its own headline, units and colour
+function overlay.start(event)
+	local side, actor = event.meta and event.meta.side, next(event.actors)
+	overlay.event, overlay.fight, overlay.since, overlay.anchor = event, nil, gameFrame, { event.location[1], event.location[3] }
+	-- The event drops units that are given new orders, the overlay keeps pointing at them
+	overlay.headline, overlay.subjects = event.commentary, {}
+	for unitID, location in pairs(event._sbjUnits) do
+		overlay.subjects[unitID] = { unpack(location) }
+	end
+	overlay.total, overlay.killed = event:subjectCount(), 0
+	overlay.left, overlay.closing = nil, nil
+	local isOrder = event.type == moveEventType or event.type == attackEventType
+	overlay.arrowFrom = isOrder and event.meta.origin
+	overlay.arrowTo = isOrder and { event.location[1], event.location[3] }
+	overlay.color = side and overlay.allyColor[side] or actor and teamInfo[actor].color or { 1, 1, 1 }
+	overlay.update()
+	if DEBUG then
+		spEcho(string.format('rc-callout,start,%d,%s,%s', event.id, event.type, overlay.headline or ''))
+	end
+end
+
+-- Add the sides an event involves to the set sides: who did it and whose units it is about
+function overlay.sidesOf(event, sides)
+	for actor in pairs(event.actors) do
+		if teamInfo[actor] then
+			sides[teamInfo[actor].allyTeam] = true
+		end
+	end
+	for unitID in pairs(event._sbjUnits) do
+		local team = spGetUnitTeam(unitID)
+		if team and teamInfo[team] then
+			sides[teamInfo[team].allyTeam] = true
+		end
+	end
+end
+
+-- A headline for a fight between sides, as each side's name in its colour
+function overlay.fightHeadline(sides)
+	local list, names = {}, {}
+	for allyTeam in pairs(sides) do
+		if overlay.allyColor[allyTeam] and scenes.names[allyTeam] then
+			list[#list + 1] = allyTeam
+		end
+	end
+	table.sort(list)
+	for i, allyTeam in ipairs(list) do
+		names[i] = overlay.coloured(scenes.names[allyTeam], overlay.allyColor[allyTeam])
+	end
+	if #names >= 2 then
+		return "Fight: " .. table.concat(names, " vs ")
+	end
+	return names[1] and names[1] .. " under fire" or "Fighting"
+end
+
+-- The camera has a new pick. A minor one where the callout already is joins it rather than
+-- replacing it: reading "Thug damaged", "Picket damaged", "Picket destroyed" over a few seconds is
+-- noise. Near a scene, the scene's callout, which is about the fight already, stays for a while.
+-- Otherwise, close to where the callout went up and soon after, the callout speaks of the fight
+-- instead. Anything else puts the callout up afresh.
+function overlay.show(event)
+	local current = overlay.event
+	-- A scene is about the fight too, so one where a fight or scene is already up adds nothing new
+	local fightUp = current and (overlay.fight or current.type == sceneEventType)
+	local minor = current and overlay.headline and not display.isWide
+		and event.type ~= lullEventType and (event.type ~= sceneEventType or fightUp)
+		and event.type ~= unitDestroyerEventType and event.type ~= unitTakenEventType
+		-- A costly unit lost is news; one hit, such as a commander, is part of the fight
+		and (event.type ~= unitDestroyedEventType or (event.metal or 0) < overlay.fightBreakMetal)
+	if not minor then
+		overlay.start(event)
+		return
+	end
+	local x, z, age = event.location[1], event.location[3], gameFrame - overlay.since
+	local inScene = current.type == sceneEventType and not overlay.fight and age < 2 * overlay.fightWindow
+		and length(x - current.location[1], z - current.location[3]) <= keepTrackingRange
+	-- A scene has said there is a fight here, so that holds for longer
+	local window = current.type == sceneEventType and 2 * overlay.fightWindow or overlay.fightWindow
+	local inFight = (overlay.fight or age < window)
+		and length(x - overlay.anchor[1], z - overlay.anchor[2]) <= keepTrackingRange
+	if not inScene and not inFight then
+		overlay.start(event)
+		return
+	end
+	for unitID, location in pairs(event._sbjUnits) do
+		overlay.subjects[unitID] = overlay.subjects[unitID] or { unpack(location) }
+	end
+	if inScene then
+		if DEBUG then
+			spEcho(string.format('rc-callout,scene,%d,%s,%s', event.id, event.type, overlay.headline))
+		end
+		return
+	end
+	if not overlay.fight then
+		overlay.fight = {}
+		overlay.sidesOf(current, overlay.fight)
+		overlay.arrowFrom, overlay.arrowTo = nil, nil
+		overlay.color = { 0.85, 0.85, 0.85 }
+	end
+	overlay.sidesOf(event, overlay.fight)
+	overlay.headline = overlay.fightHeadline(overlay.fight)
+	overlay.update()
+	if DEBUG then
+		spEcho(string.format('rc-callout,fight,%d,%s,%s', event.id, event.type, overlay.headline))
+	end
+end
+
 -- Once a second: word the detail line
 function overlay.update()
 
-	local event, detail = shownEvent, nil
-	if event and event.type == sceneEventType then
+	local event, detail = overlay.event, nil
+	if overlay.fight then
+		local x, _, z = unpack(display.location)
+		local stake = scenes.metalStake and scenes.around(scenes.metalStake, x, z)
+		-- Next to nothing at stake reads oddly for a fight
+		detail = stake and stake >= 100 and overlay.metal(stake) .. " metal at stake"
+	elseif event and event.type == sceneEventType then
 		detail = event.shownStake and overlay.metal(event.shownStake) .. " metal at stake"
 	elseif event and event.type == buildingEventType then
 		local unitID = next(event._sbjUnits)
@@ -1357,7 +1477,8 @@ end
 
 -- A unit the headline says is under attack has died: say so
 function overlay.kill(unitID, name, destroyerName, attackerTeam, burning)
-	if not shownEvent or shownEvent.type ~= unitDamagedEventType or not overlay.subjects[unitID] then
+	local event = overlay.event
+	if overlay.fight or not event or event.type ~= unitDamagedEventType or not overlay.subjects[unitID] then
 		return
 	end
 	overlay.killed = overlay.killed + 1
@@ -1367,7 +1488,7 @@ function overlay.kill(unitID, name, destroyerName, attackerTeam, burning)
 end
 
 function overlay.drawWorld()
-	local event = shownEvent
+	local event = overlay.event
 	if not event or not options.show_commentary.value then
 		return
 	end
@@ -1377,7 +1498,7 @@ function overlay.drawWorld()
 	local from, to = overlay.arrowFrom, overlay.arrowTo
 	if from then
 		overlay.arrow(from[1], from[2], to[1], to[2], color)
-	elseif event.type == sceneEventType then
+	elseif event.type == sceneEventType and not overlay.fight then
 		local x, y, z = unpack(event.location)
 		gl.Color(color[1], color[2], color[3], overlay.lineAlpha)
 		gl.DrawGroundCircle(x, y, z, scenes.radius, 48)
@@ -1418,7 +1539,7 @@ end
 function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 	local reach, margin = vsy * 0.06, vsy * 0.02
 	local xMax, yMax = max(10, vsx - w - 10), max(10, vsy - h - 10)
-	local fresh = overlay.placedFor ~= shownEvent
+	local fresh = overlay.placedFor ~= overlay.event
 	local box, offset = overlay.box, overlay.offset
 	fresh = fresh or not box
 	-- A place off units is kept as which side of them the callout's nearest corner is on, each way,
@@ -1470,11 +1591,11 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		overlay.arrivedFor = nil
 	end
 	local arriving = false
-	if overlay.arrivedFor ~= shownEvent and length(sax - ax, say - ay) < vsy * 0.03 then
-		overlay.arrivedFor, arriving = shownEvent, not fresh
+	if overlay.arrivedFor ~= overlay.event and length(sax - ax, say - ay) < vsy * 0.03 then
+		overlay.arrivedFor, arriving = overlay.event, not fresh
 	end
 	if fresh or arriving or gameFrame - overlay.placedFrame >= framesPerSecond then
-		overlay.placedFor, overlay.placedFrame = shownEvent, gameFrame
+		overlay.placedFor, overlay.placedFrame = overlay.event, gameFrame
 		if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
 			overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
 		end
@@ -1761,10 +1882,10 @@ end
 function overlay.draw()
 	-- With no callout, the next one starts where it best fits
 	local headline = overlay.headline
-	if not shownEvent or not options.show_commentary.value or display.isWide or not headline then
+	if not overlay.event or not options.show_commentary.value or display.isWide or not headline then
 		overlay.box = nil
 	end
-	if not shownEvent or not options.show_commentary.value then
+	if not overlay.event or not options.show_commentary.value then
 		return
 	end
 	local vsx, vsy = spGetViewGeometry()
@@ -1779,11 +1900,13 @@ function overlay.draw()
 	local pad, row, color = size * 0.6, size * 1.5, overlay.color
 	local detail, small = overlay.detail, size * 0.85
 	-- The subject on screen: the units the headline names, or a scene and its ring
-	local event, ring = shownEvent, nil
+	-- or a fight, which is what the camera is framing
+	local event, ring = overlay.event, nil
+	local scene = event.type == sceneEventType and not overlay.fight
 	local sx, sy, sz, speed = overlay.centre()
-	if event.type == sceneEventType or not sx then
-		sx, sy, sz = unpack(event.type == sceneEventType and event.location or display.location)
-		ring = event.type == sceneEventType and overlay.ring(sx, sz, scenes.radius, 24)
+	if scene or overlay.fight or not sx then
+		sx, sy, sz = unpack(scene and event.location or display.location)
+		ring = scene and overlay.ring(sx, sz, scenes.radius, 24)
 	end
 	local ax, ay = spWorldToScreenCoords(sx, sy, sz)
 	local across, up = 0, 0
@@ -2321,19 +2444,8 @@ local function updateDisplay(event)
 	display.camAngle, display.isWide, display.fill = camAngle, isWide, fill
 
 	shownEvent = event
-	local side, actor = event.meta and event.meta.side, next(event.actors)
-	-- The event drops units that are given new orders, the overlay keeps pointing at them
-	overlay.headline, overlay.subjects = commentary, {}
-	for unitID, location in pairs(event._sbjUnits) do
-		overlay.subjects[unitID] = { unpack(location) }
-	end
-	overlay.total, overlay.killed = sbjUnitCount, 0
-	overlay.left, overlay.closing = nil, nil
-	local isOrder = event.type == moveEventType or event.type == attackEventType
-	overlay.arrowFrom = isOrder and event.meta.origin
-	overlay.arrowTo = isOrder and { event.location[1], event.location[3] }
-	overlay.color = side and overlay.allyColor[side] or actor and teamInfo[actor].color or { 1, 1, 1 }
-	overlay.update()
+	event.commentary = commentary
+	overlay.show(event)
 	display.shotFrame = gameFrame
 	if STATS then
 		local x, _, z = unpack(event.location)
@@ -2491,6 +2603,7 @@ function scenes.survey()
 			end
 		end
 	end
+	cfg.metalStake = metalStake
 	return stake, stakeNow, owner, metalStake
 end
 
@@ -2604,7 +2717,7 @@ function scenes.update()
 	end
 
 	-- The scene on show keeps its number up to date, whether or not it rose this second
-	local shown = shownEvent
+	local shown = overlay.event
 	if shown and shown.type == sceneEventType and shown.shownStake then
 		local now = scenes.around(metalStake, shown.location[1], shown.location[3])
 		shown.shownStake = shown.shownStake + (now - shown.shownStake) / cfg.shownStakeSeconds
@@ -3168,6 +3281,9 @@ local function updateCamera(dt, userCameraOverride)
 	if isCut then
 		-- A cut is a new scene to the viewer: the callout starts where it best fits there
 		overlay.tally, overlay.box = {}, nil
+		if shownEvent and overlay.event ~= shownEvent then
+			overlay.start(shownEvent)
+		end
 		c.look, c.lookv = tlook, { 0, 0, 0 }
 		c.dist, c.distv = tdist, 0
 		c.pitch, c.pitchv = tpitch, 0
