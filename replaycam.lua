@@ -16,16 +16,13 @@ end
 --
 -- Strategy:
 --
--- 1. Events are generated from different callins (UnitDamaged etc), merging with other events
---    of the same type
--- 2. Maintain a low resolution grid of hotspots of activity, and where we have recently been
---    watching (interestGrid)
--- 3. Scene events anticipate the action: places where one side's value is coming within reach
---    of the other's armed units (scenes)
--- 
--- The most interesting event is selected by comparison to other events of the same type,
--- adjusting by type (e.g. combat is generally more interesting than manufacture), and by the
--- interest grid.
+-- 1. What happens (damage, deaths, building, orders) is gathered from the callins into foci:
+--    places where things are happening, each keeping what went on there, in metal, by kind and
+--    side, over the last few seconds (foci)
+-- 2. Scenes anticipate the action: places where one side's value is coming within reach of the
+--    other's armed units add to the foci too (scenes)
+-- 3. The camera shows the focus with most going on, less what it has been watching for a while,
+--    and the callout says what is going on there from what the focus has kept (overlay)
 
 local atan2 = math.atan2
 local cos = math.cos
@@ -75,6 +72,7 @@ local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitRulesParam = Spring.GetUnitRulesParam
 local spGetUnitsInCylinder = Spring.GetUnitsInCylinder
 local spGetUnitTeam = Spring.GetUnitTeam
+local spGetUnitHeading = Spring.GetUnitHeading
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spGetVisibleUnits = Spring.GetVisibleUnits
 local spGetViewGeometry = Spring.GetViewGeometry
@@ -313,237 +311,12 @@ function LinkedList:clear()
 	end
 end
 
--- WORLD GRID CLASS
--- Translates world coordinates into operations on a grid.
-
-WorldGrid = { xSize = 0, ySize = 0, gridSize = 0, teamCount = 0, allyTeams = {}, data = {} }
-
-function WorldGrid:new(o)
-	o = o or {} -- create object if user does not provide one
-	setmetatable(o, self)
-	self.__index = self
-
-    o.teamCount = o.teamCount or 0
-	o.allyTeams = o.allyTeams or {}
-	o.data = o.data or {}
-	for x = 1, o.xSize do
-		o.data[x] = {}
-		for y = 1, o.ySize do
-			o.data[x][y] = { 1, {}, 0, 0 }
-		end
-	end
-
-	return o
-end
-
-function WorldGrid:__toGridCoords(x, y)
-	x = 1 + bound(floor(x / self.gridSize), 0, self.xSize - 1)
-	y = 1 + bound(floor(y / self.gridSize), 0, self.ySize - 1)
-	return x, y
-end
-
--- Return the center of the grid in world coordinates
-function WorldGrid:__toWorldCoords(gx, gy)
-	local halfGrid = self.gridSize / 2
-	return gx * self.gridSize - halfGrid, gy * self.gridSize - halfGrid
-end
-
--- Lazily synchronize grid cell to game frame
-function WorldGrid:_syncCell(data)
-	local framesPassed = gameFrame - data[4]
-	if framesPassed > 0 then
-		data[1] = 1 + (data[1] - 1) * (0.95 ^ framesPassed)
-		data[3] = max(0, data[3] - framesPassed / framesPerSecond)
-		for team, expiry in pairs(data[2]) do
-			if gameFrame >= expiry then
-				data[2][team] = nil
-			end
-		end
-		data[4] = gameFrame
-	end
-end
-
-function WorldGrid:_getScoreGridCoords(x, y)
-	local data = self.data[x][y]
-	self:_syncCell(data)
-	local interest, allyTeams, passe = unpack(data)
-	local allyTeamCount = 0
-	for _, _ in pairs(allyTeams) do
-		allyTeamCount = allyTeamCount + 1
-	end
-	local allyTeamsMult = max(1, allyTeamCount * allyTeamCount)
-	-- We want passe to kick in slowly then get strong after 10s or so;
-	-- use logistic function
-	-- Shift the function to the right given min passe is 0
-	local passeMult = 1 - logistic(0.4 * (passe - 8))
-	return interest * allyTeamsMult * passeMult
-end
-
-function WorldGrid:getScore(x, y)
-	x, y = self:__toGridCoords(x, y)
-	return self:_getScoreGridCoords(x, y)
-end
-
--- Raw activity at a location: interest and interacting teams, ignoring how recently we watched it
-function WorldGrid:getActivity(x, y)
-	x, y = self:__toGridCoords(x, y)
-	local data = self.data[x][y]
-	self:_syncCell(data)
-	local allyTeamCount = 0
-	for _, _ in pairs(data[2]) do
-		allyTeamCount = allyTeamCount + 1
-	end
-	return data[1] * max(1, allyTeamCount * allyTeamCount)
-end
-
--- Call func on each square under a size-wide square centred on (x, y), with the share of it that
--- falls there. Squares off the map don't count.
-function WorldGrid:_addInternal(x, y, size, opts, func)
-	local function overlaps(c, count)
-		local spans, total, g = {}, 0, 1 + bound(floor(c / self.gridSize), 0, count - 1)
-		for i = max(1, g - 1), min(count, g + 1) do
-			spans[i] = max(0, min(c + size / 2, i * self.gridSize) - max(c - size / 2, (i - 1) * self.gridSize))
-			total = total + spans[i]
-		end
-		return spans, total
-	end
-	local xs, xTotal = overlaps(x, self.xSize)
-	local ys, yTotal = overlaps(y, self.ySize)
-	for ix, ox in pairs(xs) do
-		for iy, oy in pairs(ys) do
-			if ox * oy > 0 then
-				local data = self.data[ix][iy]
-				self:_syncCell(data)
-				func(data, ox * oy / (xTotal * yTotal), opts)
-			end
-		end
-	end
-end
-
-local function _addInterest(data, f, opts)
-	data[1] = data[1] + opts.interest * f
-	if opts.allyTeam then
-		data[2][opts.allyTeam] = gameFrame + framesPerSecond
-	end
-end
-
-local function _boostInterest(data, f, opts)
-	data[1] = data[1] * (1 + (opts.boost - 1) * f)
-end
-
-local function _addPasse(data, f, opts)
-	data[3] = data[3] + opts.passe * f
-end
-
-function WorldGrid:add(x, y, allyTeam, interest)
-	return self:_addInternal(x, y, self.gridSize, { allyTeam = allyTeam, interest = interest }, _addInterest)
-end
-
--- Call this exactly once between each reset.
--- When watching an area we apply a fixed boost to make things sticky,
--- but a longer-term negative factor (passe) to encourage moving.
-function WorldGrid:setWatching(x, y)
-	-- Both are spread over a 2x2 grid, so hopping to the next square doesn't escape passe. Passe
-	-- wears off by 1/s in each square, so only more than that tells.
-	self:_addInternal(x, y, self.gridSize * 2, { boost = 10 }, _boostInterest)
-	self:_addInternal(x, y, self.gridSize * 2, { passe = 10 }, _addPasse)
-end
-
-function WorldGrid:setCursor(x, y)
-	self:_addInternal(x, y, self.gridSize, { boost = 10 / self.teamCount }, _boostInterest)
-end
-
--- SPATIAL LOOKUP CLASS
--- Manages items in a grid for fast proximity searches, keeping only the N most recent items.
--- Assumes any item added has a `location` property (a table where location[1] is x and location[3] is z)
-
-SpatialLookup = { xSize = 0, ySize = 0, gridSize = 0, capacity = 0, data = {}, _items = nil }
-
-function SpatialLookup:new(o)
-	o = o or {}
-	setmetatable(o, self)
-	self.__index = self
-
-	o.data = o.data or {}
-	for x = 1, o.xSize do
-		o.data[x] = {}
-		for y = 1, o.ySize do
-			o.data[x][y] = {}
-		end
-	end
-	o._items = LinkedList:new({ capacity = o.capacity })
-
-	return o
-end
-
-function SpatialLookup:__toGridCoords(x, y)
-	x = 1 + bound(floor(x / self.gridSize), 0, self.xSize - 1)
-	y = 1 + bound(floor(y / self.gridSize), 0, self.ySize - 1)
-	return x, y
-end
-
-function SpatialLookup:add(item)
-	local gx, gy = self:__toGridCoords(item.location[1], item.location[3])
-	
-	if item.prev or item.next or self._items.head == item then
-		self._items:remove(item)
-		local oldGx, oldGy = self:__toGridCoords(item.location[1], item.location[3])
-		self.data[oldGx][oldGy][item] = nil
-	elseif self.capacity > 0 and self._items.size == self.capacity then
-		local oldest = self._items._tail
-		self._items:remove(oldest)
-		local oldGx, oldGy = self:__toGridCoords(oldest.location[1], oldest.location[3])
-		self.data[oldGx][oldGy][oldest] = nil
-	end
-
-	self.data[gx][gy][item] = true
-	self._items:add(item)
-end
-
-function SpatialLookup:remove(item)
-	local prev, next
-	if item.location then
-		if item.prev or item.next or self._items.head == item then
-			prev, next = self._items:remove(item)
-		end
-		local gx, gy = self:__toGridCoords(item.location[1], item.location[3])
-		self.data[gx][gy][item] = nil
-	end
-	return prev, next
-end
-
--- If evalFunc is provided, it should return a numerical score for the item, or nil to filter it out.
--- getNearby will return the item with the highest score.
-function SpatialLookup:getNearby(x, y, range, evalFunc)
-	local minGx, minGy = self:__toGridCoords(x - range, y - range)
-	local maxGx, maxGy = self:__toGridCoords(x + range, y + range)
-	local rangeSq = range * range
-	local bestItem = nil
-	local bestScore = -huge
-	for gx = minGx, maxGx do
-		for gy = minGy, maxGy do
-			for item, _ in pairs(self.data[gx][gy]) do
-				local dx, dy = item.location[1] - x, item.location[3] - y
-				if dx * dx + dy * dy <= rangeSq and evalFunc(item) then
-					local score = evalFunc(item)
-					if score and score > bestScore then
-						bestItem = item
-						bestScore = score
-					end
-				end
-			end
-		end
-	end
-	return bestItem
-end
-
 -- UNIT INFO CACHE
 
 local unitInfoCacheFrames = framesPerSecond
 
--- locationListener is called whenever a position is read, updateListener exactly once per unit
--- per unitInfoCacheFrames
-UnitInfoCache = { locationListener = nil, updateListener = nil }
+-- updateListener is called exactly once per unit per unitInfoCacheFrames
+UnitInfoCache = { updateListener = nil }
 
 function UnitInfoCache:new(o)
 	o = o or {} -- create object if user does not provide one
@@ -558,7 +331,6 @@ function UnitInfoCache:new(o)
 	o._unitStatsCache = {}
 	-- cacheObject { name, allyTeam, unitDefID, lastUpdatedFrame, location, velocity }
 	o.cache = o.cache or {}
-	o.locationListener = o.locationListener or nil
 	return o
 end
 
@@ -590,10 +362,7 @@ function UnitInfoCache:_weaponStats(unitDef)
 	return weaponImportance, range
 end
 
--- Static units are less interesting just for being built, but they matter when they are fought over
-local staticAttackedBoost = 1.5
--- Damage no unit can be blamed for, such as fire burning on after whoever lit it has died, lava or
--- a shell landing after its gun is gone, is mostly not the fight itself
+-- Damage no unit can be blamed for counts for this much (see UnitDamaged)
 local unattributedDamageFactor = 0.25
 
 function UnitInfoCache:_unitStats(unitDefID)
@@ -634,10 +403,6 @@ function UnitInfoCache:_updatePosition(unitID, cacheObject)
 	cacheObject.location = location
 	cacheObject.velocity = velocity
 
-	if self.locationListener then
-		local isMoving = distance(velocity) > 0.1
-		self.locationListener(location, cacheObject.allyTeam, isMoving)
-	end
 
 	return true
 end
@@ -657,8 +422,8 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 		metal = importance
 		spEcho('terraform_estimate', importance)
 	end
-	local cacheObject = { name = name, allyTeam = allyTeam, unitDefID = unitDefID, importance = importance, metal = metal,
-		lastUpdatedFrame = gameFrame }
+	local cacheObject = { unitID = unitID, name = name, allyTeam = allyTeam, unitDefID = unitDefID, importance = importance,
+		metal = metal, lastUpdatedFrame = gameFrame }
 	if not self:_updatePosition(unitID, cacheObject) then
 		return
 	end
@@ -709,369 +474,29 @@ function UnitInfoCache:update(currentFrame)
 	end
 end
 
--- EVENT
-
-local eventMergeRange = 256
-
--- This value gives a decay of 0.018 at time zero
-local eventDecayBase = 4
-
-Event = {}
-
-function Event:new(o)
-	o = o or {} -- create object if user does not provide one
-	setmetatable(o, self)
-	self.__index = self
-
-	o._excludes = {}
-    o._objUnits = {}
-	o._sbjUnits = {}
-	return o
-end
-
--- This event, if shown, excludes the other from being shown
-function Event:addExcludes(other)
-	self._excludes[other.id] = true
-end
-
--- Add an object unit i.e. the unit being done to
-function Event:addObject(unitID, location)
-	self._objUnits[unitID] = location
-end
-
--- Add a subject unit i.e. the unit doing the thing
-function Event:addSubject(unitID, location)
-	self._sbjUnits[unitID] = location
-	-- The costliest subject, noted while it is still there to ask
-	local unitDefID = spGetUnitDefID(unitID)
-	if unitDefID then
-		self.metal = max(self.metal or 0, UnitDefs[unitDefID].metalCost)
-	end
-end
-
-function Event:excludes(other)
-	return self._excludes[other.id]
-end
-
-function Event:valueAtFrame(value, frame)
-  return value * (1 - logistic(eventDecayBase / self.decay * (frame - self.started - self.decay)))
-end
-
--- return - true if there are no more subjects
-function Event:removeSubject(unitID)
-	self._sbjUnits[unitID] = nil
-	for _, _ in pairs(self._sbjUnits) do
-		return false
-	end
-	return true
-end
-
-function Event:subjectCount()
-	local count = 0
-	for _, _ in pairs(self._sbjUnits) do
-		count = count + 1
-	end
-	return count
-end
-
--- EVENT STATISTICS
-
-EventStatistics = { eventMeanAdj = {} }
-
-function EventStatistics:new(o, types)
-	o = o or {} -- create object if user does not provide one
-	setmetatable(o, self)
-	self.__index = self
-
-	for type, _ in pairs(types) do
-		o[type] = { 0, 0 }
-	end
-
-	return o
-end
-
-function EventStatistics:logEvent(type, importance)
-	local oldCount, meanImportance = unpack(self[type])
-	-- Switch to a weighted mean after a certain number of events, for faster adaptation.
-	local newCount = (oldCount == 32 and oldCount) or oldCount + 1
-
-	meanImportance = meanImportance * (newCount - 1) / newCount + importance / newCount
-	self[type][1] = newCount
-	self[type][2] = meanImportance
-end
-
--- Return percentile in unit range
-function EventStatistics:getPercentile(type, importance)
-	local meanImportance = self[type][2]
-
-	-- Assume exponential distribution
-	local m = 1 / (meanImportance * self.eventMeanAdj[type])
-	return 1 - exp(-m * importance)
-end
-
-
 -- WORLD INFO
 
 local mapSizeX, mapSizeZ = Game.mapSizeX, Game.mapSizeZ
 local worldGridSize = 512
 local mapGridX, mapGridZ = mapSizeX / worldGridSize, mapSizeZ / worldGridSize
-local teamInfo, interestGrid, unitInfo
+local teamInfo, unitInfo
 
--- EVENT TRACKING
+-- SHOT SELECTION
 
-local attackEventType = "attack"
-local buildingEventType = "building"
-local lullEventType = "lull"
-local moveEventType = "move"
-local sceneEventType = "scene"
-local unitBuiltEventType = "unitBuilt"
-local unitDamagedEventType = "unitDamaged"
-local unitDestroyedEventType = "unitDestroyed"
-local unitDestroyerEventType = "unitDestroyer"
-local unitTakenEventType = "unitTaken"
-local eventTypes = {
-	attack = true,
-	building = true,
-	lull = true,
-	move = true,
-	scene = true,
-	unitBuilt = true,
-	unitDamaged = true,
-	unitDestroyed = true,
-	unitDestroyer = true,
-	unitTaken = true
-}
-local eventTypesCount = 0
-for _, enabled in pairs(eventTypes) do
-	eventTypesCount = eventTypesCount + (enabled and 1 or 0)
-end
-
--- Logistic decay, time in frames to reach 1/2 of original value
-local eventDecayFactors = _apply(_multiply, {
-	attack = 1,
-	building = 5,
-	lull = 4,
-	move = 2,
-	scene = 2,
-	unitBuilt = 5,
-	unitDamaged = 2,
-	unitDestroyed = 3,
-	unitDestroyer = 3,
-	unitTaken = 3
-}, framesPerSecond)
-
-local eventStatistics = EventStatistics:new({
-	-- Adjust mean of events in percentile estimation
-	-- > 1: make each event seem more likely (less interesting)
-	-- < 1: make each event seem less likely (more interesting)
-	eventMeanAdj = {
-		attack = 1.0,
-		building = 2.4,
-		lull = 1.0,
-		move = 5.0,
-		scene = 1.0,
-		unitBuilt = 1.9,
-		unitDamaged = 0.8,
-		unitDestroyed = 0.5,
-		unitDestroyer = 0.7,
-		unitTaken = 0.2
-	}
-}, eventTypes)
-
-local lastEventId = 0
-local events = SpatialLookup:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, capacity = 128 })
-local mie, pendingMie
-
-local function _getInterestModifier(event)
-	if event.type == lullEventType or event.type == sceneEventType then
-		-- Lulls have a pseudo-location in the middle of a wide area, and should ignore what is happening
-		-- there. Scenes do their own accounting of what's new (see scenes).
-		return 1
-	end
-	local x, _, z = unpack(event.location)
-	return interestGrid:getScore(x, z)
-end
-
-local function _getEventPercentile(currentFrame, event)
-	local importance = event:valueAtFrame(event.importance, currentFrame)
-	return eventStatistics:getPercentile(event.type, importance * _getInterestModifier(event))
-end
-
--- Against a challenger the pick's importance counts this many times over, more for ones that
--- take longer to get to (see transitionCost).
-local switchBoostNear, switchBoostFar = 2, 3.3
-local lockedRarity = 0.5
+-- A challenger has to score this many times what the shot on show scores to replace it, more for
+-- one that takes longer to get to (see transitionCost)
+local switchBoostNear, switchBoostFar = 1.3, 2
+-- While the shot is locked, it scores at least this share of the typical best score
+local lockedShare = 0.5
 -- transitionCost(location) returns 0 for something already framed, up to 1 for a cut. Defined
 -- with the camera.
 local transitionCost
 
-local function _getRarity(event)
-	return 1 - _getEventPercentile(gameFrame, event)
-end
-
--- Boosting importance by b raises rarity to the power b, so a decayed pick still gives way.
--- boostScale multiplies the boost, e.g. while the shot is locked.
-local function _beatsPick(event, rarity, boostScale)
-	if not mie then
-		return true
-	end
-	local boost = switchBoostNear
-	-- A wide lull shot shows the other event anyway, so moving between them costs little
-	if mie.type ~= lullEventType and event.type ~= lullEventType then
-		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * transitionCost(event.location)
-	end
-	local pickRarity = _getRarity(mie)
-	if boostScale then
-		-- A locked shot holds like a fair pick, however weak it was
-		pickRarity = min(pickRarity, lockedRarity)
-		boost = boost * boostScale
-	end
-	return rarity < pickRarity ^ boost
-end
-
-local ADD_EVENT_OPTS_NO_GRID_NO_MERGE = { noGrid = true, noMerge = true }
-
--- updateFunc - Optional function taking the event as a parameter.
--- returns event {}
--- - units Contains unit IDs and their current locations. May contain negative unit IDs e.g. for dead units.
-local function addEvent(actor, importance, location, meta, sbjName, type, unitID, updateFunc, opts)
-	if not importance or not location or not sbjName or not type then
-		spEcho("ERROR! addEvent failed", importance, location, sbjName, type)
-		return Event:new({ id = -1, importance = 0, type = type or "nil", location = location or {0, 0, 0}, started = 0 })
-	end
-	if importance > 10000000 then
-	    -- Safety net, should not happen
-		spEcho('ERROR! addEvent with extreme importance', importance, type)
-		if not DEBUG then
-			return Event:new({ id = -1, importance = 0, type = type, location = location, started = 0 })
-		end
-	end
-	opts = opts or {}
-
-	local decay = eventDecayFactors[type]
-	local actorAllyTeam = actor and teamInfo[actor].allyTeam
-
-	if not opts.noGrid then
-		interestGrid:add(location[1], location[3], actorAllyTeam, importance)
-	end
-
-	-- Try to merge into recent events.
-	local considerForMergeAfterFrame = gameFrame - framesPerSecond
-	local event = nil
-	if not opts.noMerge then
-		event = events:getNearby(location[1], location[3], opts.mergeRange or eventMergeRange, function(e)
-			-- The current pick keeps merging for as long as it lasts.
-			return (e.started >= considerForMergeAfterFrame or e == mie)
-		        and e.type == type
-				and e.sbjName == sbjName
-				and e.actorAllyTeam == actorAllyTeam
-				and e.started
-				or nil
-		end)
-	end
-
-	if event then
-		if STATS and event == mie then
-			spEcho(string.format('rc-extend,%d,%s', event.id, type))
-		end
-
-		-- Remove it and attach at head later. Must do this before mutating event.location
-		events:remove(event)
-
-		-- Merge new event into old.
-		event.importance = event:valueAtFrame(event.importance, gameFrame) + importance
-		event.decay = decay
-		event.location = location
-		event.started = gameFrame
-		if actor and not event.actors[actor] then
-			event.actorCount = event.actorCount + 1
-			event.actors[actor] = actor
-		end
-		if unitID then
-			event:addSubject(unitID, location)
-		end
-	else
-		lastEventId = lastEventId + 1
-		event = Event:new({
-			actorCount = 1,
-			actors = initTable(actor, true),
-			actorAllyTeam = actorAllyTeam,
-			decay = decay,
-			updateFunc = updateFunc,
-			id = lastEventId,
-			importance = importance,
-			location = location,
-			meta = meta,
-			sbjName = sbjName,
-			started = gameFrame,
-			type = type
-		})
-		if unitID then
-		  event:addSubject(unitID, location)
-		end
-	end
-
-	events:add(event)
-
-	if event.updateFunc then
-		event.updateFunc(event)
-	end
-
-	eventStatistics:logEvent(event.type, event.importance * _getInterestModifier(event))
-
-	if eventTypes[event.type] then
-		local rarity = _getRarity(event)
-		if event == mie then
-			-- A strengthened pick can win back a pending cut.
-			if pendingMie and pendingMie ~= mie and not _beatsPick(pendingMie, _getRarity(pendingMie)) then
-				pendingMie = mie
-			end
-		elseif rarity < (pendingMie and pendingMie ~= mie and _getRarity(pendingMie) or 1)
-		    and _beatsPick(event, rarity) then
-			pendingMie = event
-		end
-	end
-
-	return event
-end
-
--- eventProcessor - perform processing and return truthy to remove the event
-local function purgeEvents(eventProcessor, opts)
-	local event = events._items.head
-	while event ~= nil do
-		if eventProcessor(event, opts) then
-			if event == pendingMie then
-				-- Its subjects are gone, don't show it.
-				pendingMie = nil
-			end
-			event, _ = events:remove(event)
-		else
-			event = event.prev
-		end
-	end
-end
-
-local function __purgeExcludes(event, opts)
-	return opts.excluder:excludes(event)
-end
-
-local function __purgeSubject(event, opts)
-  return event:removeSubject(opts.unitID)
-end
-
-local function __purgeCommands(event, opts)
-	if event.type ~= attackEventType and event.type ~= moveEventType then
-		return false
-	end
-	return event:removeSubject(opts.unitID)
-end
-
-
-
-
--- EVENT DISPLAY
+-- CAMERA
 
 local camTypeTracking = 'tracking'
+-- The tracked units' centre is smoothed while it moves less than this in an update
+local trackDampRange = 256
 local camDiagMin = 1000
 -- Share of the screen a shot's box may span, as projected, per axis (see frameBox)
 local frameFill = 0.58
@@ -1091,9 +516,9 @@ local panArcRise, panArcMax = 0.4, 0.75
 local maxShotYawChange = pi / 3
 -- Cut rather than pan when the pan would take longer than this
 local maxPanSeconds = 1.8
--- Lull events: when a fight dies down, a lull event frames the spread of activity across the map in
--- a wide, north-facing shot. It fires once per fight, when recent damage drops well below its recent
--- peak, with that peak as its importance, so bigger fights ending are more likely to be shown.
+-- Lulls: when a fight dies down, a wide, north-facing shot of the foci with most going on is offered.
+-- It is offered once per fight, when recent damage drops well below its recent peak, scoring that
+-- peak, so bigger fights ending are more likely to be shown.
 -- (A table, as Lua 5.1 allows only 200 locals here.)
 local lullConfig = {
 	-- Damage (metal value per second) is averaged over a short and a long window. The short
@@ -1103,13 +528,16 @@ local lullConfig = {
 	minPeak = 10, minPeakRatio = 1.5,
 	-- Fire when the short average falls to dropRatio of the peak; rearm once back over rearmRatio
 	dropRatio = 0.3, rearmRatio = 0.6,
-	-- Frame every grid cell with at least this much activity (idle is 1; a moving unit adds about 1)
-	cellMin = 1.5,
+	-- Frame every focus with at least this share of the hottest's heat
+	focusShare = 0.1,
+	-- The wide shot scores the peak (metal/s) times this, fading by half after decaySeconds, or
+	-- shownDecaySeconds once on show
+	scoreScale = 6, decaySeconds = 4, shownDecaySeconds = 3,
 	-- Frame at least this diagonal, and fill this share of the screen
 	minDiag = 2000, fill = 0.9,
 	pitch = -1.2,
 }
--- Lull detection, defined with the display code. damage has this second's damage, its short and
+-- Lull detection, defined with the shot code. damage has this second's damage, its short and
 -- long running means and the short mean's decaying peak (metal value per second).
 local lull = { damage = { now = 0, short = 0, long = 0, peak = 0 }, armed = false }
 
@@ -1128,22 +556,17 @@ local scenes = {
 	-- ... or of this many seconds, within watchedRange of where the camera is looking. A scene on
 	-- show holds the camera only while its stake keeps growing.
 	watchedSeconds = 3, watchedRange = worldGridSize,
-	-- Add events for at most this many scenes a second, at least this many cells apart
+	-- Add to foci for at most this many scenes a second, at least this many cells apart
 	maxScenes = 2, separation = 3,
-	-- Frame the units this close to the cell centre
+	-- A scene's units are those this close to its centre
 	radius = worldGridSize * 0.75,
-	-- The stake on show is steadied over about this many seconds
-	shownStakeSeconds = 3,
-	-- A scene already under way only moves as far as the rise moves beyond this
-	deadZone = 128,
-	-- A scene this big and this close to the shot is taken into frame for a few seconds
-	asideStake = 600, asideRange = worldGridSize * 2.5, asideFrames = 3 * framesPerSecond,
-	eventOpts = { noGrid = true, mergeRange = worldGridSize * 1.5 },
 	-- Average stake by cell, and ally team names
 	baseline = {}, names = {},
 	-- This second's value (importance, for scoring), metal (what it cost, for the callout), armed
 	-- strength over the horizon and armed strength now, by ally team and cell
 	value = {}, metal = {}, power = {}, powerNow = {},
+	-- Units by ally team and cell this second, and how much is going on by cell (see activityAt)
+	count = {}, activity = {},
 }
 
 -- Orbits: once a shot is framed, the camera may slowly fly around the event to a heading that
@@ -1180,8 +603,8 @@ local keepTrackingRange = worldGridSize * 2
 local framedCentre = 0.25
 
 local display, initialCameraState, camera
--- Event the camera is actually showing (updateDisplay may refuse to switch)
-local shownEvent
+-- What the camera is showing: a focus, or a wide shot (see lull.wide)
+local shown
 
 -- Whether a world location is in view
 local function onScreen(location)
@@ -1190,26 +613,439 @@ local function onScreen(location)
 	return sx and sz >= 0 and sz <= 1 and sx >= 0 and sx <= vsx and sy >= 0 and sy <= vsy or false
 end
 
+-- FOCI
+-- A focus is a place where things are happening. Damage, deaths, captures, building, units given
+-- orders and value coming under threat (see scenes) each add their metal to the nearest focus, or
+-- start one. A focus keeps that metal by kind and by side in one-second bins over the last few
+-- seconds, which give its heat, and in totals since it formed, for the callout. The camera shows
+-- the focus that scores best, and the callout talks about it.
+-- (A table, as Lua 5.1 allows only 200 locals here.)
+local foci = {
+	-- Input joins the nearest focus whose centre is this close, and foci this close merge
+	joinRange = 512, mergeRange = 384,
+	-- An attacker this far from what it hit isn't framed with it
+	attackerRange = 768,
+	-- At most this many foci. When full, the weakest goes for new input, unless that is weaker still.
+	cap = 32,
+	-- One-second bins, each worth binDecay times the next newer one in heat
+	bins = 16, binDecay = 0.8,
+	-- Heat is metal times these. A kill counts as damage and again as a death, so kills count
+	-- double. Also kept, for the callout only: kills by the killer's side and dealt (damage) by
+	-- the attacker's side; the rest are by the side that lost or did it.
+	weights = { damage = 1, destroyed = 1, captured = 1.5, building = 0.25, built = 0.5, stake = 0.35, orders = 0.1 },
+	-- A unit is framed with its focus for this long after it was last involved
+	unitSeconds = 8,
+	-- A unit's orders count once in this long
+	orderSeconds = 8,
+	-- Passe: seconds watched, rising by 1/s while the camera is within passeRange and falling by
+	-- 1/s otherwise. It halves the score at passeMid, sparing heat from the last freshSeconds so a
+	-- fight still going on holds the camera.
+	passeRange = 512, passeMid = 10, passeSlope = 0.4, freshSeconds = 2,
+	-- An allied cursor this close multiplies the score by this
+	cursorRange = 512, cursorBoost = 1.5,
+	-- A focus this hot and this close to the shot is taken into frame for a few seconds
+	asideHeat = 1000, asideRange = worldGridSize * 2.5, asideFrames = 3 * framesPerSecond,
+	-- The camera frames at most this many of a focus's units
+	trackUnits = 40,
+	-- Moments that are news in themselves: losing a commander or something costing highlightMetal,
+	-- a capture costing captureHighlightMetal, or finishing something costing builtHighlightMetal.
+	-- One adds its metal to the score, halving every highlightHalfLife seconds and ignoring passe.
+	highlightMetal = 750, captureHighlightMetal = 300, builtHighlightMetal = 1500, highlightHalfLife = 3,
+	-- The callout names the costliest thing built at a focus in this long
+	builtKeepSeconds = 8,
+	-- Running mean of the best score, over about this many seconds
+	typicalSeconds = 30, typical = 0,
+	-- Heat by cell, for choosing headings (see scenes.activityAt), counts this much less than a unit
+	cellHeatScale = 10, cells = {},
+	list = {}, slot = 1, lastId = 0,
+}
+
+function foci.new(x, z)
+	foci.lastId = foci.lastId + 1
+	local f = { id = foci.lastId, x = x, z = z, mass = 0, heat = 0, pending = 0, score = 0, watched = 0,
+		bins = {}, totals = {}, units = {}, players = {}, born = gameFrame }
+	foci.list[#foci.list + 1] = f
+	return f
+end
+
+-- The nearest focus to (x, z) within range
+function foci.near(x, z, range)
+	local best, bestD = nil, range * range
+	for _, f in ipairs(foci.list) do
+		local dx, dz = f.x - x, f.z - z
+		local d = dx * dx + dz * dz
+		if d <= bestD then
+			best, bestD = f, d
+		end
+	end
+	return best
+end
+
+-- Add metal of a kind to a focus's bins and totals, for a side
+function foci.record(f, metric, allyTeam, metal)
+	local bin = f.bins[foci.slot]
+	if not bin then
+		bin = {}
+		f.bins[foci.slot] = bin
+	end
+	local m = bin[metric]
+	if not m then
+		m = {}
+		bin[metric] = m
+	end
+	m[allyTeam] = (m[allyTeam] or 0) + metal
+	local t = f.totals[metric]
+	if not t then
+		t = {}
+		f.totals[metric] = t
+	end
+	t[allyTeam] = (t[allyTeam] or 0) + metal
+end
+
+-- Add metal of a kind for a side at (x, z), involving unitID, and otherID too if it is close. Returns
+-- the focus, or nil if the input was too slight to start one.
+function foci.add(metric, allyTeam, metal, x, z, unitID, otherID)
+	if not metal or metal <= 0 or not x or not z or not allyTeam then
+		return
+	end
+	local weighted = metal * (foci.weights[metric] or 0)
+	local f = foci.near(x, z, foci.joinRange)
+	if not f then
+		if #foci.list >= foci.cap then
+			local weakest, weakestHeat = nil, huge
+			for i, other in ipairs(foci.list) do
+				local heat = other.heat + other.pending
+				if other ~= shown and heat < weakestHeat then
+					weakest, weakestHeat = i, heat
+				end
+			end
+			if not weakest or weighted <= weakestHeat then
+				return
+			end
+			table.remove(foci.list, weakest)
+		end
+		f = foci.new(x, z)
+	end
+	foci.record(f, metric, allyTeam, metal)
+	if weighted > 0 then
+		-- The centre follows the input, by its share of what has come in lately
+		f.mass, f.pending = f.mass + weighted, f.pending + weighted
+		f.x, f.z = f.x + (x - f.x) * weighted / f.mass, f.z + (z - f.z) * weighted / f.mass
+	end
+	-- Who is in on it, by player: the unit's, and the other's if close
+	local function involve(id)
+		local team = spGetUnitTeam(id)
+		if team then
+			f.players[team] = (f.players[team] or 0) + metal
+		end
+	end
+	if unitID then
+		f.units[unitID] = gameFrame
+		involve(unitID)
+	end
+	if otherID then
+		local location = unitInfo:get(otherID)
+		if location and length(location[1] - x, location[3] - z) <= foci.attackerRange then
+			f.units[otherID] = gameFrame
+			involve(otherID)
+		end
+	end
+	return f
+end
+
+-- A moment that is news in itself (see highlightMetal): { kind, metal, location, ... }. It replaces
+-- one that is worth less by now.
+function foci.highlight(f, h)
+	if not f then
+		return
+	end
+	h.frame = gameFrame
+	if foci.highlightBonus(f) <= h.metal then
+		f.highlight = h
+	end
+end
+
+function foci.highlightBonus(f)
+	local h = f.highlight
+	return h and h.metal * 0.5 ^ ((gameFrame - h.frame) / framesPerSecond / foci.highlightHalfLife) or 0
+end
+
+-- The metal of a kind in the last seconds bins: in all, and by side
+function foci.recent(f, metric, seconds)
+	local total, bySide = 0, {}
+	for age = 0, min(seconds, foci.bins) - 1 do
+		local bin = f.bins[(foci.slot - 1 - age) % foci.bins + 1]
+		local m = bin and bin[metric]
+		if m then
+			for side, v in pairs(m) do
+				bySide[side], total = (bySide[side] or 0) + v, total + v
+			end
+		end
+	end
+	return total, bySide
+end
+
+-- Weighted metal over the bins, newest (the one filling) first, older ones worth less. Also returns
+-- the part from the last freshSeconds.
+function foci.heatOf(f)
+	local heat, fresh, w = 0, 0, 1
+	for age = 0, foci.bins - 1 do
+		if age == foci.freshSeconds then
+			fresh = heat
+		end
+		local bin = f.bins[(foci.slot - 1 - age) % foci.bins + 1]
+		if bin then
+			for metric, m in pairs(bin) do
+				local weight = foci.weights[metric]
+				if weight then
+					for _, v in pairs(m) do
+						heat = heat + v * weight * w
+					end
+				end
+			end
+		end
+		w = w * foci.binDecay
+	end
+	return heat, fresh
+end
+
+-- The kind of thing mostly going on lately, by weighted metal
+function foci.kind(f, seconds)
+	local best, bestValue = nil, 0
+	for metric, weight in pairs(foci.weights) do
+		local value = foci.recent(f, metric, seconds) * weight
+		if value > bestValue then
+			best, bestValue = metric, value
+		end
+	end
+	return best
+end
+
+-- Fold gone into keep
+function foci.absorb(keep, gone)
+	local mass = keep.mass + gone.mass
+	if mass > 0 then
+		keep.x = (keep.x * keep.mass + gone.x * gone.mass) / mass
+		keep.z = (keep.z * keep.mass + gone.z * gone.mass) / mass
+	end
+	keep.mass, keep.pending, keep.heat = mass, keep.pending + gone.pending, keep.heat + gone.heat
+	for slot, bin in pairs(gone.bins) do
+		local kb = keep.bins[slot] or {}
+		keep.bins[slot] = kb
+		for metric, m in pairs(bin) do
+			local km = kb[metric] or {}
+			kb[metric] = km
+			for side, v in pairs(m) do
+				km[side] = (km[side] or 0) + v
+			end
+		end
+	end
+	for metric, m in pairs(gone.totals) do
+		local km = keep.totals[metric] or {}
+		keep.totals[metric] = km
+		for side, v in pairs(m) do
+			km[side] = (km[side] or 0) + v
+		end
+	end
+	for unitID, frame in pairs(gone.units) do
+		keep.units[unitID] = max(keep.units[unitID] or 0, frame)
+	end
+	for team, v in pairs(gone.players) do
+		keep.players[team] = (keep.players[team] or 0) + v
+	end
+	keep.watched, keep.born = max(keep.watched, gone.watched), min(keep.born, gone.born)
+	if gone.highlight and foci.highlightBonus(gone) > foci.highlightBonus(keep) then
+		keep.highlight = gone.highlight
+	end
+	if gone.order and (not keep.order or gone.order.frame > keep.order.frame) then
+		keep.order = gone.order
+	end
+end
+
+-- Foci that have come close merge. The one on show keeps its identity, otherwise the heavier.
+function foci.merge()
+	local list = foci.list
+	for i = #list, 2, -1 do
+		local a = list[i]
+		for j = 1, i - 1 do
+			local b = list[j]
+			if a and length(a.x - b.x, a.z - b.z) <= foci.mergeRange then
+				local keepA = a == shown or b ~= shown and a.mass > b.mass
+				if keepA then
+					foci.absorb(a, b)
+					table.remove(list, j)
+				else
+					foci.absorb(b, a)
+					table.remove(list, i)
+				end
+				break
+			end
+		end
+	end
+end
+
+-- Once a second: merge, score, then start a new bin and let foci with nothing left go
+function foci.update()
+	foci.merge()
+	local wx, _, wz = unpack(display.location)
+	local cursors = {}
+	for _, acp in pairs(WG.alliedCursorsPos or {}) do
+		if acp[1] and acp[2] then
+			cursors[#cursors + 1] = acp
+		end
+	end
+	local best, unitFrames = 0, foci.unitSeconds * framesPerSecond
+	for _, f in ipairs(foci.list) do
+		local fresh
+		f.heat, fresh = foci.heatOf(f)
+		f.pending, f.mass = 0, f.mass * foci.binDecay
+		for team, v in pairs(f.players) do
+			f.players[team] = v >= 1 and v * foci.binDecay or nil
+		end
+		local watched = not display.isWide and length(f.x - wx, f.z - wz) <= foci.passeRange
+		f.watched = watched and f.watched + 1 or max(0, f.watched - 1)
+		local score = fresh + (f.heat - fresh) * (1 - logistic(foci.passeSlope * (f.watched - foci.passeMid)))
+		for _, c in ipairs(cursors) do
+			if length(c[1] - f.x, c[2] - f.z) <= foci.cursorRange then
+				score = score * foci.cursorBoost
+				break
+			end
+		end
+		f.score = score + foci.highlightBonus(f)
+		best = max(best, f.score)
+		for unitID, frame in pairs(f.units) do
+			if gameFrame - frame > unitFrames then
+				f.units[unitID] = nil
+			end
+		end
+	end
+	foci.typical = foci.typical + (best - foci.typical) / foci.typicalSeconds
+	foci.cells = {}
+	for _, f in ipairs(foci.list) do
+		scenes.spread(foci.cells, f.x, f.z, f.heat)
+	end
+
+	if STATS then
+		local sorted = {}
+		for i, f in ipairs(foci.list) do
+			sorted[i] = f
+		end
+		table.sort(sorted, function(a, b) return a.score > b.score end)
+		for i = 1, min(4, #sorted) do
+			local f = sorted[i]
+			spEcho(string.format('rc-focus,%d,%.0f,%.0f,%.0f,%.0f,%d,%s,%d', f.id, f.x, f.z, f.heat, f.score, f.watched,
+				foci.kind(f, 6) or 'none', #foci.list))
+		end
+	end
+
+	foci.slot = foci.slot % foci.bins + 1
+	for i = #foci.list, 1, -1 do
+		local f = foci.list[i]
+		f.bins[foci.slot] = nil
+		if not next(f.bins) and f ~= shown then
+			table.remove(foci.list, i)
+		end
+	end
+end
+
+-- Metal a unit has lost to damage: its cost (as far as it is built) by the share of its health
+-- taken, not counting overkill. Damage is reported once taken off, so health can be below 0.
+function foci.damageValue(unitID, unitDefID, damage, paralyzer)
+	local unitDef = UnitDefs[unitDefID]
+	local health, maxHealth, _, _, buildProgress = spGetUnitHealth(unitID)
+	if not unitDef or unitDef.customParams.dontcount or not maxHealth or maxHealth <= 0 then
+		return 0
+	end
+	if not paralyzer and health and health < 0 then
+		damage = max(0, damage + health)
+	end
+	return unitDef.metalCost * (buildProgress or 1) * min(damage, maxHealth) / maxHealth
+end
+
+-- Once a second per unit (see UnitInfoCache): count what has gone into building it
+function foci.observe(info)
+	if not info.unfinished or not info.unitID then
+		return
+	end
+	local _, _, _, _, buildProgress = spGetUnitHealth(info.unitID)
+	if not buildProgress then
+		return
+	end
+	local delta = buildProgress - (info.progress or 0)
+	info.progress = buildProgress
+	if delta > 0 then
+		local x, _, z = unpack(info.location)
+		foci.add('building', info.allyTeam, delta * info.metal, x, z, info.unitID, info.builderID)
+	end
+end
+
+function foci.isCommander(unitID, unitDef)
+	return unitDef.customParams.commtype or spGetUnitRulesParam(unitID, "comm_level") ~= nil
+end
+
+-- Units given orders together are one move, for the callout
+function foci.order(f, unitID, team, name, from, to)
+	local o = f.order
+	if not o or o.team ~= team or gameFrame - o.frame > 3 * framesPerSecond then
+		o = { team = team, units = {}, names = {} }
+		f.order = o
+	end
+	o.frame, o.from, o.to = gameFrame, { from[1], from[3] }, { to[1], to[3] }
+	if not o.units[unitID] then
+		o.units[unitID], o.names[name] = true, (o.names[name] or 0) + 1
+	end
+end
+
+-- Once a second: a hot focus close to the shot is taken into frame for a few seconds (see
+-- updateCamera)
+function foci.aside()
+	if not shown or display.isWide then
+		return
+	end
+	local wx, _, wz = unpack(display.location)
+	local best
+	for _, f in ipairs(foci.list) do
+		if f ~= shown and f.heat >= foci.asideHeat and length(f.x - wx, f.z - wz) <= foci.asideRange
+		    and (not best or f.heat > best.heat) then
+			best = f
+		end
+	end
+	if best then
+		display.aside = { best.x, best.z, gameFrame }
+	end
+end
+
+
 -- OVERLAY
--- A callout pointing at the shot, with what each side has killed on screen since the last cut, and
--- markings on the ground: a ring for a scene, an arrow for a move.
+-- A callout pointing at the focus on show, saying what is going on there, with what each side has
+-- killed there; and markings on the ground: a ring round the focus, or an arrow for a move.
 -- A wide shot gets a board instead, with what each side's units are worth.
 
 -- A unit dying with no attacker is credited to whoever hit it this recently
 overlay.creditFrames = 20 * framesPerSecond
 -- Text size and arrow width, the first for a 1080 high view
 overlay.textSize, overlay.arrowWidth = 16, 36
--- How opaque the pointer and a scene's ring are
+-- How opaque the pointer and the ring are
 overlay.lineAlpha = 0.8
--- The callout follows a fight rather than each pick in it: a pick close to where the camera is,
--- within fightWindow of the callout going up, joins it instead of replacing it, unless one of its
--- units costs fightBreakMetal or more (see overlay.show)
-overlay.fightWindow, overlay.fightBreakMetal = 8 * framesPerSecond, 750
+-- The callout speaks of the last recentSeconds. Something new to say replaces what it says once it
+-- has held for holdSeconds, but a highlight leads at once, for highlightSeconds.
+overlay.recentSeconds, overlay.holdSeconds, overlay.highlightSeconds = 6, 3, 6
+-- Fighting is what the callout is about once this much metal has been lost lately. A side is in
+-- the fight if it has lost at least fightShare of what the side losing most has.
+overlay.minCombat, overlay.fightShare = 30, 0.15
+-- The ring takes in most of the focus's units, within these radii, and follows the focus over
+-- about ringSeconds
+overlay.ringMin, overlay.ringMax, overlay.ringSeconds = 256, 640, 1
+-- A fight's colour, as it is no one side's
+overlay.neutral = { 0.6, 0.6, 0.6 }
+overlay.radius = overlay.ringMin
 
 -- A player and their side, in the player's colour
 function overlay.player(teamID)
 	local info = teamInfo[teamID]
-	return overlay.coloured(info.name .. " (" .. info.allyTeamName .. ")", info.color)
+	-- A team of one is named after its player
+	local team = info.allyTeamName ~= info.name and " (" .. info.allyTeamName .. ")" or ""
+	return overlay.coloured(info.name .. team, info.color)
 end
 
 -- Text in a team's colour (colour code bytes can't be 0)
@@ -1217,57 +1053,44 @@ function overlay.coloured(text, color)
 	return string.char(255, max(1, color[1] * 255), max(1, color[2] * 255), max(1, color[3] * 255)) .. text .. "\008"
 end
 
+-- A side at a focus, by who on it is in on what is happening there lately: the player most
+-- involved, in their colour, or if others are close behind (alsoShare of the first), the team's
+-- name in its colour with how many. With nobody, the team's name. Also returns the colour.
+overlay.alsoShare = 0.5
+function overlay.side(allyTeam, f)
+	local list = {}
+	for team, v in pairs(f and f.players or {}) do
+		local info = teamInfo[team]
+		if info and info.allyTeam == allyTeam then
+			list[#list + 1] = { team = team, v = v }
+		end
+	end
+	if not list[1] then
+		local color = overlay.allyColor[allyTeam] or { 1, 1, 1 }
+		return overlay.coloured(scenes.names[allyTeam] or "?", color), color
+	end
+	table.sort(list, function(a, b) return a.v > b.v end)
+	local more = 0
+	for i = 2, #list do
+		if list[i].v >= overlay.alsoShare * list[1].v then
+			more = more + 1
+		end
+	end
+	if more > 0 then
+		local color = overlay.allyColor[allyTeam] or { 1, 1, 1 }
+		return overlay.coloured((scenes.names[allyTeam] or "?") .. " (" .. (more + 1) .. ")", color), color
+	end
+	local first = teamInfo[list[1].team]
+	return overlay.coloured(first.name, first.color), first.color
+end
+
 function overlay.metal(amount)
 	amount = floor(amount / 10 + 0.5) * 10
 	return amount < 1000 and tostring(amount) or string.format("%d,%03d", floor(amount / 1000), amount % 1000)
 end
 
--- The tally counts what the viewer could have seen die: on screen, in a close shot. A cut or a wide
--- shot starts it again, as the viewer sees those as a new scene; a pan carries on.
-function overlay.addDeath(allyTeam, location, metal)
-	if not display.isWide and onScreen(location) then
-		overlay.tally[allyTeam] = (overlay.tally[allyTeam] or 0) + metal
-	end
-end
-
--- Put the callout up for a pick: its own headline, units and colour
-function overlay.start(event)
-	local side, actor = event.meta and event.meta.side, next(event.actors)
-	overlay.event, overlay.fight, overlay.since, overlay.anchor = event, nil, gameFrame, { event.location[1], event.location[3] }
-	-- The event drops units that are given new orders, the overlay keeps pointing at them
-	overlay.headline, overlay.subjects = event.commentary, {}
-	for unitID, location in pairs(event._sbjUnits) do
-		overlay.subjects[unitID] = { unpack(location) }
-	end
-	overlay.total, overlay.killed = event:subjectCount(), 0
-	overlay.left, overlay.closing = nil, nil
-	local isOrder = event.type == moveEventType or event.type == attackEventType
-	overlay.arrowFrom = isOrder and event.meta.origin
-	overlay.arrowTo = isOrder and { event.location[1], event.location[3] }
-	overlay.color = side and overlay.allyColor[side] or actor and teamInfo[actor].color or { 1, 1, 1 }
-	overlay.update()
-	if DEBUG then
-		spEcho(string.format('rc-callout,start,%d,%s,%s', event.id, event.type, overlay.headline or ''))
-	end
-end
-
--- Add the sides an event involves to the set sides: who did it and whose units it is about
-function overlay.sidesOf(event, sides)
-	for actor in pairs(event.actors) do
-		if teamInfo[actor] then
-			sides[teamInfo[actor].allyTeam] = true
-		end
-	end
-	for unitID in pairs(event._sbjUnits) do
-		local team = spGetUnitTeam(unitID)
-		if team and teamInfo[team] then
-			sides[teamInfo[team].allyTeam] = true
-		end
-	end
-end
-
 -- A headline for a fight between sides, as each side's name in its colour
-function overlay.fightHeadline(sides)
+function overlay.fightHeadline(sides, f)
 	local list, names = {}, {}
 	for allyTeam in pairs(sides) do
 		if overlay.allyColor[allyTeam] and scenes.names[allyTeam] then
@@ -1275,88 +1098,214 @@ function overlay.fightHeadline(sides)
 		end
 	end
 	table.sort(list)
+	local colors = {}
 	for i, allyTeam in ipairs(list) do
-		names[i] = overlay.coloured(scenes.names[allyTeam], overlay.allyColor[allyTeam])
+		names[i], colors[i] = overlay.side(allyTeam, f)
 	end
 	if #names >= 2 then
-		return "Fight: " .. table.concat(names, " vs ")
+		return "Fight: " .. table.concat(names, " vs "), colors
 	end
-	return names[1] and names[1] .. " under fire" or "Fighting"
+	return names[1] and names[1] .. " under fire" or "Fighting", colors
 end
 
--- The camera has a new pick. A minor one where the callout already is joins it rather than
--- replacing it: reading "Thug damaged", "Picket damaged", "Picket destroyed" over a few seconds is
--- noise. Near a scene, the scene's callout, which is about the fight already, stays for a while.
--- Otherwise, close to where the callout went up and soon after, the callout speaks of the fight
--- instead. Anything else puts the callout up afresh.
-function overlay.show(event)
-	local current = overlay.event
-	-- A scene is about the fight too, so one where a fight or scene is already up adds nothing new
-	local fightUp = current and (overlay.fight or current.type == sceneEventType)
-	local minor = current and overlay.headline and not display.isWide
-		and event.type ~= lullEventType and (event.type ~= sceneEventType or fightUp)
-		and event.type ~= unitDestroyerEventType and event.type ~= unitTakenEventType
-		-- A costly unit lost is news; one hit, such as a commander, is part of the fight
-		and (event.type ~= unitDestroyedEventType or (event.metal or 0) < overlay.fightBreakMetal)
-	if not minor then
-		overlay.start(event)
-		return
-	end
-	local x, z, age = event.location[1], event.location[3], gameFrame - overlay.since
-	local inScene = current.type == sceneEventType and not overlay.fight and age < 2 * overlay.fightWindow
-		and length(x - current.location[1], z - current.location[3]) <= keepTrackingRange
-	-- A scene has said there is a fight here, so that holds for longer
-	local window = current.type == sceneEventType and 2 * overlay.fightWindow or overlay.fightWindow
-	local inFight = (overlay.fight or age < window)
-		and length(x - overlay.anchor[1], z - overlay.anchor[2]) <= keepTrackingRange
-	if not inScene and not inFight then
-		overlay.start(event)
-		return
-	end
-	for unitID, location in pairs(event._sbjUnits) do
-		overlay.subjects[unitID] = overlay.subjects[unitID] or { unpack(location) }
-	end
-	if inScene then
-		if DEBUG then
-			spEcho(string.format('rc-callout,scene,%d,%s,%s', event.id, event.type, overlay.headline))
+-- How far out the ring goes: past most of the focus's units
+function overlay.ringRadius(f)
+	local d = {}
+	for unitID in pairs(f.units) do
+		local location = unitInfo.cache[unitID] and unitInfo.cache[unitID].location
+		if location then
+			d[#d + 1] = length(location[1] - f.x, location[3] - f.z)
 		end
-		return
 	end
-	if not overlay.fight then
-		overlay.fight = {}
-		overlay.sidesOf(current, overlay.fight)
-		overlay.arrowFrom, overlay.arrowTo = nil, nil
-		overlay.color = { 0.85, 0.85, 0.85 }
+	table.sort(d)
+	return bound((d[math.ceil(#d * 0.75)] or 0) + 64, overlay.ringMin, overlay.ringMax)
+end
+
+-- The camera has a new shot: the callout is about its focus from now on
+function overlay.show(f)
+	overlay.focus, overlay.kind, overlay.pending, overlay.headline, overlay.detail = f, nil, nil, nil, nil
+	overlay.subjects, overlay.tally, overlay.ringed = {}, {}, false
+	overlay.arrowFrom, overlay.arrowTo, overlay.left, overlay.closing = nil, nil, nil, nil
+	if not f.wide then
+		overlay.ringX, overlay.ringZ, overlay.radius = f.x, f.z, overlay.ringRadius(f)
+		overlay.ringTarget = overlay.radius
 	end
-	overlay.sidesOf(event, overlay.fight)
-	overlay.headline = overlay.fightHeadline(overlay.fight)
 	overlay.update()
-	if DEBUG then
-		spEcho(string.format('rc-callout,fight,%d,%s,%s', event.id, event.type, overlay.headline))
+end
+
+-- What the focus is about lately: a highlight, a fight, one side under fire, trouble incoming,
+-- building, something built or units on the move. Lately is the last recentSeconds or, if nothing
+-- happened then, all the bins. Also returns what each side has lost then, for the sides that count.
+function overlay.about(f)
+	local h = f.highlight
+	if h and gameFrame - h.frame < overlay.highlightSeconds * framesPerSecond then
+		return 'highlight', {}
+	end
+	for _, window in ipairs({ overlay.recentSeconds, foci.bins }) do
+		local lost, total, most = {}, 0, 0
+		for _, metric in ipairs({ 'damage', 'destroyed', 'captured' }) do
+			local _, bySide = foci.recent(f, metric, window)
+			for side, v in pairs(bySide) do
+				lost[side], total = (lost[side] or 0) + v, total + v
+				most = max(most, lost[side])
+			end
+		end
+		local losing = 0
+		for side, v in pairs(lost) do
+			if v >= overlay.fightShare * most then
+				losing = losing + 1
+			else
+				lost[side] = nil
+			end
+		end
+		if total >= overlay.minCombat then
+			return losing >= 2 and 'fight' or 'attack', lost
+		end
+		-- Otherwise whatever there is most of, weighted as for heat
+		local best, bestValue = nil, 0
+		for _, metric in ipairs({ 'stake', 'building', 'built', 'orders' }) do
+			local value = foci.recent(f, metric, window) * foci.weights[metric]
+			if value > bestValue then
+				best, bestValue = metric, value
+			end
+		end
+		if best then
+			return best, lost
+		elseif total > 0 then
+			return losing >= 2 and 'fight' or 'attack', lost
+		end
+	end
+	return nil, {}
+end
+
+-- The side with most of a kind in a focus's totals
+function overlay.mostOf(f, metric)
+	local best, bestValue = nil, 0
+	for side, v in pairs(f.totals[metric] or {}) do
+		if v > bestValue then
+			best, bestValue = side, v
+		end
+	end
+	return best
+end
+
+-- The words for what the focus is about: headline, detail, colour, the units the headline names (or
+-- the spot), and whether the pointer goes to the ring. Returns nothing if there is nothing to say.
+function overlay.word(f, kind, lost, fresh)
+	local grey, subjects = { 0.85, 0.85, 0.85 }, {}
+	local function at(x, z)
+		return { x, spGetGroundHeight(x, z), z }
+	end
+	local function stake(minimum)
+		local metal = scenes.metalStake and scenes.around(scenes.metalStake, f.x, f.z)
+		return metal and metal >= minimum and overlay.metal(metal) .. " metal at stake" or nil
+	end
+	if kind == 'highlight' then
+		local h = f.highlight
+		local player = h.team and teamInfo[h.team] and overlay.player(h.team)
+		local headline
+		if h.kind == 'destroyed' then
+			headline = h.name .. overlay.blame(true, h.burning, h.by, player)
+		else
+			headline = h.name .. (h.kind == 'built' and " built" or " captured") .. (player and " by " .. player or "")
+		end
+		subjects[h.unitID or -1] = at(h.x, h.z)
+		return headline, nil, player and teamInfo[h.team].color or grey, subjects, false
+	elseif kind == 'fight' then
+		-- Everyone who has lost much here, so the sides don't come and go
+		local sides, most = {}, 0
+		for _, metric in ipairs({ 'damage', 'destroyed' }) do
+			for _, v in pairs(f.totals[metric] or {}) do
+				most = max(most, v)
+			end
+		end
+		for _, metric in ipairs({ 'damage', 'destroyed' }) do
+			for side, v in pairs(f.totals[metric] or {}) do
+				if v >= overlay.fightShare * most then
+					sides[side] = true
+				end
+			end
+		end
+		for side in pairs(lost) do
+			sides[side] = true
+		end
+		-- Neither side's colour: it is both of theirs
+		local headline, colors = overlay.fightHeadline(sides, f)
+		local color = colors[2] and overlay.neutral or colors[1] or overlay.neutral
+		return headline, stake(100), color, subjects, true
+	elseif kind == 'attack' then
+		local victim = next(lost) or overlay.mostOf(f, 'damage')
+		if not victim then
+			return
+		end
+		-- Who is doing it: the other side that has dealt most here
+		local by, byValue = nil, 0
+		for side, v in pairs(f.totals.dealt or {}) do
+			if side ~= victim and v > byValue then
+				by, byValue = side, v
+			end
+		end
+		local victimName, victimColor = overlay.side(victim, f)
+		local byName, byColor = overlay.side(by, f)
+		-- In the colour of whoever the headline is about
+		return victimName .. " under fire" .. (by and " from " .. byName or ""), stake(100), victimColor, subjects, true
+	elseif kind == 'stake' then
+		local side = overlay.mostOf(f, 'stake')
+		if not side then
+			return
+		end
+		local name, color = overlay.side(side, f)
+		return name .. " has trouble incoming", stake(0), color, subjects, true
+	elseif kind == 'building' then
+		-- The costliest thing being built
+		local unitID, metal = nil, 0
+		for id in pairs(f.units) do
+			local info = unitInfo.cache[id]
+			if info and info.unfinished and not info.removeAfterFrame and info.metal > metal then
+				unitID, metal = id, info.metal
+			end
+		end
+		local team = unitID and spGetUnitTeam(unitID)
+		if not team or not teamInfo[team] then
+			return
+		end
+		local info = unitInfo.cache[unitID]
+		local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
+		subjects[unitID] = { unpack(info.location) }
+		return overlay.player(team) .. " making " .. info.name,
+			string.format("%d%% of %s metal", floor((buildProgress or 0) * 100), overlay.metal(info.metal)),
+			teamInfo[team].color, subjects, false
+	elseif kind == 'built' then
+		local b = f.lastBuilt
+		if not b or not teamInfo[b.team] then
+			return
+		end
+		subjects[b.unitID] = at(b.x, b.z)
+		-- With others lately, what it all came to
+		local n, metal = foci.recent(f, 'units', foci.bins), foci.recent(f, 'built', foci.bins)
+		local detail = n > 1 and string.format("%d built here lately, %s metal", n, overlay.metal(metal)) or nil
+		return b.name .. " built by " .. overlay.player(b.team), detail, teamInfo[b.team].color, subjects, false
+	elseif kind == 'orders' then
+		local o = f.order
+		if not o or not teamInfo[o.team] then
+			return
+		end
+		local name, n = next(o.names)
+		local label = next(o.names, name) and overlay.player(o.team) .. " squad" or n > 1 and n .. " " .. name .. "s" or name
+		for unitID in pairs(o.units) do
+			local info = unitInfo.cache[unitID]
+			subjects[unitID] = info and { unpack(info.location) } or nil
+		end
+		if fresh then
+			overlay.arrowFrom, overlay.arrowTo = o.from, o.to
+			overlay.left, overlay.closing = nil, nil
+		end
+		return label .. " moving", nil, teamInfo[o.team].color, subjects, false
 	end
 end
 
--- Once a second: word the detail line
+-- Once a second: what the callout says, and on a wide shot, what each side's units are worth
 function overlay.update()
-
-	local event, detail = overlay.event, nil
-	if overlay.fight then
-		local x, _, z = unpack(display.location)
-		local stake = scenes.metalStake and scenes.around(scenes.metalStake, x, z)
-		-- Next to nothing at stake reads oddly for a fight
-		detail = stake and stake >= 100 and overlay.metal(stake) .. " metal at stake"
-	elseif event and event.type == sceneEventType then
-		detail = event.shownStake and overlay.metal(event.shownStake) .. " metal at stake"
-	elseif event and event.type == buildingEventType then
-		local unitID = next(event._sbjUnits)
-		local unitDefID = unitID and spGetUnitDefID(unitID)
-		if unitDefID then
-			local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
-			detail = string.format("%d%% of %s metal", floor((buildProgress or 0) * 100), overlay.metal(UnitDefs[unitDefID].metalCost))
-		end
-	end
-	overlay.detail = detail
-
 	-- What each side's units are worth, part-built ones as far as they have got, for the wide shot.
 	-- Zero-K's end game graphs keep these per team.
 	local worth = {}
@@ -1369,13 +1318,56 @@ function overlay.update()
 	end
 	overlay.worth = worth
 
+	local f = overlay.focus
+	if not f or f.wide then
+		return
+	end
+	overlay.ringTarget = overlay.ringRadius(f)
+
+	-- Something new to say has to hold a while first, unless it is a highlight, or one ends
+	local kind, lost = overlay.about(f)
+	local fresh = false
+	if kind and kind ~= overlay.kind then
+		if not overlay.kind or kind == 'highlight' or overlay.kind == 'highlight'
+		    or kind == overlay.pending and gameFrame - overlay.pendingFrame >= overlay.holdSeconds * framesPerSecond then
+			overlay.kind, overlay.pending, fresh = kind, nil, true
+		elseif kind ~= overlay.pending then
+			overlay.pending, overlay.pendingFrame = kind, gameFrame
+		end
+	elseif kind then
+		overlay.pending = nil
+	end
+	local headline, detail, color, subjects, ringed = overlay.word(f, overlay.kind, lost, fresh)
+	if headline then
+		if DEBUG and headline ~= overlay.headline then
+			spEcho(string.format('rc-callout,%s,%d,%s', overlay.kind, f.id, headline))
+		end
+		overlay.headline, overlay.detail, overlay.color, overlay.subjects, overlay.ringed = headline, detail, color, subjects, ringed
+		if overlay.kind ~= 'orders' then
+			overlay.arrowFrom, overlay.arrowTo = nil, nil
+		end
+	end
+	local fighting = overlay.kind == 'fight' or overlay.kind == 'attack' or overlay.kind == 'highlight'
+	overlay.tally = fighting and f.totals.kills or {}
+
 	-- How fast a move is closing on its target, for the time to arrive
 	local x, _, z = overlay.centre()
-	local left = overlay.arrowTo and x and event.type == moveEventType and length(overlay.arrowTo[1] - x, overlay.arrowTo[2] - z)
+	local left = overlay.arrowTo and x and overlay.kind == 'orders' and length(overlay.arrowTo[1] - x, overlay.arrowTo[2] - z)
 	if left and overlay.left then
 		overlay.closing = ((overlay.closing or overlay.left - left) + overlay.left - left) / 2
 	end
 	overlay.left = left
+end
+
+-- Each frame: the ring follows its focus
+function overlay.follow(dt)
+	local f = overlay.focus
+	if not f or f.wide or not overlay.ringX then
+		return
+	end
+	local k = min(1, dt / overlay.ringSeconds)
+	overlay.ringX, overlay.ringZ = overlay.ringX + (f.x - overlay.ringX) * k, overlay.ringZ + (f.z - overlay.ringZ) * k
+	overlay.radius = overlay.radius + ((overlay.ringTarget or overlay.radius) - overlay.radius) * k
 end
 
 -- The middle of the units the headline names, and the top speed (elmos/s) of the slowest. A dead
@@ -1393,6 +1385,44 @@ function overlay.centre()
 	if n > 0 then
 		return xSum / n, ySum / n, zSum / n, speed
 	end
+end
+
+-- The selection shape Zero-K draws round a unit (see its unit_shapes.lua) on screen: a square for
+-- a building, turned with it, otherwise a circle
+function overlay.outline(unitID, x, z)
+	local ud = UnitDefs[spGetUnitDefID(unitID)]
+	local xs, zs = ud.xsize or 2, ud.zsize or 2
+	local scale = tonumber(ud.customParams and ud.customParams.selection_scale) or 1
+	local y, points = spGetGroundHeight(x, z), {}
+	if ud.isImmobile then
+		local a = (spGetUnitHeading(unitID) or 0) * 2 * pi / 65536
+		local c, s = cos(a), sin(a)
+		local hx, hz = 2.7 * xs * scale, 2.7 * zs * scale
+		for _, k in ipairs({ { -1, 1 }, { 1, 1 }, { 1, -1 }, { -1, -1 } }) do
+			local px, pz = k[1] * hx, k[2] * hz
+			points[#points + 1] = { spWorldToScreenCoords(x + px * c + pz * s, y, z - px * s + pz * c) }
+		end
+		return points
+	end
+	return overlay.ring(x, z, 2.8 * sqrt(xs * xs + zs * zs) * scale, 16)
+end
+
+-- How far along from (x1, y1) to (x2, y2) it first crosses the outline through points, or 0
+function overlay.crossing(points, x1, y1, x2, y2)
+	local dx, dy, first = x2 - x1, y2 - y1, 0
+	for i, p in ipairs(points) do
+		local q = points[i % #points + 1]
+		local qx, qy = q[1] - p[1], q[2] - p[2]
+		local denom = dx * qy - dy * qx
+		if denom ~= 0 then
+			local along = ((p[1] - x1) * qy - (p[2] - y1) * qx) / denom
+			local on = ((p[1] - x1) * dy - (p[2] - y1) * dx) / denom
+			if along >= 0 and along <= 1 and on >= 0 and on <= 1 and (first == 0 or along < first) then
+				first = along
+			end
+		end
+	end
+	return first
 end
 
 -- Where n points round a ring on the ground are on screen, or as project (see overlay.projector)
@@ -1475,21 +1505,9 @@ function overlay.blame(destroyed, burning, unitName, player)
 	return burning and (destroyed and " destroyed by fire" or " burning") or (destroyed and " destroyed" or " under attack")
 end
 
--- A unit the headline says is under attack has died: say so
-function overlay.kill(unitID, name, destroyerName, attackerTeam, burning)
-	local event = overlay.event
-	if overlay.fight or not event or event.type ~= unitDamagedEventType or not overlay.subjects[unitID] then
-		return
-	end
-	overlay.killed = overlay.killed + 1
-	local killed, total = overlay.killed, overlay.total
-	local subject = killed < total and killed .. " of " .. total .. " " .. name .. "s" or total > 1 and total .. " " .. name .. "s" or name
-	overlay.headline = subject .. overlay.blame(true, burning, destroyerName, attackerTeam and overlay.player(attackerTeam))
-end
-
 function overlay.drawWorld()
-	local event = overlay.event
-	if not event or not options.show_commentary.value then
+	local f = overlay.focus
+	if not f or f.wide or not overlay.headline or not options.show_commentary.value then
 		return
 	end
 	local color = overlay.color
@@ -1498,10 +1516,10 @@ function overlay.drawWorld()
 	local from, to = overlay.arrowFrom, overlay.arrowTo
 	if from then
 		overlay.arrow(from[1], from[2], to[1], to[2], color)
-	elseif event.type == sceneEventType and not overlay.fight then
-		local x, y, z = unpack(event.location)
+	elseif overlay.ringed then
+		local x, z = overlay.ringX, overlay.ringZ
 		gl.Color(color[1], color[2], color[3], overlay.lineAlpha)
-		gl.DrawGroundCircle(x, y, z, scenes.radius, 48)
+		gl.DrawGroundCircle(x, spGetGroundHeight(x, z), z, overlay.radius, 48)
 	end
 	gl.DepthTest(false)
 	gl.LineWidth(1)
@@ -1539,7 +1557,7 @@ end
 function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 	local reach, margin = vsy * 0.06, vsy * 0.02
 	local xMax, yMax = max(10, vsx - w - 10), max(10, vsy - h - 10)
-	local fresh = overlay.placedFor ~= overlay.event
+	local fresh = overlay.placedFor ~= overlay.focus
 	local box, offset = overlay.box, overlay.offset
 	fresh = fresh or not box
 	-- A place off units is kept as which side of them the callout's nearest corner is on, each way,
@@ -1591,11 +1609,11 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		overlay.arrivedFor = nil
 	end
 	local arriving = false
-	if overlay.arrivedFor ~= overlay.event and length(sax - ax, say - ay) < vsy * 0.03 then
-		overlay.arrivedFor, arriving = overlay.event, not fresh
+	if overlay.arrivedFor ~= overlay.focus and length(sax - ax, say - ay) < vsy * 0.03 then
+		overlay.arrivedFor, arriving = overlay.focus, not fresh
 	end
 	if fresh or arriving or gameFrame - overlay.placedFrame >= framesPerSecond then
-		overlay.placedFor, overlay.placedFrame = overlay.event, gameFrame
+		overlay.placedFor, overlay.placedFrame = overlay.focus, gameFrame
 		if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
 			overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
 		end
@@ -1606,7 +1624,7 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		-- Things worth not covering: the units in shot, the move arrow and a scene's ring
 		local points, across, up = {}, 0, 0
 		if ringed then
-			points = overlay.ring(world[1], world[3], scenes.radius, 8, project)
+			points = overlay.ring(world[1], world[3], overlay.radius, 16, project)
 			across, up = extent(points, ax, ay)
 		end
 		local function avoid(x, z)
@@ -1668,8 +1686,8 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 					return (nx / (across + room)) ^ 2 + (ny / (up + room)) ^ 2 < 1
 				end
 				-- A ring grows, shrinks and moves as the camera follows its scene, so the room grows with
-				-- it. A ring is only a line, so a callout is only in the way well inside it.
-				onSubject, near = inRing(-reach), inRing(reach + 0.15 * max(across, up))
+				-- it. A callout just inside the line is in the way: it reads as part of the scene.
+				onSubject, near = inRing(-0.25 * reach), inRing(reach + 0.15 * max(across, up))
 			end
 			-- The pointer leaves the corner nearest the subject (see overlay.draw). It reads best going
 			-- out from there on a diagonal; along an edge, or back across the callout, it looks wrong.
@@ -1784,10 +1802,15 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 
 	-- The callout floats: it stays where it is on screen while within some slack of its place off
 	-- the subject, so the pointer swings and stretches as units and the camera move, and is drawn
-	-- back in beyond that. After a move it settles all the way, and it is never left on the subject
-	-- or with its pointer going back across it.
-	local ox, oy = toOffset(overlay.offset, nowAcross, nowUp)
-	local tx, ty = bound(ax + ox, 10, xMax), bound(ay + oy, 10, yMax)
+	-- back in beyond that. After a move it settles all the way, and it is never left on the subject,
+	-- on its ring or with its pointer going back across it. Its place is off where the subject will
+	-- be once the camera gets there, so that a pan doesn't drag it along behind and past.
+	local settledAcross, settledUp = nowAcross, nowUp
+	if ringed then
+		settledAcross, settledUp = extent(overlay.ring(world[1], world[3], overlay.radius, 16, project), sax, say)
+	end
+	local ox, oy = toOffset(overlay.offset, settledAcross, settledUp)
+	local tx, ty = bound(sax + ox, 10, xMax), bound(say + oy, 10, yMax)
 	if not box then
 		box = { tx, ty, 0, w = w, h = h, v = { 0, 0, 0 } }
 		overlay.settling = false
@@ -1796,6 +1819,12 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		local ux, uy = overlay.pointerOut(box[1], box[2], w, h, ax, ay)
 		if ux < margin or uy < margin then
 			slack = 0
+		end
+		if ringed then
+			local nx, ny = bound(ax, box[1], box[1] + w) - ax, bound(ay, box[2], box[2] + h) - ay
+			if (nx / nowAcross) ^ 2 + (ny / nowUp) ^ 2 < 1 then
+				slack = 0
+			end
 		end
 		local dx, dy = tx - box[1], ty - box[2]
 		local d = length(dx, dy)
@@ -1882,10 +1911,10 @@ end
 function overlay.draw()
 	-- With no callout, the next one starts where it best fits
 	local headline = overlay.headline
-	if not overlay.event or not options.show_commentary.value or display.isWide or not headline then
+	if not overlay.focus or not options.show_commentary.value or display.isWide or not headline then
 		overlay.box = nil
 	end
-	if not overlay.event or not options.show_commentary.value then
+	if not overlay.focus or not options.show_commentary.value then
 		return
 	end
 	local vsx, vsy = spGetViewGeometry()
@@ -1899,16 +1928,24 @@ function overlay.draw()
 	end
 	local pad, row, color = size * 0.6, size * 1.5, overlay.color
 	local detail, small = overlay.detail, size * 0.85
-	-- The subject on screen: the units the headline names, or a scene and its ring
-	-- or a fight, which is what the camera is framing
-	local event, ring = overlay.event, nil
-	local scene = event.type == sceneEventType and not overlay.fight
+	-- The subject on screen: the units or spot the headline names, or the focus and its ring
+	local ring
 	local sx, sy, sz, speed = overlay.centre()
-	if scene or overlay.fight or not sx then
-		sx, sy, sz = unpack(scene and event.location or display.location)
-		ring = scene and overlay.ring(sx, sz, scenes.radius, 24)
+	if overlay.ringed or not sx then
+		sx, sz = overlay.ringX or display.location[1], overlay.ringZ or display.location[3]
+		sy = spGetGroundHeight(sx, sz)
+		ring = overlay.ringed and overlay.ring(sx, sz, overlay.radius, 24)
 	end
 	local ax, ay = spWorldToScreenCoords(sx, sy, sz)
+	-- Not while the camera is still bringing the subject on screen: a pointer off the edge says
+	-- nothing yet
+	if (ax < 0 or ax > vsx or ay < 0 or ay > vsy) and camera.settled then
+		local sax, say = overlay.projector(camera.settled, vsx, vsy)(sx, sy, sz)
+		if length(sax - ax, say - ay) > vsy * 0.1 then
+			overlay.box = nil
+			return
+		end
+	end
 	local across, up = 0, 0
 	for _, point in ipairs(ring or {}) do
 		across, up = max(across, math.abs(point[1] - ax)), max(up, math.abs(point[2] - ay))
@@ -1934,13 +1971,19 @@ function overlay.draw()
 			-- More than two sides: list them
 			local parts = {}
 			for allyTeam, destroyed in pairs(tally) do
-				parts[#parts + 1] = overlay.coloured(scenes.names[allyTeam] .. " " .. overlay.metal(destroyed), overlay.allyColor[allyTeam])
+				parts[#parts + 1] = overlay.side(allyTeam, overlay.focus) .. " " .. overlay.metal(destroyed)
 			end
 			detail = (detail and detail .. "  |  " or "") .. "killed: " .. table.concat(parts, "  ")
 		end
 	end
-	local left = tallyRows == 1 and overlay.coloured(scenes.names[a] .. " " .. overlay.metal(tally[a] or 0), overlay.allyColor[a])
-	local right = tallyRows == 1 and overlay.coloured(overlay.metal(tally[b] or 0) .. " " .. scenes.names[b], overlay.allyColor[b])
+	local left, right, ca, cb
+	if tallyRows == 1 then
+		local an, bn
+		an, ca = overlay.side(a, overlay.focus)
+		bn, cb = overlay.side(b, overlay.focus)
+		left = an .. " " .. overlay.coloured(overlay.metal(tally[a] or 0), ca)
+		right = overlay.coloured(overlay.metal(tally[b] or 0), cb) .. " " .. bn
+	end
 
 	local w = gl.GetTextWidth(headline) * size
 	if detail then
@@ -1964,22 +2007,17 @@ function overlay.draw()
 	local ex, cy = onLeft and bx + w - t or bx, below and by + h or by
 	local cx, my = ex + t / 2, below and cy - t / 2 or cy + t / 2
 	local px, py, gap = ax, ay, size * 1.8
-	if ring then
-		-- Towards the middle of the ring, stopping where it first crosses it
-		local dx, dy, first = ax - cx, ay - my, 1
-		for i, p in ipairs(ring) do
-			local q = ring[i % #ring + 1]
-			local qx, qy = q[1] - p[1], q[2] - p[2]
-			local denom = dx * qy - dy * qx
-			if denom ~= 0 then
-				local along = ((p[1] - cx) * qy - (p[2] - my) * qx) / denom
-				local on = ((p[1] - cx) * dy - (p[2] - my) * dx) / denom
-				if along >= 0 and on >= 0 and on <= 1 then
-					first = min(first, along)
-				end
-			end
-		end
-		px, py, gap = cx + dx * first, my + dy * first, 0
+	-- Towards the middle of the ring, or of the one unit named, stopping where it first crosses the
+	-- ring or the unit's selection shape (just outside that). If it doesn't cross, the callout is on
+	-- it already: no pointer, rather than one into the middle.
+	local only = next(overlay.subjects)
+	local outline = ring
+	if not ring and only and not next(overlay.subjects, only) and spGetUnitDefID(only) then
+		outline = overlay.outline(only, sx, sz)
+	end
+	if outline then
+		local first = overlay.crossing(outline, cx, my, ax, ay)
+		px, py, gap = cx + (ax - cx) * first, my + (ay - my) * first, ring and 0 or size * 0.3
 	end
 	local reach = length(px - cx, py - my)
 	-- A little see-through, like the ring
@@ -2012,7 +2050,6 @@ function overlay.draw()
 		gl.Text("killed", bx + w / 2, ty, small, "oc")
 		-- Each side's share of the bar is what it has killed
 		local split = bx + pad + (w - pad * 2) * (tally[a] or 0) / ((tally[a] or 0) + (tally[b] or 0))
-		local ca, cb = overlay.allyColor[a], overlay.allyColor[b]
 		gl.Color(ca[1], ca[2], ca[3], 0.9)
 		gl.Rect(bx + pad, ty - pad, split, ty - pad * 0.4)
 		gl.Color(cb[1], cb[2], cb[3], 0.9)
@@ -2111,7 +2148,7 @@ local function statsFlush(userOverride)
 	end
 	spEcho(string.format('rc-cam,%.0f,%.0f,%.0f,%s,%d,%s,%d,%s,%.3f,%.1f',
 		cx, cy, cz, display.camType or 'nil',
-		shownEvent and shownEvent.id or -1, shownEvent and shownEvent.type or 'nil',
+		shown and shown.id or -1, shown and shown.shownType or 'nil',
 		userOverride and 1 or 0, table.concat(corners, ','),
 		camera and camera.ry or 0, deg(statsMaxYawRate)))
 	statsMaxYawRate = 0
@@ -2132,7 +2169,7 @@ end
 
 -- Marks the shot framed once its tracking box first sits in frame (and logs rc-framed).
 local function checkFramed(xMin, zMin, xMax, zMax)
-	if not shownEvent or display.framedId == shownEvent.id then
+	if not shown or display.framedId == shown.id then
 		return
 	end
 	local vsx, vsy = spGetViewGeometry()
@@ -2149,13 +2186,13 @@ local function checkFramed(xMin, zMin, xMax, zMax)
 			return
 		end
 	end
-	display.framedId, display.framedFrame = shownEvent.id, gameFrame
-	if shownEvent == mie then
-		-- Restart the pick's decay, so that travel doesn't eat into its screen time
-		mie.started = gameFrame
+	display.framedId, display.framedFrame = shown.id, gameFrame
+	if shown.wide then
+		-- Restart a wide shot's fade, so that travel doesn't eat into its screen time
+		shown.frame = gameFrame
 	end
 	if STATS then
-		spEcho(string.format('rc-framed,%d,%s', shownEvent.id, shownEvent.type))
+		spEcho(string.format('rc-framed,%d,%s', shown.id, shown.shownType))
 	end
 end
 local userInactiveSeconds, lastMouseLocation = 0, { -1, 0, -1 }
@@ -2273,7 +2310,7 @@ local function scoreHeading(c, yaw)
 				if x < 0 or x > mapSizeX or z < 0 or z > mapSizeZ then
 					offMap = offMap + 1
 				else
-					activity = activity + log10(max(1, interestGrid:getActivity(x, z)))
+					activity = activity + log10(scenes.activityAt(x, z))
 				end
 			end
 		end
@@ -2295,7 +2332,7 @@ end
 
 -- Once the shot is framed, maybe orbit to a better heading, or drift once on a long hold
 local function planHeading(c)
-	if not shownEvent or display.framedId ~= shownEvent.id
+	if not shown or display.framedId ~= shown.id
 	    or gameFrame < display.framedFrame + orbitConfig.startFrames
 	    or gameFrame < (c.planFrame or 0) + orbitConfig.planFrames
 	    -- Let an orbit finish before replanning
@@ -2329,7 +2366,7 @@ local function planHeading(c)
 		c.yawSmooth, c.orbited = orbitConfig.smoothTime, true
 		if STATS then
 			-- Gain is the view score improvement (see orbitConfig.headingWeights), before heading preferences
-			spEcho(string.format('rc-orbit,%d,%.0f,%.0f,%s,%.2f', shownEvent.id, deg(c.yaw), deg(target), reason, view - currentView))
+			spEcho(string.format('rc-orbit,%d,%.0f,%.0f,%s,%.2f', shown.id, deg(c.yaw), deg(target), reason, view - currentView))
 		end
 	end
 end
@@ -2348,122 +2385,80 @@ local function initCamera(cx, cy, cz)
 	}
 end
 
-local function __pluralize(noun, count)
-	-- FIXME: Better logic!
-	return (count > 1 and count .. ' ' .. noun .. "s") or noun
-end
-
-local function __getUnitsNameString(units)
-	local unitNames = {}
-	for unitID, _ in pairs(units) do
-		if unitID >= 0 then
-			local _, _, _, name = unitInfo:get(unitID)
-			-- Sometimes it's too late to get a (dead) unit in the cache
-			name = name or "unknown"
-			unitNames[name] = (unitNames[name] and unitNames[name] + 1) or 1
+-- Track the focus's units, or a wide shot's corners. The camera drops units in order once they
+-- spread too far (see updateCamera), so they go nearest the centre first, and a fresh highlight's
+-- spot before them all.
+local function trackFocus(f)
+	display.tracking:clear()
+	if f.wide then
+		for i, corner in ipairs(f.corners) do
+			display.tracking:add({ unitID = -i, location = corner, keepPrevious = true })
+		end
+		return
+	end
+	local items = {}
+	for unitID in pairs(f.units) do
+		local info = unitInfo.cache[unitID]
+		local location = getUnitLocation(unitID) or info and info.location
+		if location then
+			items[#items + 1] = { unitID, location, length(location[1] - f.x, location[3] - f.z) }
 		end
 	end
-	local result
-	for unitName, count in pairs(unitNames) do
-		result = (result and "squad") or __pluralize(unitName, count)
+	table.sort(items, function(a, b) return a[3] > b[3] end)
+	for i = max(1, #items - foci.trackUnits + 1), #items do
+		display.tracking:add({ unitID = items[i][1], location = items[i][2] })
 	end
-	return result or "unknown"
-end
-
--- Track the event's units, ahead of those already tracked or (fresh) in their place
-local function trackEvent(event, fresh)
-	if fresh then
-		display.tracking:clear()
-	end
-	-- We use keepPrevious to keep runs of track infos from the same event
-	local keepPrevious = false
-	for k, v in pairs(event._sbjUnits) do
-		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
-		keepPrevious = true
-	end
-	for k, v in pairs(event._objUnits) do
-		display.tracking:add({ unitID = k, location = v, keepPrevious = keepPrevious })
-		keepPrevious = true
-	end
-
-	-- Remove duplicates from tracking
-	local tracked, trackInfo = {}, display.tracking.head
-	while trackInfo do
-		if tracked[trackInfo.unitID] then
-			trackInfo, _ = display.tracking:remove(trackInfo)
-		else
-			tracked[trackInfo.unitID] = true
-			trackInfo = trackInfo.prev
-		end
+	local h = f.highlight
+	if h and gameFrame - h.frame < overlay.highlightSeconds * framesPerSecond or not display.tracking.head then
+		local x, z = h and h.x or f.x, h and h.z or f.z
+		display.tracking:add({ unitID = -1, location = { x, spGetGroundHeight(x, z), z } })
 	end
 end
 
-local function updateDisplay(event)
-	local camAngle, commentary, isWide, fill = defaultRx, nil, false, frameFill
-
-	local actorName
-	for actorID, _ in pairs(event.actors) do
-		actorName = (actorName and "multiple") or overlay.player(actorID)
+local function showFocus(f)
+	local wide = f.wide or false
+	display.camAngle, display.isWide, display.fill = wide and lullConfig.pitch or defaultRx, wide, wide and lullConfig.fill or frameFill
+	if wide then
+		-- Once on show, a wide shot fades sooner
+		f.frame, f.decay = gameFrame, lullConfig.shownDecaySeconds
 	end
-	actorName = actorName or "unknown"
-
-	local sbjUnitCount = event:subjectCount()
-	local sbjString = __pluralize(event.sbjName, sbjUnitCount)
-
-	if event.type == attackEventType then
-		commentary = sbjString .. " attacking"
-	elseif event.type == buildingEventType then
-		commentary = actorName .. " making " .. sbjString
-	elseif event.type == sceneEventType then
-		commentary = event.meta.commentary
-	elseif event.type == lullEventType then
-		camAngle = lullConfig.pitch
-		isWide, fill = true, lullConfig.fill
-	elseif event.type == unitBuiltEventType then
-		commentary = sbjString .. " built by " .. actorName
-	elseif event.type == unitDamagedEventType then
-		local attacker = next(event._objUnits) and __getUnitsNameString(event._objUnits)
-		commentary = sbjString .. overlay.blame(false, not attacker and event.burning, attacker, next(event.actors) and actorName)
-	elseif event.type == unitDestroyedEventType then
-		local destroyer = __getUnitsNameString(event._objUnits)
-		commentary = sbjString .. " destroyed by " .. destroyer .. " of " .. actorName
-	elseif event.type == unitDestroyerEventType then
-		commentary = sbjString .. " on a rampage"
-	elseif event.type == moveEventType then
-		commentary = sbjString .. " moving"
-	elseif event.type == unitTakenEventType then
-		commentary = sbjString .. " captured by " .. actorName
-	end
-
-	-- A wide shot's framing (placeholders at its corners) is no place to start from, or keep
-	trackEvent(event, isWide or display.isWide)
-	if isWide then
-		overlay.tally = {}
-	end
-	-- Wide shots read like a map, so they keep north up and don't count as watching their centre
-	display.camAngle, display.isWide, display.fill = camAngle, isWide, fill
-
-	shownEvent = event
-	event.commentary = commentary
-	overlay.show(event)
+	shown = f
+	trackFocus(f)
+	overlay.show(f)
+	f.shownType = wide and 'lull' or overlay.kind or 'focus'
 	display.shotFrame = gameFrame
 	if STATS then
-		local x, _, z = unpack(event.location)
-		spEcho(string.format('rc-shown,%d,%s,%.0f,%.0f,%s', event.id, event.type, x, z, display.camType))
+		spEcho(string.format('rc-shown,%d,%s,%.0f,%.0f,%s', f.id, f.shownType, f.x, f.z, display.camType))
 	end
-
-	return true
 end
 
--- Whether the shown pick is still settling in or within its minimum hold (see minShotFrames)
+-- Whether the shot is still settling in or within its minimum hold (see minShotFrames)
 local function shotLocked()
-	if not shownEvent or shownEvent ~= mie then
+	if not shown then
 		return false
 	end
-	if display.framedId == shownEvent.id then
+	if display.framedId == shown.id then
 		return gameFrame < display.framedFrame + minShotFrames
 	end
 	return gameFrame < display.shotFrame + maxShotLockFrames
+end
+
+-- Whether f should replace the shot on show. Going to or from a wide shot shows the other anyway,
+-- so costs little.
+local function beats(f)
+	if not shown then
+		return true
+	end
+	local boost = switchBoostNear
+	if not shown.wide and not f.wide then
+		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * transitionCost({ f.x, spGetGroundHeight(f.x, f.z), f.z })
+	end
+	local score = shown.score
+	if shotLocked() then
+		-- A locked shot holds like a fair one, however weak it was
+		score, boost = max(score, lockedShare * foci.typical), boost * shotLockBoost
+	end
+	return f.score > score * boost
 end
 
 function lull.addDamage(unitID, unitDefID, damage)
@@ -2473,17 +2468,19 @@ function lull.addDamage(unitID, unitDefID, damage)
 	end
 end
 
--- Add a lull event framing grid cells with notable activity, or the whole map if there are none
--- (e.g. at the start of the game)
-function lull.addEvent(importance)
+-- A wide shot framing the foci with most going on, or the whole map if nothing is (e.g. at the
+-- start of the game). It scores score, fading over decaySeconds.
+function lull.wide(score)
 	local cfg = lullConfig
+	local hottest, pad = 0, foci.joinRange / 2
+	for _, f in ipairs(foci.list) do
+		hottest = max(hottest, f.heat)
+	end
 	local xMin, zMin, xMax, zMax = huge, huge, -huge, -huge
-	for gx = 1, mapGridX do
-		for gz = 1, mapGridZ do
-			if interestGrid:getActivity((gx - 0.5) * worldGridSize, (gz - 0.5) * worldGridSize) >= cfg.cellMin then
-				xMin, zMin = min(xMin, (gx - 1) * worldGridSize), min(zMin, (gz - 1) * worldGridSize)
-				xMax, zMax = max(xMax, gx * worldGridSize), max(zMax, gz * worldGridSize)
-			end
+	for _, f in ipairs(foci.list) do
+		if hottest > 0 and f.heat >= cfg.focusShare * hottest then
+			xMin, zMin = min(xMin, f.x - pad), min(zMin, f.z - pad)
+			xMax, zMax = max(xMax, f.x + pad), max(zMax, f.z + pad)
 		end
 	end
 	if xMin == huge then
@@ -2496,14 +2493,12 @@ function lull.addEvent(importance)
 	x, z = (xMin + xMax) / 2, (zMin + zMax) / 2
 
 	local y = spGetGroundHeight(x, z)
-	local event = addEvent(nil, importance, { x, y, z }, nil, lullEventType, lullEventType, nil, nil, ADD_EVENT_OPTS_NO_GRID_NO_MERGE)
-	-- Placeholder units at opposite corners give the framing
-	event:addSubject(-1000 - 2 * event.id, { xMin, y, zMin })
-	event:addSubject(-1001 - 2 * event.id, { xMax, y, zMax })
-	return event
+	foci.lastId = foci.lastId + 1
+	return { id = foci.lastId, wide = true, x = x, z = z, peak = score, score = score, frame = gameFrame,
+		decay = cfg.decaySeconds, corners = { { xMin, y, zMin }, { xMax, y, zMax } } }
 end
 
--- Once a second: track damage, and add a lull event when a fight dies down
+-- Once a second: track damage, and offer a wide shot when a fight dies down
 function lull.update()
 	local d, cfg = lull.damage, lullConfig
 	d.short = d.short + (d.now - d.short) / cfg.damageShortSeconds
@@ -2517,9 +2512,24 @@ function lull.update()
 	elseif d.short <= cfg.dropRatio * d.peak then
 		lull.armed = false
 		if isFight then
-			lull.addEvent(d.peak)
+			lull.candidate = lull.wide(d.peak * cfg.scoreScale)
 			fired = true
 		end
+	end
+
+	-- Wide shots fade: by half after decay seconds, to nothing at twice that
+	local function fade(w)
+		if w and w.wide then
+			local t = (gameFrame - w.frame) / framesPerSecond
+			w.score = w.peak * (1 - logistic(4 / w.decay * (t - w.decay)))
+		end
+	end
+	fade(lull.candidate)
+	if shown ~= lull.candidate then
+		fade(shown)
+	end
+	if lull.candidate and lull.candidate ~= shown and lull.candidate.score < 1 then
+		lull.candidate = nil
 	end
 
 	if STATS then
@@ -2545,14 +2555,23 @@ function scenes.spread(cells, x, z, amount, best)
 	end
 end
 
+-- How much is going on at (x, z), for choosing headings (see scoreHeading): 1, plus units there
+-- (see scenes.observe) and the heat of foci there
+function scenes.activityAt(x, z)
+	local cell = 1 + bound(floor(x / worldGridSize), 0, mapGridX - 1) + bound(floor(z / worldGridSize), 0, mapGridZ - 1) * mapGridX
+	return 1 + (scenes.activity[cell] or 0) + (foci.cells[cell] or 0) / foci.cellHeatScale
+end
+
 -- Add a unit to this second's value and strength grids. Called as each unit's position is
 -- refreshed, which spreads the work over the second.
 function scenes.observe(info)
 	local cfg, allyTeam = scenes, info.allyTeam
 	if not cfg.value[allyTeam] then
-		cfg.value[allyTeam], cfg.metal[allyTeam], cfg.power[allyTeam], cfg.powerNow[allyTeam] = {}, {}, {}, {}
+		cfg.value[allyTeam], cfg.metal[allyTeam], cfg.power[allyTeam], cfg.powerNow[allyTeam], cfg.count[allyTeam] = {}, {}, {}, {}, {}
 	end
 	local x, _, z = unpack(info.location)
+	-- Something moving counts for more than a building
+	scenes.spread(cfg.count[allyTeam], x, z, distance(info.velocity) > 0.1 and 1 or 0.16)
 	scenes.spread(cfg.value[allyTeam], x, z, info.importance)
 	scenes.spread(cfg.metal[allyTeam], x, z, info.metal)
 	local _, _, weaponImportance = unitInfo:_unitStats(info.unitDefID)
@@ -2581,6 +2600,20 @@ end
 function scenes.survey()
 	local cfg, value, metal, power, powerNow = scenes, scenes.value, scenes.metal, scenes.power, scenes.powerNow
 	cfg.value, cfg.metal, cfg.power, cfg.powerNow = {}, {}, {}, {}
+
+	-- Units by cell, counting for more where sides meet
+	local count, sides, activity = cfg.count, {}, {}
+	cfg.count = {}
+	for _, cells in pairs(count) do
+		for cell, n in pairs(cells) do
+			activity[cell] = (activity[cell] or 0) + n
+			sides[cell] = (sides[cell] or 0) + (n >= 0.25 and 1 or 0)
+		end
+	end
+	for cell, n in pairs(sides) do
+		activity[cell] = activity[cell] * max(1, n * n)
+	end
+	cfg.activity = activity
 
 	local stake, stakeNow, owner, ownerStake, metalStake = {}, {}, {}, {}, {}
 	for allyTeam, cells in pairs(value) do
@@ -2638,7 +2671,7 @@ function scenes.subjects(x, z)
 	return next(mobiles) and mobiles or next(statics) and statics or nil
 end
 
--- Once a second: add events where the stake has risen most
+-- Once a second: add to foci where the stake has risen most
 function scenes.update()
 	local cfg = scenes
 	local stake, stakeNow, owner, metalStake = scenes.survey()
@@ -2683,44 +2716,21 @@ function scenes.update()
 		end
 
 		local x, z, cell = scene.x, scene.z, scene.cell
-		local subjects = apart and scenes.subjects(x, z)
-		if subjects then
+		local subjects, side = apart and scenes.subjects(x, z), owner[cell]
+		if subjects and side then
 			added[#added + 1] = scene
-			-- Share of the stake that is still on its way
-			local soon = 1 - stakeNow[cell] / stake[cell]
-			local side = owner[cell]
-			local commentary = (side and overlay.coloured(cfg.names[side], overlay.allyColor[side]) or "Someone")
-				.. (soon > 0.5 and " has trouble incoming" or " under pressure")
-			local event = addEvent(nil, scene.rise, { x, spGetGroundHeight(x, z), z }, nil, sceneEventType, sceneEventType, nil, nil, cfg.eventOpts)
-			-- The rise wanders from cell to cell (and away from where the camera looks, as that
-			-- stops being news), so a scene under way ignores small moves
-			local last = event.meta
-			if last then
-				local follow = max(0, 1 - cfg.deadZone / max(1, length(x - last.x, z - last.z)))
-				x, z = last.x + (x - last.x) * follow, last.z + (z - last.z) * follow
-				event.location = { x, spGetGroundHeight(x, z), z }
-				subjects = scenes.subjects(x, z) or subjects
-			end
-			event.meta, event._sbjUnits = { commentary = commentary, side = side, x = x, z = z }, subjects
-			event.shownStake = event.shownStake or scenes.around(metalStake, x, z)
-			if event == shownEvent then
-				trackEvent(event, true)
-			elseif scene.rise >= cfg.asideStake and not display.isWide and length(x - wx, z - wz) <= cfg.asideRange
-			    and (not display.aside or display.aside[3] < gameFrame) then
-				-- Scenes come biggest first, so this is the best one this second
-				display.aside = { x, z, gameFrame }
+			local f = foci.add('stake', side, scene.rise, x, z)
+			if f then
+				for unitID in pairs(subjects) do
+					f.units[unitID] = gameFrame
+				end
 			end
 			if STATS then
+				-- Share of the stake that is still on its way
+				local soon = 1 - stakeNow[cell] / stake[cell]
 				spEcho(string.format('rc-scene,%.0f,%.0f,%.0f,%.2f', x, z, scene.rise, soon))
 			end
 		end
-	end
-
-	-- The scene on show keeps its number up to date, whether or not it rose this second
-	local shown = overlay.event
-	if shown and shown.type == sceneEventType and shown.shownStake then
-		local now = scenes.around(metalStake, shown.location[1], shown.location[3])
-		shown.shownStake = shown.shownStake + (now - shown.shownStake) / cfg.shownStakeSeconds
 	end
 end
 
@@ -2738,14 +2748,16 @@ function widget:Initialize()
 	-- Init teams.
     local gaiaTeamID = spGetGaiaTeamID()
 	teamInfo = {}
-	local teamCount = 0
 	local allyTeams = spGetAllyTeamList()
 	for _, allyTeam in pairs(allyTeams) do
 		local teamList = spGetTeamList(allyTeam)
 
+		-- Zero-K names a team after its start box, or else its best rated player: "Team <name>" in
+		-- full, which says it is a team, and "<name>" short, enough after a player's name
+		local shortName = spGetGameRulesParam("allyteam_short_name_" .. allyTeam)
 		local allyTeamName = spGetGameRulesParam("allyteam_long_name_" .. allyTeam)
-		if string.len(allyTeamName) > 10 then
-			allyTeamName = spGetGameRulesParam("allyteam_short_name_" .. allyTeam)
+		if string.len(allyTeamName) > 20 then
+			allyTeamName = shortName
 		end
 
 		for _, teamID in pairs(teamList) do
@@ -2770,20 +2782,24 @@ function widget:Initialize()
 			end
 			teamInfo[teamID] = {
 				allyTeam = allyTeam,
-				allyTeamName = allyTeamName,
+				allyTeamName = shortName,
 				color = { spGetTeamColor(teamID) } or { 1, 1, 1, 1 },
 				name = teamName or ("Team " .. teamID)
 			}
-			teamCount = teamCount + 1
+		end
+	end
+	-- A team named after one of its players ("Team <name>") is in that player's colour
+	for _, info in pairs(teamInfo) do
+		local named = scenes.names[info.allyTeam]
+		if named == info.name or named == "Team " .. info.name then
+			overlay.allyColor[info.allyTeam] = info.color
 		end
 	end
 
-	interestGrid = WorldGrid:new({ xSize = mapGridX, ySize = mapGridZ, gridSize = worldGridSize, teamCount = teamCount, allyTeams = allyTeams })
-	unitInfo = UnitInfoCache:new({ locationListener = function(location, allyTeam, isMoving)
-		-- Static things are less interesting, but with allyTeams multiplier can still be relevant
-		local interest = isMoving and 1 or 0.16
-		interestGrid:add(location[1], location[3], allyTeam, interest)
-	end, updateListener = scenes.observe })
+	unitInfo = UnitInfoCache:new({ updateListener = function(info)
+		scenes.observe(info)
+		foci.observe(info)
+	end })
 
 	-- Catch up on units made before the widget started, staggering their position updates
 	gameFrame = Spring.GetGameFrame()
@@ -2812,7 +2828,7 @@ function widget:Initialize()
 		statsLogGame()
 	end
 	-- Open on a wide shot of the map
-	updateDisplay(lull.addEvent(lullConfig.minPeak))
+	showFocus(lull.wide(lullConfig.minPeak * lullConfig.scoreScale))
 	camera = initCamera(cx, cy, cz)
 end
 
@@ -2828,48 +2844,24 @@ function widget:GameFrame(frame)
 		statsFlush(options.user_interrupts_tracking.value and userInactiveSeconds < userInactiveSecondsThreshold)
 	end
 
-	if not display.isWide then
-		local x, _, z = unpack(display.location)
-		interestGrid:setWatching(x, z)
-	end
-
-	if WG.alliedCursorsPos then
-		for _, acp in pairs(WG.alliedCursorsPos) do
-		    local curx, curz = unpack(acp)
-			if curx and curz then
-				interestGrid:setCursor(curx, curz)
-			end
-		end
-    end
-
 	scenes.update()
-
-	local cut = false
-	if pendingMie and pendingMie ~= mie then
-		-- While the shot is locked a cut needs a bigger margin. A cut may also have decayed while
-		-- it waited out the lock, so check it still beats the pick.
-		local locked = shotLocked()
-		cut = _beatsPick(pendingMie, _getRarity(pendingMie), locked and shotLockBoost)
-		if not cut and not locked then
-			pendingMie = mie
-		end
-	end
-	if cut then
-		if mie then
-			-- Avoid showing current event again
-			events:remove(mie)
-		end
-
-		mie = pendingMie
-		updateDisplay(mie);
-		purgeEvents(__purgeExcludes, { excluder = mie })
-		-- Picked event should stop changing itself
-		mie.updateFunc = nil
-		-- Set a standard decay so that we don't show the event for too long.
-		mie.decay, mie.started = 3 * framesPerSecond, frame
-	end
-
+	foci.update()
 	lull.update()
+
+	-- Cut to whatever beats the shot on show by enough. Otherwise the shot keeps up with the units
+	-- joining and leaving its focus.
+	local best = lull.candidate ~= shown and lull.candidate or nil
+	for _, f in ipairs(foci.list) do
+		if f ~= shown and (not best or f.score > best.score) then
+			best = f
+		end
+	end
+	if best and best.score > 0 and beats(best) then
+		showFocus(best)
+	elseif shown and not shown.wide then
+		trackFocus(shown)
+	end
+	foci.aside()
 	overlay.update()
 end
 
@@ -2891,36 +2883,6 @@ end
 
 function widget:MouseWheel(up, value)
 	userAction()
-end
-
-local function _updateCommandEvent(event)
-	local meta = event.meta
-
-	if meta.updateUntilFrame < gameFrame then
-		event.importance, event.updateFunc = 0, nil
-		return
-	end
-
-	event.started = gameFrame
-
-	-- For simplicity we'll just take the location of one subject
-	local sbjUnitID, sbjCount = nil, 0
-	for k, _ in pairs(event._sbjUnits) do
-		sbjUnitID = sbjUnitID or k
-		sbjCount = sbjCount + 1
-	end
-	local sbjLocation, sbjv = unitInfo:get(sbjUnitID)
-	if not sbjLocation or not sbjv then
-		event.importance, event.updateFunc = 0, nil
-		return
-	end
-
-	-- Predicted distance in 1s
-	local distanceFromCommand = distance(event.location, sbjLocation) - distance(sbjv) * framesPerSecond
-	local rangeFraction = meta.commandRange / max(meta.commandRange, distanceFromCommand)
-	event.importance = meta.importance * rangeFraction
-	-- A moving unit is worth 1, let's make the commands worth a little less per unit
-	event.interest = 0.5 * sbjCount * rangeFraction
 end
 
 local moveCommands = {
@@ -2949,85 +2911,41 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 	end
 
 	local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
-	if buildProgress < 1.0 then
+	if not buildProgress or buildProgress < 1.0 then
 		-- Don't watch units that aren't finished.
 		return
 	end
 
-	-- Shouldn't display a superseded command
-	purgeEvents(__purgeCommands, { unitID = unitID })
-
-	if moveCommands[cmdID] then
-		local sbjLocation, _, importance, sbjName, isStatic = unitInfo:get(unitID)
-		if isStatic then
-			-- Not interested in move commands given to static buildings e.g. factories
-			return
-		end
-
-		local trgx, trgy, trgz = unpack(cmdParams)
-		local trgLocation = { trgx, trgy, trgz }
-
-		local moveDistance = distance(trgLocation, sbjLocation)
-		if moveDistance < 256 then
-			-- Ignore smaller moves to keep event numbers down and help ignore unitAI
-			return
-		end
-
-		local meta = { commandRange = worldGridSize / 2, importance = importance, updateUntilFrame = gameFrame + framesPerSecond * 8,
-			origin = { sbjLocation[1], sbjLocation[3] } }
-		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, moveEventType, unitID, _updateCommandEvent)
-		-- HACK: Event location should be the target location, not the subject location
-		event.location = trgLocation
-		event:addObject(-unitID, trgLocation)
-	elseif cmdID == CMD_ATTACK then
-		local trgLocation, attackedUnitID
-		-- Find the location / unit being attacked.
-		if #cmdParams == 1 then
-			attackedUnitID = cmdParams[1]
-			trgLocation = unitInfo:get(attackedUnitID)
-		else
-			trgLocation = cmdParams
-		end
-		if not trgLocation then
-			return
-		end
-
-		local sbjLocation, _, _, sbjName, _, weaponImportance, weaponRange = unitInfo:get(unitID)
-		-- HACK: Silo is weird.
-		unitID = spGetUnitRulesParam(unitID, 'missile_parentSilo') or unitID
-		local meta = { commandRange = weaponRange, importance = weaponImportance, updateUntilFrame = gameFrame + framesPerSecond * 8,
-			origin = { sbjLocation[1], sbjLocation[3] } }
-		local event = addEvent(unitTeam, 0, sbjLocation, meta, sbjName, attackEventType, unitID, _updateCommandEvent)
-		-- HACK: Event location should be the target location, not the subject location
-		event.location = trgLocation
-		event:addObject(attackedUnitID or -unitID, trgLocation)
+	-- A unit sent somewhere far counts once in a while, where it is: players reissue orders all the
+	-- time. Orders to buildings, e.g. factories, don't count.
+	local location, _, _, name, isStatic = unitInfo:get(unitID)
+	local info = unitInfo.cache[unitID]
+	if not location or not info or isStatic or gameFrame - (info.orderFrame or -huge) < foci.orderSeconds * framesPerSecond then
+		return
+	end
+	local target = #cmdParams == 1 and unitInfo:get(cmdParams[1]) or #cmdParams >= 3 and cmdParams
+	-- Smaller moves are mostly unit AI
+	if not target or length(target[1] - location[1], target[3] - location[3]) < 256 then
+		return
+	end
+	info.orderFrame = gameFrame
+	local f = foci.add('orders', info.allyTeam, unitDef.metalCost, location[1], location[3], unitID)
+	if f then
+		foci.order(f, unitID, unitTeam, name, location, target)
 	end
 end
 
-local function _updateBuildingEvent(event)
-	event.started = gameFrame
-
-	local meta = event.meta
-	local _, _, _, _, buildProgress = spGetUnitHealth(meta.sbjUnitID)
-	if not buildProgress or buildProgress > 0.5 then
-		-- Either the unit is no longer being built or let's wait for it to finish
-		event.importance, event.updateFunc = 0, nil
-	end
-end
-
-function widget:UnitCreated(unitID, unitDefID, unitTeam, _)
+function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 	if not unitID or not unitDefID or not unitTeam then
 		return
 	end
-	
+
 	local allyTeam = teamInfo[unitTeam].allyTeam
-	local sbjLocation, _, importance, sbjName = unitInfo:watch(unitID, allyTeam, unitDefID)
+	unitInfo:watch(unitID, allyTeam, unitDefID)
 	if unitInfo.cache[unitID] then
-		-- Not a threat until finished (see scenes)
-		unitInfo.cache[unitID].unfinished = true
+		-- Not a threat until finished (see scenes), and what goes into it counts (see foci.observe)
+		unitInfo.cache[unitID].unfinished, unitInfo.cache[unitID].builderID = true, builderID
 	end
-	local meta = { sbjUnitID = unitID }
-	addEvent(unitTeam, importance, sbjLocation, meta, sbjName, buildingEventType, unitID, _updateBuildingEvent)
 end
 
 function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attackerID, _, attackerTeam)
@@ -3036,6 +2954,7 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 		return
 	end
 
+	local location = unitInfo:get(unitID)
 	local info = unitInfo.cache[unitID]
 	if info and attackerTeam then
 		info.hitBy, info.hitFrame = attackerTeam, gameFrame
@@ -3054,33 +2973,19 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 		statsAddDamage(unitID, unitDefID, damage)
 	end
 	lull.addDamage(unitID, unitDefID, damage)
-	local sbjLocation, _, unitImportance, sbjName, isStatic = unitInfo:get(unitID)
-	if isStatic then
-		unitImportance = unitImportance * staticAttackedBoost
+	if not location or not info then
+		return
 	end
-	local currentHealth, maxHealth, _, _, buildProgress = spGetUnitHealth(unitID)
-	-- currentHealth can be 0, also avoid skewing the score overly much
-	currentHealth = max(currentHealth, maxHealth / 16)
-	-- Percentage of current health being dealt in damage, up to 100
-	local importance = 100 * min(currentHealth, damage) / currentHealth
-	-- Multiply by unit importance factor
-	importance = importance * unitImportance * buildProgress
-	if not attackerID then
-		importance = importance * unattributedDamageFactor
-	end
-	
-	local event = addEvent(attackerTeam, importance, sbjLocation, nil, sbjName, unitDamagedEventType, unitID)
-	if attackerID then
-		local attackerLocation = unitInfo:get(attackerID)
-		event:addObject(attackerID, attackerLocation)
-	else
-		-- Fire burns on after whoever lit it has gone
-		event.burning = spGetUnitRulesParam(unitID, "on_fire") == 1
+	-- Damage nobody can be blamed for, such as fire burning on after whoever lit it has died, lava or
+	-- a shell landing after its gun is gone, is mostly not the fight itself
+	local value = foci.damageValue(unitID, unitDefID, damage, paralyzer) * (attackerID and 1 or unattributedDamageFactor)
+	local f = foci.add('damage', info.allyTeam, value, location[1], location[3], unitID, attackerID)
+	if f and attackerTeam and teamInfo[attackerTeam] then
+		foci.record(f, 'dealt', teamInfo[attackerTeam].allyTeam, value)
 	end
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attackerTeam)
-	-- First do some cleanup, if we can
 	if not unitID then
 		return
 	end
@@ -3089,48 +2994,34 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 		statsLogDeath(unitID, unitDefID, unitTeam)
 	end
 
-	local destroyedLocation, _, importance, destroyedName, isStatic = unitInfo:get(unitID)
-	-- Who gets the credit in the overlay. Fire can kill after whoever lit it has died, so with no
-	-- attacker a unit that died of damage goes to the side that last hit it.
+	local destroyedLocation, _, _, destroyedName = unitInfo:get(unitID)
+	-- Who gets the credit. Fire can kill after whoever lit it has died, so with no attacker a unit
+	-- that died of damage goes to the side that last hit it.
 	local info, unitDef = unitInfo.cache[unitID], unitDefID and UnitDefs[unitDefID]
 	local health, _, _, _, buildProgress = spGetUnitHealth(unitID)
 	local killerTeam = attackerTeam or info and info.hitBy and (health or 0) <= 0
 		and gameFrame - info.hitFrame < overlay.creditFrames and info.hitBy
-	if killerTeam and unitTeam and destroyedLocation and unitDef and not unitDef.customParams.dontcount
-	    and teamInfo[killerTeam].allyTeam ~= teamInfo[unitTeam].allyTeam then
-		-- A unit still being built is worth what had gone into it
-		overlay.addDeath(teamInfo[killerTeam].allyTeam, destroyedLocation, unitDef.metalCost * (buildProgress or 1))
-	end
-	local destroyerLocation, _, _, destroyerName
+	local destroyerName
 	if attackerID then
-		destroyerLocation, _, _, destroyerName = unitInfo:get(attackerID)
+		_, _, _, destroyerName = unitInfo:get(attackerID)
 	end
-	if destroyedName and (attackerID or (health or 0) <= 0) then
-		overlay.kill(unitID, destroyedName, destroyerName, killerTeam, spGetUnitRulesParam(unitID, "on_fire") == 1)
+	-- What was lost goes to its focus, and the kill to the killer's side. A costly unit or a
+	-- commander lost is news. Cancelled builds, commanders morphing and the like don't count.
+	local lostSide = unitTeam and teamInfo[unitTeam] and teamInfo[unitTeam].allyTeam
+	if destroyedLocation and unitDef and lostSide and not unitDef.customParams.dontcount and (attackerID or (health or 0) <= 0) then
+		local value, x, z = unitDef.metalCost * (buildProgress or 1), destroyedLocation[1], destroyedLocation[3]
+		local f = foci.add('destroyed', lostSide, value, x, z, unitID, attackerID)
+		local killerSide = killerTeam and teamInfo[killerTeam] and teamInfo[killerTeam].allyTeam
+		if f and killerSide and killerSide ~= lostSide then
+			foci.record(f, 'kills', killerSide, value)
+		end
+		local commander = foci.isCommander(unitID, unitDef)
+		if commander or value >= foci.highlightMetal then
+			foci.highlight(f, { kind = 'destroyed', metal = max(value, commander and foci.highlightMetal or 0), name = destroyedName,
+				by = destroyerName, team = killerTeam, x = x, z = z, burning = spGetUnitRulesParam(unitID, "on_fire") == 1 })
+		end
 	end
 	unitInfo:forget(unitID)
-	purgeEvents(__purgeSubject, { unitID = unitID })
-
-	if not unitDefID or not unitTeam or not attackerID or not attackerTeam or not destroyedLocation or not importance or not destroyedName then
-		-- Ignore cancelled builds and other similar things like comm upgrade and other calls we don't understand
-		return
-	end
-
-	if unitDef.customParams.dontcount then
-		-- Ignore dontcount units e.g. terraunit
-		return
-	end
-
-	if isStatic then
-		importance = importance * staticAttackedBoost
-	end
-	local destroyedEvent = addEvent(attackerTeam, importance, destroyedLocation, nil, destroyedName, unitDestroyedEventType, unitID)
-	destroyedEvent:addObject(attackerID, destroyerLocation)
-	local destroyerEvent = addEvent(unitTeam, importance, destroyerLocation, nil, destroyerName, unitDestroyerEventType, attackerID)
-	destroyerEvent:addObject(unitID, destroyedLocation)
-	-- It would be naff to show both
-	destroyedEvent:addExcludes(destroyerEvent)
-    destroyerEvent:addExcludes(destroyedEvent)
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
@@ -3139,11 +3030,27 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	end
 
 	local allyTeam = teamInfo[unitTeam].allyTeam
-	local sbjLocation, _, importance, sbjName = unitInfo:watch(unitID, allyTeam, unitDefID)
-	addEvent(unitTeam, importance, sbjLocation, nil, sbjName, unitBuiltEventType, unitID)
+	local location, _, _, name = unitInfo:watch(unitID, allyTeam, unitDefID)
+	local unitDef = UnitDefs[unitDefID]
+	if not location or unitDef.customParams.dontcount then
+		return
+	end
+	local x, z = location[1], location[3]
+	local f = foci.add('built', allyTeam, unitDef.metalCost, x, z, unitID)
+	if f then
+		-- Also counted, for the callout. It names the costliest thing finished lately.
+		foci.record(f, 'units', allyTeam, 1)
+		local b = f.lastBuilt
+		if not b or unitDef.metalCost >= b.metal or gameFrame - b.frame > foci.builtKeepSeconds * framesPerSecond then
+			f.lastBuilt = { unitID = unitID, name = name, team = unitTeam, x = x, z = z, metal = unitDef.metalCost, frame = gameFrame }
+		end
+	end
+	if unitDef.metalCost >= foci.builtHighlightMetal then
+		foci.highlight(f, { kind = 'built', metal = unitDef.metalCost, name = name, team = unitTeam, unitID = unitID, x = x, z = z })
+	end
 end
 
-function widget:UnitTaken(unitID, _, _, newTeam)
+function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	if not unitID or not newTeam then
 		return
 	end
@@ -3154,13 +3061,16 @@ function widget:UnitTaken(unitID, _, _, newTeam)
 		return
 	end
 
-	local sbjLocation, _, importance, sbjName, isStatic = unitInfo:get(unitID)
-	if isStatic then
-		importance = importance * staticAttackedBoost
+	local location, _, _, name = unitInfo:get(unitID)
+	local lostSide = oldTeam and teamInfo[oldTeam] and teamInfo[oldTeam].allyTeam
+	local unitDef = unitDefID and UnitDefs[unitDefID]
+	if location and lostSide and unitDef then
+		local f = foci.add('captured', lostSide, unitDef.metalCost, location[1], location[3], unitID, captureController)
+		if unitDef.metalCost >= foci.captureHighlightMetal then
+			foci.highlight(f, { kind = 'captured', metal = unitDef.metalCost, name = name, team = newTeam, unitID = unitID,
+				x = location[1], z = location[3] })
+		end
 	end
-	local event = addEvent(newTeam, importance, sbjLocation, nil, sbjName, unitTakenEventType, unitID)
-	local capturerLocation =  unitInfo:get(captureController)
-	event:addObject(captureController, capturerLocation)
 end
 
 local function updateCamera(dt, userCameraOverride)
@@ -3215,7 +3125,7 @@ local function updateCamera(dt, userCameraOverride)
 	tdiag = max(camDiagMin, tdiag)
 
 	-- Apply damping to location if relatively close, to avoid overly twitchy camera
-	if distance(display.location, tlocation) < eventMergeRange then
+	if distance(display.location, tlocation) < trackDampRange then
 		local damping = 0.4
 		display.diag = applyDamping(display.diag, tdiag, damping, dt)
 		display.location = _apply2(applyDamping, display.location, tlocation, damping, dt)
@@ -3243,8 +3153,8 @@ local function updateCamera(dt, userCameraOverride)
 	local half = display.diag / (2 * sqrt(2))
 	local aMin, aMax, bMin, bMax = -half, half, -half, half
 	local aside = display.aside
-	if aside and not display.isWide and gameFrame - aside[3] < scenes.asideFrames
-	    and length(aside[1] - ex, aside[2] - ez) <= scenes.asideRange then
+	if aside and not display.isWide and gameFrame - aside[3] < foci.asideFrames
+	    and length(aside[1] - ex, aside[2] - ez) <= foci.asideRange then
 		points[#points + 1] = aside
 		display.asideFrame = gameFrame
 	end
@@ -3267,8 +3177,8 @@ local function updateCamera(dt, userCameraOverride)
 	local remaining = distance(c.look, tlook)
 	local isCut = c.cutNext or panSeconds(remaining) > maxPanSeconds
 
-	if shownEvent ~= c.shot then
-		c.shot, c.orbited, c.yawSmooth = shownEvent, false, yawSmoothTime
+	if shown ~= c.shot then
+		c.shot, c.orbited, c.yawSmooth = shown, false, yawSmoothTime
 		if rotate and not isCut and not display.isWide then
 			-- Turn towards the new event, as a drone pilot would, within limits
 			local hx, hz = ex - c.x, ez - c.z
@@ -3280,10 +3190,7 @@ local function updateCamera(dt, userCameraOverride)
 
 	if isCut then
 		-- A cut is a new scene to the viewer: the callout starts where it best fits there
-		overlay.tally, overlay.box = {}, nil
-		if shownEvent and overlay.event ~= shownEvent then
-			overlay.start(shownEvent)
-		end
+		overlay.box = nil
 		c.look, c.lookv = tlook, { 0, 0, 0 }
 		c.dist, c.distv = tdist, 0
 		c.pitch, c.pitchv = tpitch, 0
@@ -3358,6 +3265,7 @@ function widget:Update(dt)
 	userInactiveSeconds = userInactiveSeconds + dt
 	-- For the callout's glide, which is drawn after this
 	overlay.dt = dt
+	overlay.follow(dt)
 	if userInactiveSeconds > userInactiveSecondsThreshold then
 		spSetMouseCursor('none')
 	end

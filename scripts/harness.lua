@@ -111,7 +111,8 @@ Spring = setmetatable({
 	GetTeamInfo = function(t) return t, t, false, false, 'x', teams[t] end,
 	GetPlayerInfo = function(p) return 'Player' .. p end,
 	GetTeamColor = function() return 1, 1, 1, 1 end,
-	GetGameRulesParam = function(k) return k:find('long') and ('Team ' .. k:sub(-1)) or 'T' end,
+	-- As Zero-K names a team after its best rated player: "Team <name>" in full, "<name>" short
+	GetGameRulesParam = function(k) return (k:find('long') and 'Team Player' or 'Player') .. k:sub(-1) end,
 	-- What each side's units are worth, for the wide shot's board
 	GetTeamRulesParam = function(t, k)
 		if k == 'stats_history_unit_value_current' then return 1000 + 500 * t + frame end
@@ -157,7 +158,7 @@ local firstScene, arrived, slowest, total, ticks = nil, nil, 0, 0, 0
 -- How far the callout travels on screen: in all, and in snaps of over 150px in a frame (a glide
 -- is less). Measured at its middle, so a change of size counts too. Each new callout (after none or
 -- the board) starts afresh.
-local was, travel, jumps, steady = nil, 0, 0, 0
+local was, travel, jumps, steady, framesShown = nil, 0, 0, 0, 0
 for f = 1, 90 * 30 do
 	frame = f
 	for _, id in ipairs(attackers) do
@@ -205,6 +206,7 @@ for f = 1, 90 * 30 do
 	box, board = nil, false
 	widget:DrawScreen()
 	local at = box and not board and { (box[1] + box[3]) / 2, (box[2] + box[4]) / 2 }
+	framesShown = framesShown + (at and 1 or 0)
 	if at and was then
 		local d = math.sqrt((at[1] - was[1]) ^ 2 + (at[2] - was[2]) ^ 2)
 		travel, jumps, steady = travel + d, jumps + (d > 150 and 1 or 0), steady + (d < 0.5 and 1 or 0)
@@ -231,7 +233,7 @@ local drawn = {}
 for text in pairs(texts) do drawn[#drawn + 1] = text end
 table.sort(drawn)
 print('callout texts: ' .. #drawn)
-print(string.format('callout travel: %.0f px, %d snaps, still %d frames', travel, jumps, steady))
+print(string.format('callout travel: %.0f px, %d snaps, still %d of %d frames shown', travel, jumps, steady, framesShown))
 if os.getenv('VERBOSE') then print(table.concat(drawn, '\n')) end
 print(string.format('per game frame: mean %.2f ms, worst %.2f ms, %d units', total / ticks * 1000, slowest * 1000, nextId - 1))
 if os.getenv('LOG') then

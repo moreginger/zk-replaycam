@@ -25,6 +25,15 @@
 - Stats ignore deaths with no damage nearby (commander upgrades, reclaim), which the camera could never have shown
 - Units that exist when the widget starts are picked up straight away
 - Static units get their 1.5x boost only when damaged, destroyed or captured, not when built, so a lone mex build is less likely to steal the shot
+- Foci replace events and the interest grid. Damage, deaths, captures, building, units sent far and rising scene stakes each add their metal to the nearest focus, which keeps it by kind and side in 16 one-second bins. The camera shows the focus whose recent heat, less passe for how long the camera has been near it, beats the one on show by the switching margin. A focus follows its action, merges with foci it runs into, and frames its recently involved units. Losing a commander or a costly unit, a capture or a big build is a highlight: it lifts its focus's score past passe for a few seconds and the callout leads with it, pointing at it
+- The callout belongs to the focus: it says whether there is a fight (and between whom), one side under fire, trouble incoming, building, something built or a move, from the focus's own tallies, changing only once something new has held for 3s. The killed bar counts what each side has killed at the focus. The ring goes round the focus and follows it
+- Wide lull shots frame the hottest foci, and orbits judge headings by units and focus heat in view
+- Callouts name the player in on what is happening at the focus, in their colour, or when several are, their team with how many ("Team SnuggleBass (2)"). Teams go by Zero-K's full team name where it fits ("Team SnuggleBass", not "SnuggleBass", which reads as one player), here and on the wide shot's board, in the colour of the player they are named after. After a player's name the short name is enough ("muffa (SnuggleBass)"), and none at all in a team of one
+- A built callout names the costliest thing finished there lately, not the latest, and says how many were built there and for how much metal
+- The ring is in the colour of whoever the callout is about first: the side under fire, or with trouble incoming. A fight's ring and callout are grey
+- The pointer to a single unit stops just outside the selection shape Zero-K draws for it (a square for buildings), so it no longer runs into a factory
+- The callout is placed off where its subject will be once the camera arrives, so it no longer trails a pan and overshoots, and it waits while the camera is still bringing its subject on screen. It moves off its ring as soon as it is on the line, not only once well inside
+- Headed runs (`scripts/run-replay-headed.sh`) record the window as video to `~/Downloads/replaycam/`
 
 ## [0.2.1] - 2023-04-02
 

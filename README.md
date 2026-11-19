@@ -10,7 +10,7 @@ https://youtu.be/As0ma57rgAQ
 
 Is "Spec-K" too much work for you? You might be interested in ReplayCam... it's a widget that takes control of your camera in replay/spec mode, and attempts to focus on the most interesting stuff.
 
-The strategy is fairly basic. It listens to a bunch of callins e.g for a unit being destroyed, then creates an event. Every second, events are ranked based on how unusual/important they seem, and the camera zooms to the action. Things it can currently do:
+The strategy is fairly basic. It listens to a bunch of callins, e.g. for a unit being damaged or destroyed, and adds what happened, in metal, to the nearest focus: a place where things are happening. Each focus keeps a few seconds of what went on there by kind and side. Every second, the camera goes to the focus with most going on, less what it has been watching for a while, and the callout says what is happening there. Things it can currently do:
 
 - Show a unit under attack, especially if near death
 - Show areas where there is a lot of activity from opposing teams
@@ -110,10 +110,11 @@ scripts/run-replay-headed.sh replays/some-replay.sdfz runs/headed/mychange "" 30
 - The last argument stops it after that many seconds; the first few minutes are often enough.
 - The window opens on your desktop, with your graphics settings and no sound. It needs more memory than a headless run, so run one at a time with Zero-K closed.
 - With `DEBUG` on, `rc-place` lines in its `infolog.txt` say when and why the callout was moved.
+- It also records the window at 10 fps with GStreamer, to `~/Downloads/replaycam/<date>_<map>_<name>.mp4`, where the name is the output folder's unless `VIDEO_NAME` gives one. `VIDEO_DIR` puts it elsewhere and `VIDEO=0` turns it off.
 
 ## Testing offline
 
-`scripts/run-harness.py` runs the widget against a stubbed game, without Zero-K: one side sends raiders or bombers at the other's base. It catches load and runtime errors, and reports when scene events fire, what is shown, how far the callout travels on screen and the cost per game frame. It can't judge how the camera looks.
+`scripts/run-harness.py` runs the widget against a stubbed game, without Zero-K: one side sends raiders or bombers at the other's base. It catches load and runtime errors, and reports when scenes fire, what is shown, how far the callout travels on screen and the cost per game frame. It can't judge how the camera looks.
 
 ```bash
 python3 scripts/run-harness.py raid --crowd 2000
