@@ -1419,13 +1419,14 @@ end
 
 -- The selection shape Zero-K draws round a unit (see its gui_selectedunits_gl4.lua) on screen: a
 -- square of its footprint for a building, turned with it, otherwise a circle across the footprint's
--- diagonal
-function overlay.outline(unitID, x, z)
+-- diagonal, at the unit's height (y) so one in the air, jumping or flying, still has it round it
+function overlay.outline(unitID, x, y, z)
 	local ud = UnitDefs[spGetUnitDefID(unitID)]
 	local xs, zs = ud.xsize or 2, ud.zsize or 2
 	local scale = tonumber(ud.customParams and ud.customParams.selection_scale) or 1
-	local y, points = spGetGroundHeight(x, z), {}
+	local points = {}
 	if ud.isImmobile then
+		y = spGetGroundHeight(x, z)
 		local a = (spGetUnitHeading(unitID) or 0) * 2 * pi / 65536
 		local c, s = cos(a), sin(a)
 		local hx, hz = 4 * xs * scale, 4 * zs * scale
@@ -1435,7 +1436,7 @@ function overlay.outline(unitID, x, z)
 		end
 		return points
 	end
-	return overlay.ring(x, z, 4 * sqrt(xs * xs + zs * zs) * scale, 16)
+	return overlay.ring(x, z, 4 * sqrt(xs * xs + zs * zs) * scale, 16, nil, y)
 end
 
 -- How far along from (x1, y1) to (x2, y2) it first crosses the outline through points, or 0
@@ -1458,13 +1459,13 @@ end
 
 -- Where n points round a ring on the ground are on screen, or as project (see overlay.projector)
 -- puts them. Like the drawn ring, each follows the ground under it.
-function overlay.ring(x, z, radius, n, project)
+function overlay.ring(x, z, radius, n, project, y)
 	project = project or spWorldToScreenCoords
 	local points = {}
 	for i = 1, n do
 		local angle = i * 2 * pi / n
 		local px, pz = x + radius * sin(angle), z + radius * cos(angle)
-		points[i] = { project(px, spGetGroundHeight(px, pz), pz) }
+		points[i] = { project(px, y or spGetGroundHeight(px, pz), pz) }
 	end
 	return points
 end
@@ -2036,7 +2037,7 @@ function overlay.draw()
 	local only = next(overlay.subjects)
 	local outline = ring
 	if not ring and only and not next(overlay.subjects, only) and spGetUnitDefID(only) then
-		outline = overlay.outline(only, sx, sz)
+		outline = overlay.outline(only, sx, sy, sz)
 	end
 	if outline then
 		local first = overlay.crossing(outline, cx, my, ax, ay)
