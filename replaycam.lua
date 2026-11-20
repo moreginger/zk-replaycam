@@ -519,8 +519,9 @@ local scenes = {
 	watchedSeconds = 3, watchedRange = worldGridSize,
 	-- Add to foci for at most this many scenes a second, at least this many cells apart
 	maxScenes = 2, separation = 3,
-	-- A scene's units are those this close to its centre
-	radius = worldGridSize * 0.75,
+	-- A scene's units are those this close to its centre, and the other sides' armed units on their
+	-- way, this close
+	radius = worldGridSize * 0.75, threatRadius = worldGridSize * 1.5,
 	-- Average stake by cell, and ally team names
 	baseline = {}, names = {},
 	-- This second's value (importance, for scoring), metal (what it cost, for the callout), armed
@@ -614,6 +615,9 @@ local foci = {
 	highlightMetal = 750, captureHighlightMetal = 300, builtHighlightMetal = 1500, highlightHalfLife = 3,
 	-- The callout names the costliest thing built at a focus in this long
 	builtKeepSeconds = 8,
+	-- A unit morphed (or a commander upgraded) from another counts as this share of its cost: the
+	-- player paid only the difference, but it can change a lot. Units being morphed into are kept.
+	morphShare = 0.5, morphed = {},
 	-- Running mean of the best score, over about this many seconds
 	typicalSeconds = 30, typical = 0,
 	-- Heat by cell, for choosing headings (see scenes.activityAt), counts this much less than a unit
@@ -953,7 +957,7 @@ function foci.order(f, unitID, team, name, from, to)
 		o = { team = team, units = {}, names = {} }
 		f.order = o
 	end
-	o.frame, o.from, o.to = gameFrame, { from[1], from[3] }, { to[1], to[3] }
+	o.frame, o.from, o.to, o.unitID = gameFrame, { from[1], from[3] }, { to[1], to[3] }, unitID
 	if not o.units[unitID] then
 		o.units[unitID], o.names[name] = true, (o.names[name] or 0) + 1
 	end
@@ -1067,7 +1071,7 @@ function overlay.fightHeadline(sides, f)
 		names[i], color = overlay.side(allyTeam, f)
 	end
 	if #names >= 2 then
-		return "Fight: " .. table.concat(names, " vs "), overlay.neutral
+		return table.concat(names, " vs "), overlay.neutral
 	end
 	return names[1] and names[1] .. " under fire" or "Fighting", color or overlay.neutral
 end
@@ -1097,8 +1101,8 @@ function overlay.show(f)
 	overlay.update()
 end
 
--- What the focus is about lately: a highlight, a fight, one side under fire, trouble incoming,
--- building, something built or units on the move. Lately is the last recentSeconds or, if nothing
+-- What the focus is about lately: a highlight, a fight, trouble incoming, building, something
+-- built or units on the move. Lately is the last recentSeconds or, if nothing
 -- happened then, all the bins. Also returns what each side has lost then, for the sides that count.
 function overlay.about(f)
 	local h = f.highlight
@@ -1114,16 +1118,13 @@ function overlay.about(f)
 				most = max(most, lost[side])
 			end
 		end
-		local losing = 0
 		for side, v in pairs(lost) do
-			if v >= overlay.fightShare * most then
-				losing = losing + 1
-			else
+			if v < overlay.fightShare * most then
 				lost[side] = nil
 			end
 		end
 		if total >= overlay.minCombat then
-			return losing >= 2 and 'fight' or 'attack', lost
+			return 'fight', lost
 		end
 		-- Otherwise whatever there is most of, weighted as for heat
 		local best, bestValue = nil, 0
@@ -1136,7 +1137,7 @@ function overlay.about(f)
 		if best then
 			return best, lost
 		elseif total > 0 then
-			return losing >= 2 and 'fight' or 'attack', lost
+			return 'fight', lost
 		end
 	end
 	return nil, {}
@@ -1171,22 +1172,26 @@ function overlay.word(f, kind, lost, fresh)
 		if h.kind == 'destroyed' then
 			headline = h.name .. overlay.blame(h.burning, h.by, player)
 		else
-			headline = h.name .. (h.kind == 'built' and " built" or " captured") .. (player and " by " .. player or "")
+			headline = h.name .. (h.kind == 'built' and h.verb or " captured") .. (player and " by " .. player or "")
 		end
 		subjects[h.unitID or -1] = at(h.x, h.z)
 		return headline, nil, player and teamInfo[h.team].color or grey, subjects, false
 	elseif kind == 'fight' then
-		-- Everyone who has lost much here, so the sides don't come and go
-		local sides, most = {}, 0
-		for _, metric in ipairs({ 'damage', 'destroyed' }) do
-			for _, v in pairs(f.totals[metric] or {}) do
-				most = max(most, v)
+		-- Everyone who has lost or dealt much here, so the sides don't come and go. With one side,
+		-- it is under fire from no one known.
+		local sides = {}
+		for _, metrics in ipairs({ { 'damage', 'destroyed' }, { 'dealt' } }) do
+			local most = 0
+			for _, metric in ipairs(metrics) do
+				for _, v in pairs(f.totals[metric] or {}) do
+					most = max(most, v)
+				end
 			end
-		end
-		for _, metric in ipairs({ 'damage', 'destroyed' }) do
-			for side, v in pairs(f.totals[metric] or {}) do
-				if v >= overlay.fightShare * most then
-					sides[side] = true
+			for _, metric in ipairs(metrics) do
+				for side, v in pairs(f.totals[metric] or {}) do
+					if v >= overlay.fightShare * most then
+						sides[side] = true
+					end
 				end
 			end
 		end
@@ -1195,22 +1200,6 @@ function overlay.word(f, kind, lost, fresh)
 		end
 		local headline, color = overlay.fightHeadline(sides, f)
 		return headline, stake(100), color, subjects, true
-	elseif kind == 'attack' then
-		local victim = next(lost) or overlay.mostOf(f, 'damage')
-		if not victim then
-			return
-		end
-		-- Who is doing it: the other side that has dealt most here
-		local by, byValue = nil, 0
-		for side, v in pairs(f.totals.dealt or {}) do
-			if side ~= victim and v > byValue then
-				by, byValue = side, v
-			end
-		end
-		local victimName, victimColor = overlay.side(victim, f)
-		local byName = by and overlay.side(by, f)
-		-- In the colour of whoever the headline is about
-		return victimName .. " under fire" .. (byName and " from " .. byName or ""), stake(100), victimColor, subjects, true
 	elseif kind == 'stake' then
 		local side = overlay.mostOf(f, 'stake')
 		if not side then
@@ -1246,7 +1235,7 @@ function overlay.word(f, kind, lost, fresh)
 		-- With others lately, what it all came to
 		local n, metal = foci.recent(f, 'units', foci.bins), foci.recent(f, 'built', foci.bins)
 		local detail = n > 1 and string.format("%d built here lately, %s metal", n, overlay.metal(metal)) or nil
-		return b.name .. " built by " .. overlay.player(b.team), detail, teamInfo[b.team].color, subjects, false
+		return b.name .. b.verb .. " by " .. overlay.player(b.team), detail, teamInfo[b.team].color, subjects, false
 	elseif kind == 'orders' then
 		local o = f.order
 		if not o or not teamInfo[o.team] then
@@ -1254,10 +1243,9 @@ function overlay.word(f, kind, lost, fresh)
 		end
 		local name, n = next(o.names)
 		local label = next(o.names, name) and overlay.player(o.team) .. " squad" or n > 1 and n .. " " .. name .. "s" or name
-		for unitID in pairs(o.units) do
-			local info = unitInfo.cache[unitID]
-			subjects[unitID] = info and { unpack(info.location) } or nil
-		end
+		-- The unit the arrow is from: a squad can be spread out, at different speeds
+		local info = unitInfo.cache[o.unitID]
+		subjects[o.unitID] = info and { unpack(info.location) } or nil
 		if fresh then
 			overlay.arrowFrom, overlay.arrowTo = o.from, o.to
 			overlay.left, overlay.closing = nil, nil
@@ -1286,11 +1274,12 @@ function overlay.update()
 	end
 	overlay.ringTarget = overlay.ringRadius(f)
 
-	-- Something new to say has to hold a while first, unless it is a highlight, or one ends
+	-- Something new to say has to hold a while first, unless it is a highlight, or one ends, or a fight
+	-- breaks out: the trouble has arrived
 	local kind, lost = overlay.about(f)
 	local fresh = false
 	if kind and kind ~= overlay.kind then
-		if not overlay.kind or kind == 'highlight' or overlay.kind == 'highlight'
+		if not overlay.kind or kind == 'highlight' or overlay.kind == 'highlight' or kind == 'fight'
 		    or kind == overlay.pending and gameFrame - overlay.pendingFrame >= overlay.holdSeconds * framesPerSecond then
 			overlay.kind, overlay.pending, fresh = kind, nil, true
 		elseif kind ~= overlay.pending then
@@ -1309,7 +1298,7 @@ function overlay.update()
 			overlay.arrowFrom, overlay.arrowTo = nil, nil
 		end
 	end
-	local fighting = overlay.kind == 'fight' or overlay.kind == 'attack' or overlay.kind == 'highlight'
+	local fighting = overlay.kind == 'fight' or overlay.kind == 'highlight'
 	overlay.tally = fighting and f.totals.kills or {}
 
 	-- How fast a move is closing on its target, for the time to arrive
@@ -1349,8 +1338,9 @@ function overlay.centre()
 	end
 end
 
--- The selection shape Zero-K draws round a unit (see its unit_shapes.lua) on screen: a square for
--- a building, turned with it, otherwise a circle
+-- The selection shape Zero-K draws round a unit (see its gui_selectedunits_gl4.lua) on screen: a
+-- square of its footprint for a building, turned with it, otherwise a circle across the footprint's
+-- diagonal
 function overlay.outline(unitID, x, z)
 	local ud = UnitDefs[spGetUnitDefID(unitID)]
 	local xs, zs = ud.xsize or 2, ud.zsize or 2
@@ -1359,14 +1349,14 @@ function overlay.outline(unitID, x, z)
 	if ud.isImmobile then
 		local a = (spGetUnitHeading(unitID) or 0) * 2 * pi / 65536
 		local c, s = cos(a), sin(a)
-		local hx, hz = 2.7 * xs * scale, 2.7 * zs * scale
+		local hx, hz = 4 * xs * scale, 4 * zs * scale
 		for _, k in ipairs({ { -1, 1 }, { 1, 1 }, { 1, -1 }, { -1, -1 } }) do
 			local px, pz = k[1] * hx, k[2] * hz
 			points[#points + 1] = { spWorldToScreenCoords(x + px * c + pz * s, y, z - px * s + pz * c) }
 		end
 		return points
 	end
-	return overlay.ring(x, z, 2.8 * sqrt(xs * xs + zs * zs) * scale, 16)
+	return overlay.ring(x, z, 4 * sqrt(xs * xs + zs * zs) * scale, 16)
 end
 
 -- How far along from (x1, y1) to (x2, y2) it first crosses the outline through points, or 0
@@ -2602,16 +2592,26 @@ function scenes.around(stake, x, z)
 	return total
 end
 
--- The mobile units near (x, z), or failing that the buildings, or nil
-function scenes.subjects(x, z)
-	local mobiles, statics = {}, {}
-	for _, unitID in ipairs(spGetUnitsInCylinder(x, z, scenes.radius)) do
-		local location, _, _, _, isStatic = unitInfo:get(unitID)
-		if location then
+-- The mobile units near (x, z), or failing that the buildings, and the armed units of sides other
+-- than side further out: the trouble coming. Nil if none.
+function scenes.subjects(x, z, side)
+	local mobiles, statics, threats = {}, {}, {}
+	for _, unitID in ipairs(spGetUnitsInCylinder(x, z, scenes.threatRadius)) do
+		local location, _, _, _, isStatic, weaponImportance = unitInfo:get(unitID)
+		local info = unitInfo.cache[unitID]
+		if location and length(location[1] - x, location[3] - z) <= scenes.radius then
 			(isStatic and statics or mobiles)[unitID] = location
+		elseif location and not isStatic and (weaponImportance or 0) > 0 and info.allyTeam ~= side then
+			threats[unitID] = location
 		end
 	end
-	return next(mobiles) and mobiles or next(statics) and statics or nil
+	local subjects = next(mobiles) and mobiles or next(statics) and statics
+	if subjects then
+		for unitID, location in pairs(threats) do
+			subjects[unitID] = location
+		end
+	end
+	return subjects
 end
 
 -- Once a second: add to foci where the stake has risen most
@@ -2659,7 +2659,8 @@ function scenes.update()
 		end
 
 		local x, z, cell = scene.x, scene.z, scene.cell
-		local subjects, side = apart and scenes.subjects(x, z), owner[cell]
+		local side = owner[cell]
+		local subjects = apart and side and scenes.subjects(x, z, side)
 		if subjects and side then
 			added[#added + 1] = scene
 			local f = foci.add('stake', side, scene.rise, x, z)
@@ -2885,6 +2886,10 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 
 	local allyTeam = teamInfo[unitTeam].allyTeam
 	unitInfo:watch(unitID, allyTeam, unitDefID)
+	-- Zero-K's morph flags the unit it makes while making it
+	if spGetGameRulesParam("morphUnitCreating") == 1 then
+		foci.morphed[unitID] = true
+	end
 	if unitInfo.cache[unitID] then
 		-- Not a threat until finished (see scenes), and what goes into it counts (see foci.observe)
 		unitInfo.cache[unitID].unfinished, unitInfo.cache[unitID].builderID = true, builderID
@@ -2965,6 +2970,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, _, attack
 		end
 	end
 	unitInfo:forget(unitID)
+	foci.morphed[unitID] = nil
 end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
@@ -2979,17 +2985,21 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 		return
 	end
 	local x, z = location[1], location[3]
-	local f = foci.add('built', allyTeam, unitDef.metalCost, x, z, unitID)
+	local morphed = foci.morphed[unitID]
+	foci.morphed[unitID] = nil
+	local metal = unitDef.metalCost * (morphed and foci.morphShare or 1)
+	local verb = morphed and (foci.isCommander(unitID, unitDef) and " upgraded" or " morphed") or " built"
+	local f = foci.add('built', allyTeam, metal, x, z, unitID)
 	if f then
 		-- Also counted, for the callout. It names the costliest thing finished lately.
 		foci.record(f, 'units', allyTeam, 1)
 		local b = f.lastBuilt
-		if not b or unitDef.metalCost >= b.metal or gameFrame - b.frame > foci.builtKeepSeconds * framesPerSecond then
-			f.lastBuilt = { unitID = unitID, name = name, team = unitTeam, x = x, z = z, metal = unitDef.metalCost, frame = gameFrame }
+		if not b or metal >= b.metal or gameFrame - b.frame > foci.builtKeepSeconds * framesPerSecond then
+			f.lastBuilt = { unitID = unitID, name = name, team = unitTeam, x = x, z = z, metal = metal, frame = gameFrame, verb = verb }
 		end
 	end
-	if unitDef.metalCost >= foci.builtHighlightMetal then
-		foci.highlight(f, { kind = 'built', metal = unitDef.metalCost, name = name, team = unitTeam, unitID = unitID, x = x, z = z })
+	if metal >= foci.builtHighlightMetal then
+		foci.highlight(f, { kind = 'built', metal = metal, name = name, team = unitTeam, unitID = unitID, x = x, z = z, verb = verb })
 	end
 end
 

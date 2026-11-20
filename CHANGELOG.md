@@ -35,6 +35,11 @@
 - The callout is placed off where its subject will be once the camera arrives, so it no longer trails a pan and overshoots, and it waits while the camera is still bringing its subject on screen. It moves off its ring as soon as it is on the line, not only once well inside
 - Headed runs (`scripts/run-replay-headed.sh`) record the window as video to `~/Downloads/replaycam/`
 - Merged foci keep the costliest unit built in either, and the camera's lead ignores the velocity of units it has stopped tracking. Unused helpers and a near-zero position extrapolation are gone
+- Pointers stop just outside the selection shape at the size Zero-K draws it (they stopped inside it)
+- A move callout points at the unit its arrow starts from, not the middle of a spread-out squad
+- A morphed unit or upgraded commander counts half its cost, and the callout says "upgraded" or "morphed"
+- Combat is always a fight, headed "A vs B" with anyone who lost or dealt much there: no more flipping between "under fire from" and a fight. A fight replaces trouble incoming at once
+- A stake's focus also takes in the other side's armed units on their way, so the camera frames the trouble as well as what it threatens
 
 ## [0.2.1] - 2023-04-02
 
