@@ -20,7 +20,8 @@ end
 --    places where things are happening, each keeping what went on there, in metal, by kind and
 --    side, over the last few seconds (foci)
 -- 2. Scenes anticipate the action: places where one side's value is coming within reach of the
---    other's armed units add to the foci too (scenes)
+--    other's armed units add to the foci too (scenes), as do armed units closing to weapon range
+--    of something they can hit (foci.contact)
 -- 3. The camera shows the focus with most going on, less what it has been watching for a while,
 --    and the callout says what is going on there from what the focus has kept (overlay)
 
@@ -295,13 +296,16 @@ function UnitInfoCache:new(o)
 	-- 2 - static (not mobile)
 	-- 3 - weapon importance
 	-- 4 - weapon range
+	-- 5 - health
+	-- 6 - flies
+	-- 7, 8 - weapon hits air, ground
 	o._unitStatsCache = {}
 	-- cacheObject { name, allyTeam, unitDefID, lastUpdatedFrame, location, velocity }
 	o.cache = o.cache or {}
 	return o
 end
 
--- Weapon importance, 0 if no weapon found.
+-- Weapon importance, 0 if no weapon found, its range, and whether it hits air and ground
 function UnitInfoCache:_weaponStats(unitDef)
 	-- Get weapon damage from first weapon. Hacked together from gui_contextmenu.lua.
 	local weapon = unitDef.weapons[1]
@@ -313,6 +317,12 @@ function UnitInfoCache:_weaponStats(unitDef)
 	if not wdcp or wdcp.fake_weapon then
 		return 0, 0
 	end
+	local only = weapon.onlyTargets
+	local hitsAir, hitsGround = true, true
+	if only and next(only) then
+		hitsAir = only.fixedwing or only.gunship or false
+		hitsGround = only.land or only.sink or only.turret or only.ship or only.swim or only.float or only.hover or false
+	end
 	-- Weapon damage is burst damage that can be delivered in 1s.
 	local projectileMult = tonumber(wdcp.statsprojectiles) or ((tonumber(wdcp.script_burst) or wd.salvoSize) * wd.projectiles)
 	local reloadTime = tonumber(wdcp.script_reload) or wd.reload
@@ -323,7 +333,7 @@ function UnitInfoCache:_weaponStats(unitDef)
 	-- FIXME: Afterburn and Newton damage aren't counted
 	local weaponImportance = weaponDamage * aoeBoost
 	local range = wdcp.truerange or wd.range
-	return weaponImportance, range
+	return weaponImportance, range, hitsAir, hitsGround
 end
 
 -- Damage no unit can be blamed for counts for this much (see UnitDamaged)
@@ -343,8 +353,9 @@ function UnitInfoCache:_unitStats(unitDefID)
 			-- terraunit has fixed cost of 100000, actual estimated cost is a unit rules param that we try to read later
 			importance = 500
 		end
-		local wImportance, wRange = self:_weaponStats(unitDef)
-		cacheObject = { importance, isStatic, wImportance, wRange }
+		local wImportance, wRange, hitsAir, hitsGround = self:_weaponStats(unitDef)
+		cacheObject = { importance, isStatic, wImportance, wRange, unitDef.health or 1, unitDef.canFly or false,
+			hitsAir or false, hitsGround or false }
 		self._unitStatsCache[unitDefID] = cacheObject
 	end
 	return unpack(cacheObject)
@@ -594,7 +605,13 @@ local foci = {
 	-- Heat is metal times these. A kill counts as damage and again as a death, so kills count
 	-- double. Also kept, for the callout only: kills by the killer's side and dealt (damage) by
 	-- the attacker's side; the rest are by the side that lost or did it.
-	weights = { damage = 1, destroyed = 1, captured = 1.5, building = 0.25, built = 0.5, stake = 0.35, orders = 0.1 },
+	weights = { damage = 1, destroyed = 1, captured = 1.5, building = 0.25, built = 0.5, stake = 0.35, contact = 1, orders = 0.1 },
+	-- Contact: an armed unit closing on something of the enemy's it can hit, due in range within
+	-- contactSeconds, adds the metal it could destroy there in a second, less the further off
+	contactSeconds = 6,
+	-- A unit due in range within imminentSeconds holds its focus on show: a challenger needs
+	-- imminentBoost times more to cut away just before the action
+	imminentSeconds = 3, imminentBoost = 1.5,
 	-- A unit is framed with its focus for this long after it was last involved
 	unitSeconds = 8,
 	-- A unit's orders count once in this long
@@ -817,6 +834,7 @@ function foci.absorb(keep, gone)
 		keep.players[team] = (keep.players[team] or 0) + v
 	end
 	keep.watched, keep.born = max(keep.watched, gone.watched), min(keep.born, gone.born)
+	keep.imminent = max(keep.imminent or 0, gone.imminent or 0)
 	if gone.highlight and foci.highlightBonus(gone) > foci.highlightBonus(keep) then
 		keep.highlight = gone.highlight
 	end
@@ -943,6 +961,47 @@ function foci.observe(info)
 	if delta > 0 then
 		local x, _, z = unpack(info.location)
 		foci.add('building', info.allyTeam, delta * info.metal, x, z, info.unitID, info.builderID)
+	end
+end
+
+-- Once a second per unit (see UnitInfoCache): if it is closing on the enemy, add contact where it
+-- will hit, for the target it can do most to soonest. Units stood still in range leave it to damage.
+function foci.contact(info)
+	local _, _, dps, range, _, _, hitsAir, hitsGround = unitInfo:_unitStats(info.unitDefID)
+	if dps <= 0 or info.unfinished then
+		return
+	end
+	local x, _, z = unpack(info.location)
+	local vx, _, vz = unpack(info.velocity)
+	-- Velocities are per frame
+	local horizon = foci.contactSeconds * framesPerSecond
+	local best, target, soon = 0, nil, false
+	for _, id in ipairs(spGetUnitsInCylinder(x, z, range + length(vx, vz) * horizon + worldGridSize / 2)) do
+		local other = unitInfo.cache[id]
+		if other and other.allyTeam ~= info.allyTeam and not other.removeAfterFrame then
+			local _, _, _, _, health, flies = unitInfo:_unitStats(other.unitDefID)
+			local dx, dz = other.location[1] - x, other.location[3] - z
+			local d = length(dx, dz)
+			local closing = d > 0 and ((vx - other.velocity[1]) * dx + (vz - other.velocity[3]) * dz) / d or 0
+			if closing > 0 and (flies and hitsAir or not flies and hitsGround) then
+				local t = max(0, d - range) / closing
+				local metal = t < horizon and other.metal * min(1, dps / health) * (1 - t / horizon) or 0
+				if metal > best then
+					best, target = metal, other
+					soon = d > range and t <= foci.imminentSeconds * framesPerSecond
+				end
+			end
+		end
+	end
+	if target then
+		local tx, _, tz = unpack(target.location)
+		local f = foci.add('contact', target.allyTeam, best, tx, tz, target.unitID, info.unitID)
+		if f then
+			foci.record(f, 'threat', info.allyTeam, best)
+			if soon then
+				f.imminent = gameFrame
+			end
+		end
 	end
 end
 
@@ -1163,14 +1222,14 @@ function overlay.about(f)
 		end
 		-- Otherwise whatever there is most of, weighted as for heat
 		local best, bestValue = nil, 0
-		for _, metric in ipairs({ 'stake', 'building', 'built', 'orders' }) do
+		for _, metric in ipairs({ 'stake', 'contact', 'building', 'built', 'orders' }) do
 			local value = foci.recent(f, metric, window) * foci.weights[metric]
 			if value > bestValue then
 				best, bestValue = metric, value
 			end
 		end
 		if best then
-			return best == 'stake' and 'fight' or best, lost
+			return (best == 'stake' or best == 'contact') and 'fight' or best, lost
 		elseif total > 0 then
 			return 'fight', lost
 		end
@@ -1204,7 +1263,7 @@ function overlay.word(f, kind, lost, fresh)
 		-- Everyone who has lost or dealt much here, or has much at stake or is the threat to it, so
 		-- the sides don't come and go. With one side, it is under fire from no one known.
 		local sides = {}
-		for _, metrics in ipairs({ { 'damage', 'destroyed' }, { 'dealt' }, { 'stake' }, { 'threat' } }) do
+		for _, metrics in ipairs({ { 'damage', 'destroyed' }, { 'dealt' }, { 'stake', 'contact' }, { 'threat' } }) do
 			local most = 0
 			for _, metric in ipairs(metrics) do
 				for _, v in pairs(f.totals[metric] or {}) do
@@ -2406,6 +2465,10 @@ local function beats(f)
 	if not shown.wide and not f.wide then
 		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * transitionCost({ f.x, spGetGroundHeight(f.x, f.z), f.z })
 	end
+	-- Contacts are refreshed once a second per unit
+	if shown.imminent and gameFrame - shown.imminent <= 1.5 * framesPerSecond then
+		boost = boost * foci.imminentBoost
+	end
 	local score = shown.score
 	if shotLocked() then
 		-- A locked shot holds like a fair one, however weak it was
@@ -2771,6 +2834,7 @@ function widget:Initialize()
 	unitInfo = UnitInfoCache:new({ updateListener = function(info)
 		scenes.observe(info)
 		foci.observe(info)
+		foci.contact(info)
 	end })
 
 	-- Catch up on units made before the widget started, staggering their position updates

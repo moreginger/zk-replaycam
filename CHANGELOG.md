@@ -41,6 +41,7 @@
 - Combat is always a fight, headed "A vs B" with anyone who lost or dealt much there: no more flipping between "under fire from" and a fight. Trouble incoming is a fight too: the side at stake vs the side bringing the threat, so the callout doesn't change when the shooting starts
 - A stake's focus also takes in the other side's armed units on their way, so the camera frames the trouble as well as what it threatens
 - Sides keep one order in fight headlines, kill tallies and the metal value board: as they started on the map, west to east, or north to south when they started further apart that way
+- Contact: an armed unit closing to weapon range of an enemy it can hit (air or ground) heats the focus where it will hit, by the metal it could destroy there in a second, more the sooner it gets there, up to 6s ahead. While a unit on show is due in range within 3s, a challenger needs 1.5x more to cut away, so a raid isn't left just before it strikes
 
 ## [0.2.1] - 2023-04-02
 
