@@ -108,6 +108,8 @@ Spring = setmetatable({
 	GetGaiaTeamID = function() return 99 end,
 	GetAllyTeamList = function() return { 0, 1 } end,
 	GetTeamList = function(a) return { a } end,
+	-- Team 1 starts west of team 0
+	GetTeamStartPosition = function(t) return 3000 - t * 2000, 0, 2000 end,
 	GetTeamInfo = function(t) return t, t, false, false, 'x', teams[t] end,
 	GetPlayerInfo = function(p) return 'Player' .. p end,
 	GetTeamColor = function() return 1, 1, 1, 1 end,

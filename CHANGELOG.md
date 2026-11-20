@@ -26,11 +26,11 @@
 - Units that exist when the widget starts are picked up straight away
 - Static units get their 1.5x boost only when damaged, destroyed or captured, not when built, so a lone mex build is less likely to steal the shot
 - Foci replace events and the interest grid. Damage, deaths, captures, building, units sent far and rising scene stakes each add their metal to the nearest focus, which keeps it by kind and side in 16 one-second bins. The camera shows the focus whose recent heat, less passe for how long the camera has been near it, beats the one on show by the switching margin. A focus follows its action, merges with foci it runs into, and frames its recently involved units. Losing a commander or a costly unit, a capture or a big build is a highlight: it lifts its focus's score past passe for a few seconds and the callout leads with it, pointing at it
-- The callout belongs to the focus: it says whether there is a fight (and between whom), one side under fire, trouble incoming, building, something built or a move, from the focus's own tallies, changing only once something new has held for 3s. The killed bar counts what each side has killed at the focus. The ring goes round the focus and follows it
+- The callout belongs to the focus: it says whether there is a fight (and between whom), one side under fire, building, something built or a move, from the focus's own tallies, changing only once something new has held for 3s. The killed bar counts what each side has killed at the focus. The ring goes round the focus and follows it
 - Wide lull shots frame the hottest foci, and orbits judge headings by units and focus heat in view
 - Callouts name the player in on what is happening at the focus, in their colour, or when several are, their team with how many ("Team SnuggleBass (2)"). Teams go by Zero-K's full team name where it fits ("Team SnuggleBass", not "SnuggleBass", which reads as one player), here and on the wide shot's board, in the colour of the player they are named after. After a player's name the short name is enough ("muffa (SnuggleBass)"), and none at all in a team of one
 - A built callout names the costliest thing finished there lately, not the latest, and says how many were built there and for how much metal
-- The ring is in the colour of whoever the callout is about first: the side under fire, or with trouble incoming. A fight's ring and callout are grey
+- A fight's ring is grey, as it is no one side's, or the side's colour when one side is under fire. Callouts about units (built, being built, on the move, highlights) are in their player's colour
 - The pointer to a single unit stops just outside the selection shape Zero-K draws for it (a square for buildings), so it no longer runs into a factory
 - The callout is placed off where its subject will be once the camera arrives, so it no longer trails a pan and overshoots, and it waits while the camera is still bringing its subject on screen. It moves off its ring as soon as it is on the line, not only once well inside
 - Headed runs (`scripts/run-replay-headed.sh`) record the window as video to `~/Downloads/replaycam/`
@@ -38,8 +38,9 @@
 - Pointers stop just outside the selection shape at the size Zero-K draws it (they stopped inside it)
 - A move callout points at the unit its arrow starts from, not the middle of a spread-out squad
 - A morphed unit or upgraded commander counts half its cost, and the callout says "upgraded" or "morphed"
-- Combat is always a fight, headed "A vs B" with anyone who lost or dealt much there: no more flipping between "under fire from" and a fight. A fight replaces trouble incoming at once
+- Combat is always a fight, headed "A vs B" with anyone who lost or dealt much there: no more flipping between "under fire from" and a fight. Trouble incoming is a fight too: the side at stake vs the side bringing the threat, so the callout doesn't change when the shooting starts
 - A stake's focus also takes in the other side's armed units on their way, so the camera frames the trouble as well as what it threatens
+- Sides keep one order in fight headlines, kill tallies and the metal value board: as they started on the map, west to east, or north to south when they started further apart that way
 
 ## [0.2.1] - 2023-04-02
 

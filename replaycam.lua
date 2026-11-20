@@ -1056,6 +1056,42 @@ function overlay.metal(amount)
 	return amount < 1000 and tostring(amount) or string.format("%d,%03d", floor(amount / 1000), amount % 1000)
 end
 
+-- Sides keep one order everywhere, as they started out on the map: west to east, or north to south
+-- if they started further apart that way. Set once start positions are known.
+function overlay.orderSides()
+	local starts, xMin, xMax, zMin, zMax = {}, huge, -huge, huge, -huge
+	for teamID, info in pairs(teamInfo) do
+		local x, _, z = Spring.GetTeamStartPosition(teamID)
+		if x and x >= 0 and overlay.allyColor[info.allyTeam] then
+			local s = starts[info.allyTeam] or { 0, 0, 0 }
+			starts[info.allyTeam] = { s[1] + x, s[2] + z, s[3] + 1 }
+		end
+	end
+	for _, s in pairs(starts) do
+		s[1], s[2] = s[1] / s[3], s[2] / s[3]
+		xMin, xMax, zMin, zMax = min(xMin, s[1]), max(xMax, s[1]), min(zMin, s[2]), max(zMax, s[2])
+	end
+	if next(starts) then
+		overlay.order = {}
+		for allyTeam, s in pairs(starts) do
+			overlay.order[allyTeam] = xMax - xMin >= zMax - zMin and s[1] or s[2]
+		end
+	end
+end
+
+-- Puts a list of ally teams in that order, and returns it
+function overlay.sortSides(list)
+	local order = overlay.order or {}
+	table.sort(list, function(a, b)
+		local oa, ob = order[a] or a, order[b] or b
+		if oa ~= ob then
+			return oa < ob
+		end
+		return a < b
+	end)
+	return list
+end
+
 -- A headline for a fight between sides, as each side's name in its colour, and the colour for it:
 -- grey for a fight, as it is neither side's
 function overlay.fightHeadline(sides, f)
@@ -1065,9 +1101,8 @@ function overlay.fightHeadline(sides, f)
 			list[#list + 1] = allyTeam
 		end
 	end
-	table.sort(list)
 	local color
-	for i, allyTeam in ipairs(list) do
+	for i, allyTeam in ipairs(overlay.sortSides(list)) do
 		names[i], color = overlay.side(allyTeam, f)
 	end
 	if #names >= 2 then
@@ -1101,8 +1136,8 @@ function overlay.show(f)
 	overlay.update()
 end
 
--- What the focus is about lately: a highlight, a fight, trouble incoming, building, something
--- built or units on the move. Lately is the last recentSeconds or, if nothing
+-- What the focus is about lately: a highlight, a fight (trouble incoming counts as one), building,
+-- something built or units on the move. Lately is the last recentSeconds or, if nothing
 -- happened then, all the bins. Also returns what each side has lost then, for the sides that count.
 function overlay.about(f)
 	local h = f.highlight
@@ -1135,23 +1170,12 @@ function overlay.about(f)
 			end
 		end
 		if best then
-			return best, lost
+			return best == 'stake' and 'fight' or best, lost
 		elseif total > 0 then
 			return 'fight', lost
 		end
 	end
 	return nil, {}
-end
-
--- The side with most of a kind in a focus's totals
-function overlay.mostOf(f, metric)
-	local best, bestValue = nil, 0
-	for side, v in pairs(f.totals[metric] or {}) do
-		if v > bestValue then
-			best, bestValue = side, v
-		end
-	end
-	return best
 end
 
 -- The words for what the focus is about: headline, detail, colour, the units the headline names (or
@@ -1177,10 +1201,10 @@ function overlay.word(f, kind, lost, fresh)
 		subjects[h.unitID or -1] = at(h.x, h.z)
 		return headline, nil, player and teamInfo[h.team].color or grey, subjects, false
 	elseif kind == 'fight' then
-		-- Everyone who has lost or dealt much here, so the sides don't come and go. With one side,
-		-- it is under fire from no one known.
+		-- Everyone who has lost or dealt much here, or has much at stake or is the threat to it, so
+		-- the sides don't come and go. With one side, it is under fire from no one known.
 		local sides = {}
-		for _, metrics in ipairs({ { 'damage', 'destroyed' }, { 'dealt' } }) do
+		for _, metrics in ipairs({ { 'damage', 'destroyed' }, { 'dealt' }, { 'stake' }, { 'threat' } }) do
 			local most = 0
 			for _, metric in ipairs(metrics) do
 				for _, v in pairs(f.totals[metric] or {}) do
@@ -1200,13 +1224,6 @@ function overlay.word(f, kind, lost, fresh)
 		end
 		local headline, color = overlay.fightHeadline(sides, f)
 		return headline, stake(100), color, subjects, true
-	elseif kind == 'stake' then
-		local side = overlay.mostOf(f, 'stake')
-		if not side then
-			return
-		end
-		local name, color = overlay.side(side, f)
-		return name .. " has trouble incoming", stake(0), color, subjects, true
 	elseif kind == 'building' then
 		-- The costliest thing being built
 		local unitID, metal = nil, 0
@@ -1256,6 +1273,9 @@ end
 
 -- Once a second: what the callout says, and on a wide shot, what each side's units are worth
 function overlay.update()
+	if not overlay.order and gameFrame > 0 then
+		overlay.orderSides()
+	end
 	-- What each side's units are worth, part-built ones as far as they have got, for the wide shot.
 	-- Zero-K's end game graphs keep these per team.
 	local worth = {}
@@ -1802,7 +1822,7 @@ function overlay.drawWorth(vsx, vsy, size)
 	if #sides == 0 then
 		return
 	end
-	table.sort(sides)
+	overlay.sortSides(sides)
 	local pad, row, small = size * 0.6, size * 1.5, size * 0.85
 	local title, paired = "Metal value", #sides == 2
 	local w, nameW, valueW = gl.GetTextWidth(title) * size, 0, 0
@@ -1903,19 +1923,19 @@ function overlay.draw()
 	-- The tally: what each side has killed, and a bar split the same way
 	local tally, a, b, tallyRows = overlay.tally, nil, nil, 0
 	if next(tally) then
+		local sides = {}
 		for allyTeam in pairs(overlay.allyColor) do
-			a, b = a or allyTeam, a and allyTeam
-			tallyRows = tallyRows + 1
+			sides[#sides + 1] = allyTeam
 		end
-		tallyRows = tallyRows == 2 and 1 or 0
-		if tallyRows == 1 and a > b then
-			a, b = b, a
-		end
+		overlay.sortSides(sides)
+		a, b, tallyRows = sides[1], sides[2], #sides == 2 and 1 or 0
 		if tallyRows == 0 then
 			-- More than two sides: list them
 			local parts = {}
-			for allyTeam, destroyed in pairs(tally) do
-				parts[#parts + 1] = overlay.side(allyTeam, overlay.focus) .. " " .. overlay.metal(destroyed)
+			for _, allyTeam in ipairs(sides) do
+				if tally[allyTeam] then
+					parts[#parts + 1] = overlay.side(allyTeam, overlay.focus) .. " " .. overlay.metal(tally[allyTeam])
+				end
 			end
 			detail = (detail and detail .. "  |  " or "") .. "killed: " .. table.concat(parts, "  ")
 		end
@@ -2529,7 +2549,8 @@ function scenes.observe(info)
 end
 
 -- Returns, by cell: value at stake, the same counting only where armed units are now, the ally team
--- with most at stake, and the metal at stake (the same, at what the units cost)
+-- with most at stake, the metal at stake (the same, at what the units cost), and the ally team
+-- that most threatens the one with most at stake
 function scenes.survey()
 	local cfg, value, metal, power, powerNow = scenes, scenes.value, scenes.metal, scenes.power, scenes.powerNow
 	cfg.value, cfg.metal, cfg.power, cfg.powerNow = {}, {}, {}, {}
@@ -2548,14 +2569,17 @@ function scenes.survey()
 	end
 	cfg.activity = activity
 
-	local stake, stakeNow, owner, ownerStake, metalStake = {}, {}, {}, {}, {}
+	local stake, stakeNow, owner, ownerStake, metalStake, threatBy = {}, {}, {}, {}, {}, {}
 	for allyTeam, cells in pairs(value) do
 		for cell, v in pairs(cells) do
-			local threat, threatNow = 0, 0
+			local threat, threatNow, top, topPower = 0, 0, nil, 0
 			for enemy, enemyPower in pairs(power) do
 				if enemy ~= allyTeam then
 					threat = threat + (enemyPower[cell] or 0)
 					threatNow = threatNow + (powerNow[enemy][cell] or 0)
+					if (enemyPower[cell] or 0) > topPower then
+						top, topPower = enemy, enemyPower[cell]
+					end
 				end
 			end
 			local atStake = min(v, cfg.leverage * threat)
@@ -2564,13 +2588,13 @@ function scenes.survey()
 				stakeNow[cell] = (stakeNow[cell] or 0) + min(v, cfg.leverage * threatNow)
 				metalStake[cell] = (metalStake[cell] or 0) + min(metal[allyTeam][cell], cfg.leverage * threat)
 				if atStake > (ownerStake[cell] or 0) then
-					owner[cell], ownerStake[cell] = allyTeam, atStake
+					owner[cell], ownerStake[cell], threatBy[cell] = allyTeam, atStake, top
 				end
 			end
 		end
 	end
 	cfg.metalStake = metalStake
-	return stake, stakeNow, owner, metalStake
+	return stake, stakeNow, owner, metalStake, threatBy
 end
 
 -- The stake around a ring at (x, z): the cells under a square that takes in the ring and the cell
@@ -2617,7 +2641,7 @@ end
 -- Once a second: add to foci where the stake has risen most
 function scenes.update()
 	local cfg = scenes
-	local stake, stakeNow, owner, metalStake = scenes.survey()
+	local stake, stakeNow, owner, metalStake, threatBy = scenes.survey()
 	for cell in pairs(cfg.baseline) do
 		stake[cell] = stake[cell] or 0
 	end
@@ -2665,6 +2689,10 @@ function scenes.update()
 			added[#added + 1] = scene
 			local f = foci.add('stake', side, scene.rise, x, z)
 			if f then
+				-- Who the trouble is from, for the headline; it adds no heat
+				if threatBy[cell] then
+					foci.record(f, 'threat', threatBy[cell], scene.rise)
+				end
 				for unitID in pairs(subjects) do
 					f.units[unitID] = gameFrame
 				end
