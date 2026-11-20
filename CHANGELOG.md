@@ -34,6 +34,7 @@
 - The pointer to a single unit stops just outside the selection shape Zero-K draws for it (a square for buildings), so it no longer runs into a factory
 - The callout is placed off where its subject will be once the camera arrives, so it no longer trails a pan and overshoots, and it waits while the camera is still bringing its subject on screen. It moves off its ring as soon as it is on the line, not only once well inside
 - Headed runs (`scripts/run-replay-headed.sh`) record the window as video to `~/Downloads/replaycam/`
+- Merged foci keep the costliest unit built in either, and the camera's lead ignores the velocity of units it has stopped tracking. Unused helpers and a near-zero position extrapolation are gone
 
 ## [0.2.1] - 2023-04-02
 

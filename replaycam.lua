@@ -130,15 +130,6 @@ options = {
 
 -- UTILITY FUNCTIONS
 
--- Initialize a table.
-local function initTable(key, value)
-	local result = {}
-	if key then
-		result[key] = value
-	end
-	return result
-end
-
 -- Calculate length of a vector
 local function length(x, y, z)
 	return sqrt(x * x + y * y + (z and z * z or 0))
@@ -209,34 +200,10 @@ local function logistic(x)
 	return 1 / (1 + exp(-x))
 end
 
-local function applyDamping(old, new, rollingFraction, dt)
-	dt = dt or 1
-	local newFraction = (1 - rollingFraction) * dt
-	return (1 - newFraction) * old + newFraction * new
-end
-
-local function _apply(fun, vector, arg1, arg2)
-	local result = {}
-	for k, v in pairs(vector) do
-		result[k] = fun(v, arg1, arg2)
-	end
-	return result
-end
-
-local function _apply2(fun, vector1, vector2, arg1, arg2)
-	local result = {}
-	for k, v in pairs(vector1) do
-		result[k] = fun(v, vector2[k], arg1, arg2)
-	end
-	return result
-end
-
-local function _multiply(a, b, c)
-	return a * b * (c or 1)
-end
-
-local function _extrapolate(current, rate, dt)
-	return current + rate * dt
+-- The camera's ahead, right (level) and up vectors at this pitch and yaw
+local function cameraAxes(pitch, yaw)
+	local cp, sp, cy, sy = cos(pitch), sin(pitch), cos(yaw), sin(yaw)
+	return sy * cp, sp, cy * cp, -cy, sy, -sy * sp, cp, -cy * sp
 end
 
 -- SPRING UTILS
@@ -353,11 +320,8 @@ function UnitInfoCache:_weaponStats(unitDef)
 	local aoe = wd.impactOnly and 0 or wd.damageAreaOfEffect
 	-- Likho bomb is 192 so this gives a boost of 1 + 2.25. Feels about right.
 	local aoeBoost = 1 + (aoe * aoe) / (128 * 128)
-	-- Afterburn is difficult to quantify; dps is 15 but it also decloaks, burntime varies but
-	-- ground flames may persist, denying area and causing more damage. Shrug.
-	local afterburnBoost = 1 or ((wdcp.burntime or wd.fireStarter) and 1.5)
-    -- FIXME: Make Newton damage "important"
-	local weaponImportance = weaponDamage * aoeBoost * afterburnBoost
+	-- FIXME: Afterburn and Newton damage aren't counted
+	local weaponImportance = weaponDamage * aoeBoost
 	local range = wdcp.truerange or wd.range
 	return weaponImportance, range
 end
@@ -420,7 +384,6 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 		-- FIXME: This is set in unit_terraform.lua, but not accessible here?
 		importance = spGetUnitRulesParam(unitID, 'terraform_estimate') or importance
 		metal = importance
-		spEcho('terraform_estimate', importance)
 	end
 	local cacheObject = { unitID = unitID, name = name, allyTeam = allyTeam, unitDefID = unitDefID, importance = importance,
 		metal = metal, lastUpdatedFrame = gameFrame }
@@ -431,14 +394,12 @@ function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
 	return self:get(unitID)
 end
 
--- Returns unit info including rough position.
+-- Returns unit info including rough position: where it was up to unitInfoCacheFrames ago
 function UnitInfoCache:get(unitID)
 	local cacheObject = self.cache[unitID]
 	if cacheObject then
 		local _, isStatic, weaponImportance, weaponRange = self:_unitStats(cacheObject.unitDefID)
-		local dt = (gameFrame - cacheObject.lastUpdatedFrame) / framesPerSecond
-		local location = _apply2(_extrapolate, cacheObject.location, cacheObject.velocity, dt)
-		return location, cacheObject.velocity, cacheObject.importance, cacheObject.name, isStatic, weaponImportance, weaponRange
+		return cacheObject.location, cacheObject.velocity, cacheObject.importance, cacheObject.name, isStatic, weaponImportance, weaponRange
 	end
 	local unitTeamID = spGetUnitTeam(unitID)
 	if not unitTeamID then
@@ -821,6 +782,17 @@ function foci.kind(f, seconds)
 	return best
 end
 
+-- Add each side's amounts per metric into another such table
+local function addSides(into, from)
+	for metric, m in pairs(from) do
+		local km = into[metric] or {}
+		into[metric] = km
+		for side, v in pairs(m) do
+			km[side] = (km[side] or 0) + v
+		end
+	end
+end
+
 -- Fold gone into keep
 function foci.absorb(keep, gone)
 	local mass = keep.mass + gone.mass
@@ -830,23 +802,10 @@ function foci.absorb(keep, gone)
 	end
 	keep.mass, keep.pending, keep.heat = mass, keep.pending + gone.pending, keep.heat + gone.heat
 	for slot, bin in pairs(gone.bins) do
-		local kb = keep.bins[slot] or {}
-		keep.bins[slot] = kb
-		for metric, m in pairs(bin) do
-			local km = kb[metric] or {}
-			kb[metric] = km
-			for side, v in pairs(m) do
-				km[side] = (km[side] or 0) + v
-			end
-		end
+		keep.bins[slot] = keep.bins[slot] or {}
+		addSides(keep.bins[slot], bin)
 	end
-	for metric, m in pairs(gone.totals) do
-		local km = keep.totals[metric] or {}
-		keep.totals[metric] = km
-		for side, v in pairs(m) do
-			km[side] = (km[side] or 0) + v
-		end
-	end
+	addSides(keep.totals, gone.totals)
 	for unitID, frame in pairs(gone.units) do
 		keep.units[unitID] = max(keep.units[unitID] or 0, frame)
 	end
@@ -859,6 +818,10 @@ function foci.absorb(keep, gone)
 	end
 	if gone.order and (not keep.order or gone.order.frame > keep.order.frame) then
 		keep.order = gone.order
+	end
+	local b = gone.lastBuilt
+	if b and (not keep.lastBuilt or b.metal > keep.lastBuilt.metal) then
+		keep.lastBuilt = b
 	end
 end
 
@@ -1089,7 +1052,8 @@ function overlay.metal(amount)
 	return amount < 1000 and tostring(amount) or string.format("%d,%03d", floor(amount / 1000), amount % 1000)
 end
 
--- A headline for a fight between sides, as each side's name in its colour
+-- A headline for a fight between sides, as each side's name in its colour, and the colour for it:
+-- grey for a fight, as it is neither side's
 function overlay.fightHeadline(sides, f)
 	local list, names = {}, {}
 	for allyTeam in pairs(sides) do
@@ -1098,14 +1062,14 @@ function overlay.fightHeadline(sides, f)
 		end
 	end
 	table.sort(list)
-	local colors = {}
+	local color
 	for i, allyTeam in ipairs(list) do
-		names[i], colors[i] = overlay.side(allyTeam, f)
+		names[i], color = overlay.side(allyTeam, f)
 	end
 	if #names >= 2 then
-		return "Fight: " .. table.concat(names, " vs "), colors
+		return "Fight: " .. table.concat(names, " vs "), overlay.neutral
 	end
-	return names[1] and names[1] .. " under fire" or "Fighting", colors
+	return names[1] and names[1] .. " under fire" or "Fighting", color or overlay.neutral
 end
 
 -- How far out the ring goes: past most of the focus's units
@@ -1205,7 +1169,7 @@ function overlay.word(f, kind, lost, fresh)
 		local player = h.team and teamInfo[h.team] and overlay.player(h.team)
 		local headline
 		if h.kind == 'destroyed' then
-			headline = h.name .. overlay.blame(true, h.burning, h.by, player)
+			headline = h.name .. overlay.blame(h.burning, h.by, player)
 		else
 			headline = h.name .. (h.kind == 'built' and " built" or " captured") .. (player and " by " .. player or "")
 		end
@@ -1229,9 +1193,7 @@ function overlay.word(f, kind, lost, fresh)
 		for side in pairs(lost) do
 			sides[side] = true
 		end
-		-- Neither side's colour: it is both of theirs
-		local headline, colors = overlay.fightHeadline(sides, f)
-		local color = colors[2] and overlay.neutral or colors[1] or overlay.neutral
+		local headline, color = overlay.fightHeadline(sides, f)
 		return headline, stake(100), color, subjects, true
 	elseif kind == 'attack' then
 		local victim = next(lost) or overlay.mostOf(f, 'damage')
@@ -1246,9 +1208,9 @@ function overlay.word(f, kind, lost, fresh)
 			end
 		end
 		local victimName, victimColor = overlay.side(victim, f)
-		local byName, byColor = overlay.side(by, f)
+		local byName = by and overlay.side(by, f)
 		-- In the colour of whoever the headline is about
-		return victimName .. " under fire" .. (by and " from " .. byName or ""), stake(100), victimColor, subjects, true
+		return victimName .. " under fire" .. (byName and " from " .. byName or ""), stake(100), victimColor, subjects, true
 	elseif kind == 'stake' then
 		local side = overlay.mostOf(f, 'stake')
 		if not side then
@@ -1441,11 +1403,7 @@ end
 -- A function giving where a world point is on screen for a camera pose { look, dist, pitch, yaw }
 -- of the rig in updateCamera, like spWorldToScreenCoords does for the camera as it is
 function overlay.projector(pose, vsx, vsy)
-	local cp, sp, cy, sy = cos(pose.pitch), sin(pose.pitch), cos(pose.yaw), sin(pose.yaw)
-	-- Ahead, right (level) and up for the camera
-	local fx, fy, fz = cp * sy, sp, cp * cy
-	local rx, rz = -cy, sy
-	local ux, uy, uz = -rz * fy, rz * fx - rx * fz, rx * fy
+	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(pose.pitch, pose.yaw)
 	local look, dist = pose.look, pose.dist
 	local px, py, pz = look[1] - dist * fx, look[2] - dist * fy, look[3] - dist * fz
 	local focal = vsy / 2 / tan(rad(defaultFov) / 2)
@@ -1495,14 +1453,11 @@ function overlay.redirect(unitID, params)
 	end
 end
 
--- How a unit is being hurt, from what is known: "under attack by Rogue of Player", or with no one
--- to blame, "burning" or on its own
-function overlay.blame(destroyed, burning, unitName, player)
+-- How a unit died, from what is known: "destroyed by Rogue of Player", or with no one to blame, by
+-- fire or on its own
+function overlay.blame(burning, unitName, player)
 	local by = unitName and player and unitName .. " of " .. player or unitName or player
-	if by then
-		return (destroyed and " destroyed by " or " under attack by ") .. by
-	end
-	return burning and (destroyed and " destroyed by fire" or " burning") or (destroyed and " destroyed" or " under attack")
+	return by and " destroyed by " .. by or burning and " destroyed by fire" or " destroyed"
 end
 
 function overlay.drawWorld()
@@ -1840,6 +1795,15 @@ end
 -- On a wide shot, a board at the top of the screen with what each side's units are worth in metal.
 -- Two sides face each other across it with a bar split the same way, like the tally; more are
 -- listed a row each.
+-- A bar under a row of text from x1 to x2, split between two sides' amounts in their colours
+function overlay.splitBar(x1, x2, ty, pad, a, b, ca, cb)
+	local split = x1 + (x2 - x1) * (a + b > 0 and a / (a + b) or 0.5)
+	gl.Color(ca[1], ca[2], ca[3], 0.9)
+	gl.Rect(x1, ty - pad, split, ty - pad * 0.4)
+	gl.Color(cb[1], cb[2], cb[3], 0.9)
+	gl.Rect(split, ty - pad, x2, ty - pad * 0.4)
+end
+
 function overlay.drawWorth(vsx, vsy, size)
 	local worth, sides = overlay.worth or {}, {}
 	for allyTeam in pairs(worth) do
@@ -1890,13 +1854,7 @@ function overlay.drawWorth(vsx, vsy, size)
 		ty = ty - row
 		gl.Text(overlay.coloured(scenes.names[a] .. " " .. overlay.metal(worth[a]), overlay.allyColor[a]), bx + pad, ty, small, "o")
 		gl.Text(overlay.coloured(overlay.metal(worth[b]) .. " " .. scenes.names[b], overlay.allyColor[b]), bx + w - pad, ty, small, "or")
-		local total = worth[a] + worth[b]
-		local split = bx + pad + (w - pad * 2) * (total > 0 and worth[a] / total or 0.5)
-		local ca, cb = overlay.allyColor[a], overlay.allyColor[b]
-		gl.Color(ca[1], ca[2], ca[3], 0.9)
-		gl.Rect(bx + pad, ty - pad, split, ty - pad * 0.4)
-		gl.Color(cb[1], cb[2], cb[3], 0.9)
-		gl.Rect(split, ty - pad, bx + w - pad, ty - pad * 0.4)
+		overlay.splitBar(bx + pad, bx + w - pad, ty, pad, worth[a], worth[b], overlay.allyColor[a], overlay.allyColor[b])
 	else
 		for _, allyTeam in ipairs(sides) do
 			ty = ty - row
@@ -1945,10 +1903,6 @@ function overlay.draw()
 			overlay.box = nil
 			return
 		end
-	end
-	local across, up = 0, 0
-	for _, point in ipairs(ring or {}) do
-		across, up = max(across, math.abs(point[1] - ax)), max(up, math.abs(point[2] - ay))
 	end
 	if overlay.left and overlay.left > 50 and speed and speed < huge then
 		-- At the speed they have been closing, or flat out until that is known
@@ -2049,11 +2003,7 @@ function overlay.draw()
 		gl.Color(0.75, 0.75, 0.75, 1)
 		gl.Text("killed", bx + w / 2, ty, small, "oc")
 		-- Each side's share of the bar is what it has killed
-		local split = bx + pad + (w - pad * 2) * (tally[a] or 0) / ((tally[a] or 0) + (tally[b] or 0))
-		gl.Color(ca[1], ca[2], ca[3], 0.9)
-		gl.Rect(bx + pad, ty - pad, split, ty - pad * 0.4)
-		gl.Color(cb[1], cb[2], cb[3], 0.9)
-		gl.Rect(split, ty - pad, bx + w - pad, ty - pad * 0.4)
+		overlay.splitBar(bx + pad, bx + w - pad, ty, pad, tally[a] or 0, tally[b] or 0, ca, cb)
 	end
 	gl.LineWidth(1)
 	gl.Color(1, 1, 1, 1)
@@ -2163,8 +2113,7 @@ local function statsTrackYaw(dt, oldRy, newRy, isCut)
 	if isCut or dt <= 0 then
 		return
 	end
-	local d = (newRy - oldRy + pi) % (2 * pi) - pi
-	statsMaxYawRate = max(statsMaxYawRate, math.abs(d) / dt)
+	statsMaxYawRate = max(statsMaxYawRate, math.abs(wrapAngle(newRy - oldRy)) / dt)
 end
 
 -- Marks the shot framed once its tracking box first sits in frame (and logs rc-framed).
@@ -2228,10 +2177,8 @@ end
 -- pitch, with their projection spanning at most fill of the screen and centred on it. Perspective
 -- makes the far side look smaller, so aiming at their middle would leave more space above than below.
 local function frameBox(corners, y, yaw, pitch, fill)
-	local cp, sp, cy, sy = cos(pitch), sin(pitch), cos(yaw), sin(yaw)
-	local fx, fy, fz = sy * cp, sp, cy * cp
-	local rx, rz = -cy, sy
-	local ux, uy, uz = -sy * sp, cp, -cy * sp
+	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(pitch, yaw)
+	local sp, cy, sy = fy, -rx, rz
 	local vsx, vsy = spGetViewGeometry()
 	local tanV = tan(rad(defaultFov / 2))
 	local tanH = tanV * vsx / vsy
@@ -2284,11 +2231,7 @@ end
 -- total, and the score of the view alone without heading preferences.
 local function scoreHeading(c, yaw)
 	local lx, ly, lz = unpack(c.look)
-	local cp, sp, cy, sy = cos(c.pitch), sin(c.pitch), cos(yaw), sin(yaw)
-	-- Camera forward, right and up
-	local fx, fy, fz = sy * cp, sp, cy * cp
-	local rx, rz = -cy, sy
-	local ux, uy, uz = -sy * sp, cp, -cy * sp
+	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(c.pitch, yaw)
 	local px, py, pz = lx - c.dist * fx, ly - c.dist * fy, lz - c.dist * fz
 	local vsx, vsy = spGetViewGeometry()
 	local tanV = tan(rad(c.fov / 2))
@@ -3079,15 +3022,16 @@ local function updateCamera(dt, userCameraOverride)
 	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
 	local trackInfo, keepPrevious = display.tracking.head, false
 	while trackInfo do
+		local xv, yv, zv = 0, 0, 0
 		if not trackInfo.isDead then
 			-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
 			local noDraw = spGetUnitNoDraw(trackInfo.unitID)
 			local location = getUnitLocation(trackInfo.unitID)
-			local xv, yv, zv = spGetUnitVelocity(trackInfo.unitID)
-			if not location or not xv or not yv or not zv then
+			local uxv, uyv, uzv = spGetUnitVelocity(trackInfo.unitID)
+			if not location or not uxv then
 				trackInfo.isDead = true
 			elseif not noDraw then
-				xvSum, yvSum, zvSum = xvSum + xv, yvSum + yv, zvSum + zv
+				xv, yv, zv = uxv, uyv, uzv
 				trackInfo.location = location
 			end
 		end
@@ -3099,6 +3043,7 @@ local function updateCamera(dt, userCameraOverride)
 		if keepPrevious or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
 			xMin, xMax, zMin, zMax = nxMin, nxMax, nzMin, nzMax
 			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
+			xvSum, yvSum, zvSum = xvSum + xv, yvSum + yv, zvSum + zv
 			trackedLocationCount = trackedLocationCount + 1
 			points[trackedLocationCount] = { x, z }
 			keepPrevious = trackInfo.keepPrevious
@@ -3117,8 +3062,9 @@ local function updateCamera(dt, userCameraOverride)
 	end
 
 	-- Update the location being displayed
-	local tlocation = _apply(_multiply, { xSum, ySum, zSum }, 1 / trackedLocationCount)
-	local tvelocity = _apply(_multiply, { xvSum, yvSum, zvSum }, 1 / trackedLocationCount)
+	local n = trackedLocationCount
+	local tlocation = { xSum / n, ySum / n, zSum / n }
+	local tvelocity = { xvSum / n, yvSum / n, zvSum / n }
 	local tdiag = distance({ xMin, 0, zMin }, { xMax, 0, zMax })
 	-- Smoothly grade from camDiagMin to the target diag when the latter is 2x the former
 	tdiag = tdiag + max(0, camDiagMin - tdiag * 0.5)
@@ -3126,10 +3072,15 @@ local function updateCamera(dt, userCameraOverride)
 
 	-- Apply damping to location if relatively close, to avoid overly twitchy camera
 	if distance(display.location, tlocation) < trackDampRange then
-		local damping = 0.4
-		display.diag = applyDamping(display.diag, tdiag, damping, dt)
-		display.location = _apply2(applyDamping, display.location, tlocation, damping, dt)
-		display.velocity = _apply2(applyDamping, display.velocity, tvelocity, damping, dt)
+		-- Move 60% of the way there per second
+		local new = 0.6 * dt
+		local function damp(old, target)
+			return (1 - new) * old + new * target
+		end
+		local l, v = display.location, display.velocity
+		display.diag = damp(display.diag, tdiag)
+		display.location = { damp(l[1], tlocation[1]), damp(l[2], tlocation[2]), damp(l[3], tlocation[3]) }
+		display.velocity = { damp(v[1], tvelocity[1]), damp(v[2], tvelocity[2]), damp(v[3], tvelocity[3]) }
 	else
 		display.diag = tdiag
 		display.location = tlocation
