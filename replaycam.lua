@@ -599,6 +599,8 @@ local foci = {
 	-- An attacker this far from what it hit isn't framed with it, and one further than coreRange
 	-- is only at the focus's edge (see foci.enlist)
 	attackerRange = 768, coreRange = 384,
+	-- The camera frames a focus's other units this far from its middle (see foci.frame)
+	frameReach = 384,
 	-- At most this many foci. When full, the weakest goes for new input, unless that is weaker still.
 	cap = 32,
 	-- One-second bins, each worth binDecay times the next newer one in heat
@@ -887,17 +889,24 @@ end
 -- The middle of a focus's core units (see foci.enlist), each counting less the longer since it was
 -- in on it that way, and how far out from there most of them (three quarters by that count) are.
 -- Failing core units, its staked ones, and failing those, any. A unit just killed counts where it
--- was last seen. Nil when none of its units are left.
+-- was last seen, standing still. Also their height and velocity (per frame) by the same count. Nil
+-- when none of its units are left.
 function foci.around(f)
-	local units, total, x, z, unitFrames = {}, 0, 0, 0, foci.unitSeconds * framesPerSecond
+	local units, total, x, y, z, vx, vz = {}, 0, 0, 0, 0, 0, 0
+	local unitFrames = foci.unitSeconds * framesPerSecond
 	for _, how in ipairs({ 'core', 'staked', 'units' }) do
 		for unitID, frame in pairs(f[how]) do
 			local info = unitInfo.cache[unitID]
-			local location = getUnitLocation(unitID) or info and info.location
+			local live = getUnitLocation(unitID)
+			local location = live or info and info.location
 			local weight = max(0, 1 - (gameFrame - frame) / unitFrames)
 			if location and weight > 0 then
 				units[#units + 1] = { location, weight }
-				total, x, z = total + weight, x + weight * location[1], z + weight * location[3]
+				total, x, y, z = total + weight, x + weight * location[1], y + weight * location[2], z + weight * location[3]
+				local uvx, _, uvz = spGetUnitVelocity(unitID)
+				if live and uvx then
+					vx, vz = vx + weight * uvx, vz + weight * uvz
+				end
 			end
 		end
 		if total > 0 then
@@ -907,7 +916,7 @@ function foci.around(f)
 	if total == 0 then
 		return nil
 	end
-	x, z = x / total, z / total
+	x, y, z, vx, vz = x / total, y / total, z / total, vx / total, vz / total
 	for _, unit in ipairs(units) do
 		unit[3] = length(unit[1][1] - x, unit[1][3] - z)
 	end
@@ -919,7 +928,36 @@ function foci.around(f)
 			break
 		end
 	end
-	return x, z, far
+	return x, z, far, y, vx, vz
+end
+
+-- What the camera frames for a focus, from where its units are now: where to look (its middle, see
+-- foci.around), how that is moving, and the points that must be in shot: round most of the units it
+-- is about (inside its ring, which has a margin), the rest of its units within frameReach of the
+-- middle (the trouble on its way, a shooter further off) and a fresh highlight's spot. Nil when
+-- none of its units are left.
+function foci.frame(f)
+	local x, z, far, y, vx, vz = foci.around(f)
+	if not x then
+		return nil
+	end
+	local points, r = {}, far
+	for i = 1, 8 do
+		local angle = i * pi / 4
+		points[i] = { x + r * sin(angle), z + r * cos(angle) }
+	end
+	for unitID in pairs(f.units) do
+		local info = unitInfo.cache[unitID]
+		local location = getUnitLocation(unitID) or info and info.location
+		if location and length(location[1] - x, location[3] - z) <= foci.frameReach then
+			points[#points + 1] = { location[1], location[3] }
+		end
+	end
+	local h = f.highlight
+	if h and gameFrame - h.frame < overlay.highlightSeconds * framesPerSecond then
+		points[#points + 1] = { h.x, h.z }
+	end
+	return { x, y, z }, { vx, 0, vz }, points
 end
 
 -- Once a second: move onto its units, merge, score, then start a new bin and let foci with nothing
@@ -1130,7 +1168,7 @@ overlay.recentSeconds, overlay.holdSeconds, overlay.highlightSeconds = 6, 3, 6
 overlay.minCombat, overlay.fightShare = 30, 0.15
 -- The ring takes in most of the focus's units, within these radii, and follows the focus over
 -- about ringSeconds
-overlay.ringMin, overlay.ringMax, overlay.ringSeconds = 256, 640, 1
+overlay.ringMin, overlay.ringMax, overlay.ringSeconds = 256, 640, 0.5
 -- A fight's colour, as it is no one side's
 overlay.neutral = { 0.6, 0.6, 0.6 }
 overlay.radius = overlay.ringMin
@@ -1242,6 +1280,11 @@ end
 -- How far out the ring goes round its focus: past most of its units (see foci.around)
 function overlay.ringRadius(f)
 	local _, _, far = foci.around(f)
+	return overlay.ringFor(far)
+end
+
+-- The ring's radius when most of the focus's units are within far of its middle
+function overlay.ringFor(far)
 	return bound((far or 0) + 64, overlay.ringMin, overlay.ringMax)
 end
 
@@ -1457,8 +1500,14 @@ function overlay.follow(dt)
 	if not f or f.wide or not overlay.ringX then
 		return
 	end
+	-- Where its units are now, as the camera frames them (see foci.frame)
+	local x, z, far = foci.around(f)
+	if x then
+		overlay.ringTarget = overlay.ringFor(far)
+	end
 	local k = min(1, dt / overlay.ringSeconds)
-	overlay.ringX, overlay.ringZ = overlay.ringX + (f.x - overlay.ringX) * k, overlay.ringZ + (f.z - overlay.ringZ) * k
+	x, z = x or f.x, z or f.z
+	overlay.ringX, overlay.ringZ = overlay.ringX + (x - overlay.ringX) * k, overlay.ringZ + (z - overlay.ringZ) * k
 	overlay.radius = overlay.radius + ((overlay.ringTarget or overlay.radius) - overlay.radius) * k
 end
 
@@ -3193,7 +3242,17 @@ local function updateCamera(dt, userCameraOverride)
 	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
 	local points = {}
 	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
-	local trackInfo, keepPrevious = display.tracking.head, false
+	-- A focus on show is framed as it says (see foci.frame); a wide shot by its tracked corners
+	local look, velocity, framed
+	if shown and not shown.wide then
+		look, velocity, framed = foci.frame(shown)
+	end
+	for _, p in ipairs(framed or {}) do
+		xMin, xMax, zMin, zMax = min(xMin, p[1]), max(xMax, p[1]), min(zMin, p[2]), max(zMax, p[2])
+		trackedLocationCount = trackedLocationCount + 1
+		points[trackedLocationCount] = p
+	end
+	local trackInfo, keepPrevious = not look and display.tracking.head, false
 	while trackInfo do
 		local xv, yv, zv = 0, 0, 0
 		if not trackInfo.isDead then
@@ -3236,8 +3295,8 @@ local function updateCamera(dt, userCameraOverride)
 
 	-- Update the location being displayed
 	local n = trackedLocationCount
-	local tlocation = { xSum / n, ySum / n, zSum / n }
-	local tvelocity = { xvSum / n, yvSum / n, zvSum / n }
+	local tlocation = look or { xSum / n, ySum / n, zSum / n }
+	local tvelocity = velocity or { xvSum / n, yvSum / n, zvSum / n }
 	local tdiag = distance({ xMin, 0, zMin }, { xMax, 0, zMax })
 	-- Smoothly grade from camDiagMin to the target diag when the latter is 2x the former
 	tdiag = tdiag + max(0, camDiagMin - tdiag * 0.5)
