@@ -68,6 +68,7 @@ Transition metrics (per shot, not value-weighted):
 - `frm0` - share of shots framed at the cut: the event was already in view, or the camera teleported
 - `frm s` / `frm90` - for the other shots, median and 90th percentile seconds from the cut to the event being framed (tracking box on screen, centre in the middle half)
 - `unfrm` - share of those shots replaced before they ever framed their event
+- `ringof` / `ringpt` - once a shot has framed its event, share of time the overlay's ring has its middle out of view, or less than half of it in view. In headless runs the view is a small square, so these only compare headless runs with each other
 - `lull/m` - lull events fired per minute (fights that died down); how often they're shown is in the event type table
 - `orb/m` / `drift` - orbits per minute, and the share that were drifts on a long hold rather than to a better heading
 - `orbgn` - median view-score gain of orbits to a better heading (the threshold is `orbitConfig.margin`)

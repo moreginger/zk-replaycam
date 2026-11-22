@@ -596,8 +596,9 @@ end
 local foci = {
 	-- Input joins the nearest focus whose centre is this close, and foci this close merge
 	joinRange = 512, mergeRange = 384,
-	-- An attacker this far from what it hit isn't framed with it
-	attackerRange = 768,
+	-- An attacker this far from what it hit isn't framed with it, and one further than coreRange
+	-- is only at the focus's edge (see foci.enlist)
+	attackerRange = 768, coreRange = 384,
 	-- At most this many foci. When full, the weakest goes for new input, unless that is weaker still.
 	cap = 32,
 	-- One-second bins, each worth binDecay times the next newer one in heat
@@ -645,7 +646,7 @@ local foci = {
 function foci.new(x, z)
 	foci.lastId = foci.lastId + 1
 	local f = { id = foci.lastId, x = x, z = z, mass = 0, heat = 0, pending = 0, score = 0, watched = 0,
-		bins = {}, totals = {}, units = {}, players = {}, born = gameFrame }
+		bins = {}, totals = {}, units = {}, core = {}, staked = {}, players = {}, born = gameFrame }
 	foci.list[#foci.list + 1] = f
 	return f
 end
@@ -722,17 +723,29 @@ function foci.add(metric, allyTeam, metal, x, z, unitID, otherID)
 		end
 	end
 	if unitID then
-		f.units[unitID] = gameFrame
+		foci.enlist(f, unitID, 'core')
 		involve(unitID)
 	end
 	if otherID then
 		local location = unitInfo:get(otherID)
-		if location and length(location[1] - x, location[3] - z) <= foci.attackerRange then
-			f.units[otherID] = gameFrame
+		local d = location and length(location[1] - x, location[3] - z)
+		if d and d <= foci.attackerRange then
+			foci.enlist(f, otherID, d <= foci.coreRange and 'core' or 'edge')
 			involve(otherID)
 		end
 	end
 	return f
+end
+
+-- A unit is in on a focus, and framed with it (see trackFocus), as of now. How: 'core' when it was in
+-- what happened there, or close by; 'staked' when it is what a stake there is about; 'edge' when it
+-- is on its way or shooting in from afar. The focus goes where its core units are, failing those its
+-- staked ones (see foci.around).
+function foci.enlist(f, unitID, how)
+	f.units[unitID] = gameFrame
+	if how ~= 'edge' then
+		f[how][unitID] = gameFrame
+	end
 end
 
 -- A moment that is news in itself (see highlightMetal): { kind, metal, location, ... }. It replaces
@@ -827,8 +840,10 @@ function foci.absorb(keep, gone)
 		addSides(keep.bins[slot], bin)
 	end
 	addSides(keep.totals, gone.totals)
-	for unitID, frame in pairs(gone.units) do
-		keep.units[unitID] = max(keep.units[unitID] or 0, frame)
+	for _, how in ipairs({ 'units', 'core', 'staked' }) do
+		for unitID, frame in pairs(gone[how]) do
+			keep[how][unitID] = max(keep[how][unitID] or 0, frame)
+		end
 	end
 	for team, v in pairs(gone.players) do
 		keep.players[team] = (keep.players[team] or 0) + v
@@ -869,8 +884,55 @@ function foci.merge()
 	end
 end
 
--- Once a second: merge, score, then start a new bin and let foci with nothing left go
+-- The middle of a focus's core units (see foci.enlist), each counting less the longer since it was
+-- in on it that way, and how far out from there most of them (three quarters by that count) are.
+-- Failing core units, its staked ones, and failing those, any. A unit just killed counts where it
+-- was last seen. Nil when none of its units are left.
+function foci.around(f)
+	local units, total, x, z, unitFrames = {}, 0, 0, 0, foci.unitSeconds * framesPerSecond
+	for _, how in ipairs({ 'core', 'staked', 'units' }) do
+		for unitID, frame in pairs(f[how]) do
+			local info = unitInfo.cache[unitID]
+			local location = getUnitLocation(unitID) or info and info.location
+			local weight = max(0, 1 - (gameFrame - frame) / unitFrames)
+			if location and weight > 0 then
+				units[#units + 1] = { location, weight }
+				total, x, z = total + weight, x + weight * location[1], z + weight * location[3]
+			end
+		end
+		if total > 0 then
+			break
+		end
+	end
+	if total == 0 then
+		return nil
+	end
+	x, z = x / total, z / total
+	for _, unit in ipairs(units) do
+		unit[3] = length(unit[1][1] - x, unit[1][3] - z)
+	end
+	table.sort(units, function(a, b) return a[3] < b[3] end)
+	local far, sum = 0, 0
+	for _, unit in ipairs(units) do
+		far, sum = unit[3], sum + unit[2]
+		if sum >= 0.75 * total then
+			break
+		end
+	end
+	return x, z, far
+end
+
+-- Once a second: move onto its units, merge, score, then start a new bin and let foci with nothing
+-- left go. Events pull a focus towards where they happen as they come in; here it settles on the
+-- units in them, which the camera frames and the ring goes round, so they all agree on where it is.
 function foci.update()
+	local unitFrames = foci.unitSeconds * framesPerSecond
+	for _, f in ipairs(foci.list) do
+		local x, z = foci.around(f)
+		if x then
+			f.x, f.z = bound(x, 0, mapSizeX), bound(z, 0, mapSizeZ)
+		end
+	end
 	foci.merge()
 	local wx, _, wz = unpack(display.location)
 	local cursors = {}
@@ -879,7 +941,7 @@ function foci.update()
 			cursors[#cursors + 1] = acp
 		end
 	end
-	local best, unitFrames = 0, foci.unitSeconds * framesPerSecond
+	local best = 0
 	for _, f in ipairs(foci.list) do
 		local fresh
 		f.heat, fresh = foci.heatOf(f)
@@ -901,6 +963,13 @@ function foci.update()
 		for unitID, frame in pairs(f.units) do
 			if gameFrame - frame > unitFrames then
 				f.units[unitID] = nil
+			end
+		end
+		for _, how in ipairs({ 'core', 'staked' }) do
+			for unitID, frame in pairs(f[how]) do
+				if gameFrame - frame > unitFrames then
+					f[how][unitID] = nil
+				end
 			end
 		end
 	end
@@ -1170,17 +1239,10 @@ function overlay.fightHeadline(sides, f)
 	return names[1] and names[1] .. " under fire" or "Fighting", color or overlay.neutral
 end
 
--- How far out the ring goes: past most of the focus's units
+-- How far out the ring goes round its focus: past most of its units (see foci.around)
 function overlay.ringRadius(f)
-	local d = {}
-	for unitID in pairs(f.units) do
-		local location = unitInfo.cache[unitID] and unitInfo.cache[unitID].location
-		if location then
-			d[#d + 1] = length(location[1] - f.x, location[3] - f.z)
-		end
-	end
-	table.sort(d)
-	return bound((d[math.ceil(#d * 0.75)] or 0) + 64, overlay.ringMin, overlay.ringMax)
+	local _, _, far = foci.around(f)
+	return bound((far or 0) + 64, overlay.ringMin, overlay.ringMax)
 end
 
 -- The camera has a new shot: the callout is about its focus from now on
@@ -2177,6 +2239,11 @@ local function statsFlush(userOverride)
 	if display.asideFrame and gameFrame - display.asideFrame < updateIntervalFrames then
 		spEcho(string.format('rc-aside,%.0f,%.0f', aside[1], aside[2]))
 	end
+	-- Where the ring is, for stats to check against the view: a ring off the shot means the overlay
+	-- thinks the action is somewhere the camera isn't showing
+	if overlay.ringed and overlay.ringX then
+		spEcho(string.format('rc-ring,%.0f,%.0f,%.0f', overlay.ringX, overlay.ringZ, overlay.radius))
+	end
 end
 
 local function statsTrackYaw(dt, oldRy, newRy, isCut)
@@ -2681,7 +2748,7 @@ function scenes.around(stake, x, z)
 end
 
 -- The mobile units near (x, z), or failing that the buildings, and the armed units of sides other
--- than side further out: the trouble coming. Nil if none.
+-- than side further out: the trouble coming, also returned on their own. Nil if none.
 function scenes.subjects(x, z, side)
 	local mobiles, statics, threats = {}, {}, {}
 	for _, unitID in ipairs(spGetUnitsInCylinder(x, z, scenes.threatRadius)) do
@@ -2699,7 +2766,7 @@ function scenes.subjects(x, z, side)
 			subjects[unitID] = location
 		end
 	end
-	return subjects
+	return subjects, threats
 end
 
 -- Once a second: add to foci where the stake has risen most
@@ -2748,7 +2815,10 @@ function scenes.update()
 
 		local x, z, cell = scene.x, scene.z, scene.cell
 		local side = owner[cell]
-		local subjects = apart and side and scenes.subjects(x, z, side)
+		local subjects, threats
+		if apart and side then
+			subjects, threats = scenes.subjects(x, z, side)
+		end
 		if subjects and side then
 			added[#added + 1] = scene
 			local f = foci.add('stake', side, scene.rise, x, z)
@@ -2758,7 +2828,7 @@ function scenes.update()
 					foci.record(f, 'threat', threatBy[cell], scene.rise)
 				end
 				for unitID in pairs(subjects) do
-					f.units[unitID] = gameFrame
+					foci.enlist(f, unitID, threats[unitID] and 'edge' or 'staked')
 				end
 			end
 			if STATS then

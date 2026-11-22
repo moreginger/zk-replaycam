@@ -133,6 +133,7 @@ def new_game(name):
         'scenes': [],   # [frame, x, z, rise, soonShare]: scene events added
         'deaths': [],   # [frame, unitDef, x, z, value, allyTeam]
         'damage': [],   # [frame, x, z, value]
+        'rings': [],    # [frame, x, z, radius]: the overlay's ring, each second it is drawn
     }
 
 
@@ -228,6 +229,8 @@ def parse_rc(game, frame, kind, f):
             game['deaths'].append([frame, f[0], float(f[1]), float(f[3]), float(f[4]), int(f[5])])
         elif kind == 'dmg':
             game['damage'].append([frame, float(f[0]), float(f[1]), float(f[2])])
+        elif kind == 'ring':
+            game['rings'].append([frame, float(f[0]), float(f[1]), float(f[2])])
     except (ValueError, IndexError):
         print(f'warning: bad rc-{kind} line: {",".join(f)}', file=sys.stderr)
 
@@ -535,6 +538,22 @@ def compute_metrics(game, ref_area):
         metrics['frame_s_median'] = statistics.median(travel) if travel else None
         metrics['frame_s_p90'] = percentile(travel, 0.9)
         metrics['unframed_cut_share'] = unframed / (unframed + len(travel)) if unframed + len(travel) else None
+    # The ring off the shot, once the shot has framed its subject: the overlay thinks the action is
+    # somewhere the camera isn't showing
+    rings = game.get('rings', [])
+    if rings and framed and shown:
+        starts = [s[0] for s in shown]
+        settled = []
+        for frame, x, z, r in rings:
+            i = bisect.bisect_right(starts, frame) - 1
+            v = view_at(frame)
+            if i >= 0 and v and any(shown[i][0] <= f <= frame and e == shown[i][1] for f, e in framed):
+                points = [(x + r * math.sin(a * math.pi / 12), z + r * math.cos(a * math.pi / 12)) for a in range(24)]
+                on = sum(1 for px, pz in points if sees(v, px, pz)) / len(points)
+                settled.append((on, sees(v, x, z)))
+        if settled:
+            metrics['ring_off_share'] = sum(1 for _, m in settled if not m) / len(settled)
+            metrics['ring_part_share'] = sum(1 for on, _ in settled if on < 0.5) / len(settled)
     orbits = game.get('orbits', [])
     if orbits:
         metrics['orbits_per_min'] = len(orbits) / minutes
@@ -604,6 +623,8 @@ SUMMARY_COLUMNS = [
     ('frame_s_median', 'frm s', '{:.1f}', False),
     ('frame_s_p90', 'frm90', '{:.1f}', False),
     ('unframed_cut_share', 'unfrm', '{:.0%}', False),
+    ('ring_off_share', 'ringof', '{:.0%}', False),
+    ('ring_part_share', 'ringpt', '{:.0%}', False),
     ('orbits_per_min', 'orb/m', '{:.1f}', None),
     ('orbit_drift_share', 'drift', '{:.0%}', None),
     ('orbit_gain_median', 'orbgn', '{:.2f}', None),

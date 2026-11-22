@@ -43,6 +43,8 @@
 - Sides keep one order in fight headlines, kill tallies and the metal value board: as they started on the map, west to east, or north to south when they started further apart that way
 - Contact: an armed unit closing to weapon range of an enemy it can hit (air or ground) heats the focus where it will hit, by the metal it could destroy there in a second, more the sooner it gets there, up to 6s ahead. While a unit on show is due in range within 3s, a challenger needs 1.5x more to cut away, so a raid isn't left just before it strikes
 - The pointer to a unit in the air, jumping or flying, stops at its selection shape where the unit is, not on the ground below, so it no longer disappears
+- A focus settles each second on the middle of its units, each counting less the longer since it was involved, so it keeps up with units on the move and is where the camera is looking. Units in what happened there count; failing those, the units a stake is about; units on their way and attackers shooting in from more than 384 away count only when there are no others. They are still framed. The ring goes round the focus, out past three quarters of the same units, so it stays tight round the action and on screen
+- `ringof` and `ringpt` stats: how often the ring is off the shot
 - Headed runs can record at a set frame rate (`FPS`) and quality (`QUANT`), and draw the game frame (`SYNC=1`) so `scripts/stack-videos.py` can stack two recordings in step by game time, to compare versions side by side
 
 ## [0.2.1] - 2023-04-02
