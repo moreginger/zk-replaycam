@@ -54,6 +54,8 @@
 - Near the map's edge the camera looks off centre, so less of the view is off the map: by how much of the screen is off it (far ground off the map near the horizon counts for less), up to 30% of the way to the screen's edge, and as far as what it frames stays on screen. The shot's middle keeps its place on screen as the lens zooms, and a close shot zooms in only as far as its units stay on screen from there
 - Orbits judge headings as seen without the zoom, so close shots circle too
 - The callout keeps further off a unit, and further again when zoomed in
+- A callout about something built names the costliest thing finished at its focus, each fading as its heat does, so something finished since takes over after a few seconds. It named the costliest in the 8s before the last one taken, so a solar collector could be named well after the units built since, and the shot went back to it
+- What the callout says holds for 3s before it names other units or moves on to something else, so it no longer changes twice in a second. A fight's sides and a highlight still change it at once
 - Pointers stop twice as far outside a unit's selection shape, and their gaps grow with the lens's zoom as the units do
 - Headed runs can record at a set frame rate (`FPS`) and quality (`QUANT`), and draw the game frame (`SYNC=1`) so `scripts/stack-videos.py` can stack two recordings in step by game time, to compare versions side by side
 

@@ -608,8 +608,6 @@ local foci = {
 	-- a capture costing captureHighlightMetal, or finishing something costing builtHighlightMetal.
 	-- One adds its metal to the score, halving every highlightHalfLife seconds and ignoring passe.
 	highlightMetal = 750, captureHighlightMetal = 300, builtHighlightMetal = 1500, highlightHalfLife = 3,
-	-- The callout names the costliest thing built at a focus in this long
-	builtKeepSeconds = 8,
 	-- A unit morphed (or a commander upgraded) from another counts as this share of its cost: the
 	-- player paid only the difference, but it can change a lot. Units being morphed into are kept.
 	morphShare = 0.5, morphed = {},
@@ -1200,7 +1198,8 @@ overlay.textSize, overlay.arrowWidth = 16, 36
 -- How opaque the pointer and the ring are
 overlay.lineAlpha = 0.8
 -- The callout speaks of the last recentSeconds. Something new to say replaces what it says once it
--- has held for holdSeconds, but a highlight leads at once, for highlightSeconds.
+-- has held for holdSeconds, whether about something else or naming other units, but a highlight
+-- leads at once, for highlightSeconds, and a fight's sides change at once.
 overlay.recentSeconds, overlay.holdSeconds, overlay.highlightSeconds = 6, 3, 6
 -- Fighting is what the callout is about once this much metal has been lost lately. A side is in
 -- the fight if it has lost at least fightShare of what the side losing most has.
@@ -1330,6 +1329,7 @@ end
 -- The camera has a new shot: the callout is about its focus from now on
 function overlay.show(f)
 	overlay.focus, overlay.kind, overlay.pending, overlay.headline, overlay.detail = f, nil, nil, nil, nil
+	overlay.said, overlay.saidFrame = nil, nil
 	overlay.subjects, overlay.tally, overlay.ringed = {}, {}, false
 	overlay.arrowFrom, overlay.arrowTo, overlay.left, overlay.closing = nil, nil, nil, nil
 	if not f.wide then
@@ -1503,7 +1503,8 @@ function overlay.update()
 	local fresh = false
 	if kind and kind ~= overlay.kind then
 		if not overlay.kind or kind == 'highlight' or overlay.kind == 'highlight' or kind == 'fight'
-		    or kind == overlay.pending and gameFrame - overlay.pendingFrame >= overlay.holdSeconds * framesPerSecond then
+		    or kind == overlay.pending and gameFrame - overlay.pendingFrame >= overlay.holdSeconds * framesPerSecond
+		    and gameFrame - (overlay.saidFrame or 0) >= overlay.holdSeconds * framesPerSecond then
 			overlay.kind, overlay.pending, fresh = kind, nil, true
 		elseif kind ~= overlay.pending then
 			overlay.pending, overlay.pendingFrame = kind, gameFrame
@@ -1512,6 +1513,15 @@ function overlay.update()
 		overlay.pending = nil
 	end
 	local headline, detail, color, subjects, ringed = overlay.word(f, overlay.kind, lost, fresh)
+	local said = headline and headline .. ':' .. tostring(next(subjects) or '')
+	if said and said ~= overlay.said then
+		if not fresh and overlay.said and overlay.kind ~= 'fight' and overlay.kind ~= 'highlight'
+		    and gameFrame - overlay.saidFrame < overlay.holdSeconds * framesPerSecond then
+			headline = nil
+		else
+			overlay.said, overlay.saidFrame = said, gameFrame
+		end
+	end
 	if headline then
 		if DEBUG and headline ~= overlay.headline then
 			spEcho(string.format('rc-callout,%s,%d,%s', overlay.kind, f.id, headline))
@@ -3278,10 +3288,12 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	local verb = morphed and (foci.isCommander(unitID, unitDef) and " upgraded" or " morphed") or " built"
 	local f = foci.add('built', allyTeam, metal, x, z, unitID)
 	if f then
-		-- Also counted, for the callout. It names the costliest thing finished lately.
+		-- Also counted, for the callout. It names the costliest thing finished, each fading as heat
+		-- does, so a cheaper unit finished since takes over after a few seconds. As all fade alike,
+		-- the one named only changes when something new is finished.
 		foci.record(f, 'units', allyTeam, 1)
 		local b = f.lastBuilt
-		if not b or metal >= b.metal or gameFrame - b.frame > foci.builtKeepSeconds * framesPerSecond then
+		if not b or metal >= b.metal * foci.binDecay ^ ((gameFrame - b.frame) / framesPerSecond) then
 			f.lastBuilt = { unitID = unitID, name = name, team = unitTeam, x = x, z = z, metal = metal, frame = gameFrame, verb = verb }
 		end
 	end
@@ -3485,7 +3497,7 @@ local function updateCamera(dt, userCameraOverride)
 	local want, why = closeUp.wanted(c, fit, opening, c.tzoom > 1)
 	if DEBUG and gameFrame % framesPerSecond == 0 and c.wantLogged ~= gameFrame then
 		c.wantLogged = gameFrame
-		spEcho(string.format('rc-want,%d,%.2f,%.2f,%s,%.0f,%.0f', shown.id, fit, want, why or '', tshift[1], tshift[2]))
+		spEcho(string.format('rc-want,%d,%.2f,%.2f,%s,%.0f,%.0f', shown.id, min(fit, 99), want, why or '', tshift[1], tshift[2]))
 	end
 	local quick, was = false, c.tzoom
 	if opening or isCut then
@@ -3508,7 +3520,7 @@ local function updateCamera(dt, userCameraOverride)
 	if DEBUG and c.zoomFrame == gameFrame and c.loggedZoom ~= gameFrame then
 		c.loggedZoom = gameFrame
 		spEcho(string.format('rc-zoomto,%d,%s,%.2f,%s,%.2f', shown.id, overlay.kind or 'nil', tzoom,
-			opening and (isCut and 'cut' or 'pan') or quick and 'tight' or 'decided', fit))
+			opening and (isCut and 'cut' or 'pan') or quick and 'tight' or 'decided', min(fit, 99)))
 	end
 	if isCut then
 		c.zoom, c.zoomv = tzoom, 0
