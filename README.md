@@ -35,6 +35,10 @@ Install [replaycam.lua](./replaycam.lua) as a local widget, as per the [instruct
 
 - Doesn't interact well with Alt+Tab overview mode.
 
+## Possible improvements
+
+- Unit icon distance: the engine swaps units for icons beyond a set range from the camera (the `UnitIconDist` setting, `/disticon` in game). A close shot taken with a narrower lens from the usual height could still show icons. The widget could raise the range while it has the camera, and put the player's setting back afterwards, as it does with the camera settings.
+
 ## Measuring the camera
 
 Set `STATS = true` (or `DEBUG = true`) in `replaycam.lua`, watch one or more replays, then run:
@@ -70,6 +74,8 @@ Transition metrics (per shot, not value-weighted):
 - `unfrm` - share of those shots replaced before they ever framed their event
 - `ringof` / `ringpt` - once a shot has framed its event, share of time the overlay's ring has its middle out of view, or less than half of it in view. In headless runs the view is a small square, so these only compare headless runs with each other
 - `lull/m` - lull events fired per minute (fights that died down); how often they're shown is in the event type table
+- `close` / `clzoom` - share of time on a close shot (the lens zoomed in at least 1.2x), and the mean zoom then
+- `cldth` / `clseen` - deaths during close shots within 1500 of the middle of the shot, and the share of them (by value) seen: a close shot that misses them was too close
 - `orb/m` / `drift` - orbits per minute, and the share that were drifts on a long hold rather than to a better heading
 - `orbgn` - median view-score gain of orbits to a better heading (the threshold is `orbitConfig.margin`)
 - `south` - share of time the camera faces more than 90 degrees from north

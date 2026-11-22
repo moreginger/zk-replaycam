@@ -41,6 +41,8 @@ CLUSTER_WINDOW_S = 5
 CLUSTER_PAD = 400           # elmos padding around the action's bounding box
 JUMP_DISTANCE = 1536        # footprint centre moving further than this in 1s is a cut
 FRAMED_AT_CUT_S = 0.2      # shots framed this soon after the cut didn't need to travel
+CLOSE_ZOOM = 1.2           # a close shot: the lens zoomed in at least this much
+CLOSE_NEAR = 1500          # elmos from the middle of a close shot: a death this near might have been seen less close
 PINGPONG_S = 10
 PINGPONG_RANGE = 512
 SHORT_SHOT_S = 3            # shots this long or shorter count as quick cuts
@@ -134,6 +136,7 @@ def new_game(name):
         'deaths': [],   # [frame, unitDef, x, z, value, allyTeam]
         'damage': [],   # [frame, x, z, value]
         'rings': [],    # [frame, x, z, radius]: the overlay's ring, each second it is drawn
+        'zooms': [],    # [frame, zoom]: the lens zoomed in for a close shot, each second it is
     }
 
 
@@ -231,6 +234,8 @@ def parse_rc(game, frame, kind, f):
             game['damage'].append([frame, float(f[0]), float(f[1]), float(f[2])])
         elif kind == 'ring':
             game['rings'].append([frame, float(f[0]), float(f[1]), float(f[2])])
+        elif kind == 'zoom':
+            game['zooms'].append([frame, float(f[0])])
     except (ValueError, IndexError):
         print(f'warning: bad rc-{kind} line: {",".join(f)}', file=sys.stderr)
 
@@ -554,6 +559,17 @@ def compute_metrics(game, ref_area):
         if settled:
             metrics['ring_off_share'] = sum(1 for _, m in settled if not m) / len(settled)
             metrics['ring_part_share'] = sum(1 for on, _ in settled if on < 0.5) / len(settled)
+    # Close shots: seconds the lens was zoomed in at least CLOSE_ZOOM, and deaths near them then seen
+    close = {z[0] // FPS: z[1] for z in game.get('zooms', []) if z[1] >= CLOSE_ZOOM}
+    metrics['close_share'] = len(close) / len(game['cam']) if game['cam'] else None
+    metrics['close_zoom'] = statistics.mean(close.values()) if close else None
+    during = []
+    for g in graded:
+        v = view_at(g['frame'])
+        if g['frame'] // FPS in close and v and math.hypot(g['x'] - v.centre[0], g['z'] - v.centre[1]) <= CLOSE_NEAR:
+            during.append(g)
+    metrics['close_deaths'] = len(during)
+    metrics['close_seen'] = weighted_mean([(g['seen'], g['value']) for g in during]) if during else None
     orbits = game.get('orbits', [])
     if orbits:
         metrics['orbits_per_min'] = len(orbits) / minutes
@@ -625,6 +641,10 @@ SUMMARY_COLUMNS = [
     ('unframed_cut_share', 'unfrm', '{:.0%}', False),
     ('ring_off_share', 'ringof', '{:.0%}', False),
     ('ring_part_share', 'ringpt', '{:.0%}', False),
+    ('close_share', 'close', '{:.0%}', None),
+    ('close_zoom', 'clzoom', '{:.2f}', None),
+    ('close_deaths', 'cldth', '{:d}', None),
+    ('close_seen', 'clseen', '{:.0%}', True),
     ('orbits_per_min', 'orb/m', '{:.1f}', None),
     ('orbit_drift_share', 'drift', '{:.0%}', None),
     ('orbit_gain_median', 'orbgn', '{:.2f}', None),

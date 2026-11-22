@@ -413,8 +413,9 @@ local transitionCost
 -- CAMERA
 
 local camTypeTracking = 'tracking'
--- The tracked units' centre is smoothed while it moves less than this in an update
-local trackDampRange = 256
+-- The tracked units' centre is smoothed while it moves less than this in an update, moving this
+-- share of the way there a second
+local trackDampRange, trackDampRate = 256, 0.6
 local camDiagMin = 1000
 -- Share of the screen a shot's box may span, as projected, per axis (see frameBox)
 local frameFill = 0.58
@@ -434,6 +435,28 @@ local panArcRise, panArcMax = 0.4, 0.75
 local maxShotYawChange = pi / 3
 -- Cut rather than pan when the pan would take longer than this
 local maxPanSeconds = 1.8
+-- Close shots: a tight focus with nothing else going on near it is framed closer by narrowing the
+-- lens, as a documentary or sports camera zooms in, rather than by moving the camera in. Each new
+-- shot, cut or panned to, settles its zoom straight away, except that a fight opens at the usual
+-- framing to set the scene. After that the zoom only changes once the shot has wanted the change
+-- for a while, and not within holdSeconds of the last change, so it doesn't go in and out with
+-- every jump or flicker of heat nearby: going in as the action starts after enterSeconds, and
+-- staying in after it ends for leaveSeconds; but at once if its units no longer fit. A shot can't
+-- open close within restSeconds of the last close-up ending, so close-ups don't follow each other
+-- shot after shot; a shot can still go close as its action starts.
+local closeUp = {
+	-- Zoom (on the field of view) at most this much
+	maxZoom = 1.6,
+	-- Close when the shot's units would still fit zoomed in enterZoom; once close, until leaveZoom
+	enterZoom = 1.4, leaveZoom = 1.15,
+	-- Not while another focus hotter than the shot is within range of it, or one with imminentShare
+	-- of its heat has something about to arrive (see foci.contact)
+	range = worldGridSize * 3, rivalShare = 1, imminentShare = 0.2,
+	enterSeconds = 1.5, leaveSeconds = 4, holdSeconds = 3, restSeconds = 15,
+	-- Zoom changes take about twice smooth (s), or twice quickSmooth when the units are leaving the
+	-- screen: zoomed in more than tooTight times what fits (which leaves a margin; see frameFill)
+	smooth = 0.5, quickSmooth = 0.25, tooTight = 1.6,
+}
 -- Lulls: when a fight dies down, a wide, north-facing shot of the foci with most going on is offered.
 -- It is offered once per fight, when recent damage drops well below its recent peak, scoring that
 -- peak, so bigger fights ending are more likely to be shown.
@@ -516,6 +539,10 @@ local shotLockBoost = 2
 -- A unit can be counted as stunned again after this long
 local stunFrames = 10 * framesPerSecond
 local mapEdgeBorder = worldGridSize * 0.5
+-- Near the map's edge the camera looks off centre to keep less of the view off the map, as long as
+-- what it frames stays within edgeFill of the screen, and the middle of the shot within edgeOffset
+-- of the way from the middle of the screen to its edge (see edgeShift)
+local edgeFill, edgeOffset = 0.95, 0.3
 
 -- A shot counts as framed once its tracking box is on screen and its centre is in the middle half.
 local framedCentre = 0.25
@@ -546,6 +573,11 @@ local foci = {
 	attackerRange = 768, coreRange = 384,
 	-- The camera frames a focus's other units this far from its middle (see foci.frame)
 	frameReach = 384,
+	-- A close shot keeps the focus's units within contextReach on screen, if not framed (see closeUp)
+	contextReach = 768,
+	-- A shot about particular units (see foci.frame) leaves room ahead of them for where they will be
+	-- in leadSeconds, up to leadMax away
+	leadSeconds = 2, leadMax = 400,
 	-- At most this many foci. When full, the weakest goes for new input, unless that is weaker still.
 	cap = 32,
 	-- One-second bins, each worth binDecay times the next newer one in heat
@@ -560,8 +592,8 @@ local foci = {
 	-- A unit due in range within imminentSeconds holds its focus on show: a challenger needs
 	-- imminentBoost times more to cut away just before the action
 	imminentSeconds = 3, imminentBoost = 1.5,
-	-- A unit is framed with its focus for this long after it was last involved
-	unitSeconds = 8,
+	-- A unit is framed with its focus for this long after it was last involved, or once dead, deadSeconds
+	unitSeconds = 8, deadSeconds = 2,
 	-- A unit's orders count once in this long
 	orderSeconds = 8,
 	-- Passe: seconds watched, rising by 1/s while the camera is within passeRange and falling by
@@ -831,25 +863,23 @@ end
 
 -- The middle of a focus's core units (see foci.enlist), each counting less the longer since it was
 -- in on it that way, and how far out from there most of them (three quarters by that count) are.
--- Failing core units, its staked ones, and failing those, any. A unit just killed counts where it
--- was last seen, standing still. Also their height and velocity (per frame) by the same count. Nil
--- when none of its units are left.
+-- Failing core units, its staked ones, and failing those, any. When they are in more than one
+-- group (units within coreRange of one of them), the middle of the heaviest, rather than the empty
+-- ground between them. A dead unit counts where it was last seen, for deadSeconds: the action has
+-- moved on. Also their height, and the middle of all of them, which is where the focus itself
+-- sits. Nil when none of its units are left.
 function foci.around(f)
-	local units, total, x, y, z, vx, vz = {}, 0, 0, 0, 0, 0, 0
-	local unitFrames = foci.unitSeconds * framesPerSecond
+	local units, total, x, y, z = {}, 0, 0, 0, 0
 	for _, how in ipairs({ 'core', 'staked', 'units' }) do
 		for unitID, frame in pairs(f[how]) do
 			local info = unitInfo.cache[unitID]
 			local live = getSeenLocation(unitID)
 			local location = live or info and info.location
-			local weight = max(0, 1 - (gameFrame - frame) / unitFrames)
+			local seconds = (live or not info or not info.removeAfterFrame) and foci.unitSeconds or foci.deadSeconds
+			local weight = max(0, 1 - (gameFrame - frame) / (seconds * framesPerSecond))
 			if location and weight > 0 then
 				units[#units + 1] = { location, weight }
 				total, x, y, z = total + weight, x + weight * location[1], y + weight * location[2], z + weight * location[3]
-				local uvx, _, uvz = spGetUnitVelocity(unitID)
-				if live and uvx then
-					vx, vz = vx + weight * uvx, vz + weight * uvz
-				end
 			end
 		end
 		if total > 0 then
@@ -859,10 +889,37 @@ function foci.around(f)
 	if total == 0 then
 		return nil
 	end
-	x, y, z, vx, vz = x / total, y / total, z / total, vx / total, vz / total
+	local mx, mz = x / total, z / total
+	local best, most = nil, 0
+	for _, a in ipairs(units) do
+		local weight = 0
+		for _, b in ipairs(units) do
+			if length(a[1][1] - b[1][1], a[1][3] - b[1][3]) <= foci.coreRange then
+				weight = weight + b[2]
+			end
+		end
+		if weight > most then
+			best, most = a, weight
+		end
+	end
+	total, x, y, z = 0, 0, 0, 0
+	for _, unit in ipairs(units) do
+		local location, weight = unit[1], unit[2]
+		if length(location[1] - best[1][1], location[3] - best[1][3]) <= foci.coreRange then
+			total, x, y, z = total + weight, x + weight * location[1], y + weight * location[2], z + weight * location[3]
+		end
+	end
+	x, y, z = x / total, y / total, z / total
+	-- How far out from there most of its units are, leaving out another group's
+	local near = {}
+	total = 0
 	for _, unit in ipairs(units) do
 		unit[3] = length(unit[1][1] - x, unit[1][3] - z)
+		if unit[3] <= 2 * foci.coreRange then
+			near[#near + 1], total = unit, total + unit[2]
+		end
 	end
+	units = near
 	table.sort(units, function(a, b) return a[3] < b[3] end)
 	local far, sum = 0, 0
 	for _, unit in ipairs(units) do
@@ -871,54 +928,80 @@ function foci.around(f)
 			break
 		end
 	end
-	return x, z, far, y, vx, vz
+	return x, z, far, y, mx, mz
 end
 
--- What the camera frames for a focus, from where its units are now: where to look (its middle, see
--- foci.around), how that is moving, and the points that must be in shot: round most of the units it
--- is about (inside its ring, which has a margin), the rest of its units within frameReach of the
--- middle (the trouble on its way, a shooter further off) and a fresh highlight's spot. With none of
--- its units left, its spot. A wide shot frames its corners.
-function foci.frame(f)
+-- What the camera frames for a focus, from where its units are now: where to look, how that is
+-- moving (per frame), the points that must be in shot, and the further units a close shot should
+-- still keep on screen (contextReach). When the callout names units (subjects: unitID -> last
+-- location), the shot is about them: it looks ahead of them by where they are going, so they sit
+-- back from the middle with room in front. Otherwise it looks at the focus's middle (see
+-- foci.around), keeping round most of the units it is about (inside its ring, which has a
+-- margin) and a fresh highlight's spot. Either way, with the rest of its units within frameReach
+-- (the trouble on its way, a shooter further off). A wide shot frames its corners.
+function foci.frame(f, subjects)
 	if f.wide then
 		local look, points = { 0, 0, 0 }, {}
 		for i, c in ipairs(f.corners) do
 			look = { look[1] + c[1] / #f.corners, look[2] + c[2] / #f.corners, look[3] + c[3] / #f.corners }
 			points[i] = { c[1], c[3] }
 		end
-		return look, { 0, 0, 0 }, points
+		return look, { 0, 0, 0 }, points, {}
 	end
-	local x, z, far, y, vx, vz = foci.around(f)
-	if not x then
-		x, z, far, vx, vz = f.x, f.z, 0, 0, 0
-		y = spGetGroundHeight(x, z)
+	local points, n, x, y, z, vx, vz = {}, 0, 0, 0, 0, 0, 0
+	for unitID, last in pairs(subjects or {}) do
+		local location = getSeenLocation(unitID) or last
+		local uvx, _, uvz = spGetUnitVelocity(unitID)
+		points[#points + 1] = { location[1], location[3] }
+		n, x, y, z = n + 1, x + location[1], y + location[2], z + location[3]
+		vx, vz = vx + (uvx or 0), vz + (uvz or 0)
 	end
-	local points, r = {}, far
-	for i = 1, 8 do
-		local angle = i * pi / 4
-		points[i] = { x + r * sin(angle), z + r * cos(angle) }
+	if n > 0 then
+		x, y, z, vx, vz = x / n, y / n, z / n, vx / n, vz / n
+		local lx, lz = vx * foci.leadSeconds * framesPerSecond, vz * foci.leadSeconds * framesPerSecond
+		local lead = length(lx, lz)
+		if lead > foci.leadMax then
+			lx, lz = lx * foci.leadMax / lead, lz * foci.leadMax / lead
+		end
+		points[#points + 1] = { x + 2 * lx, z + 2 * lz }
+		x, z = x + lx, z + lz
+	else
+		local far
+		x, z, far, y = foci.around(f)
+		if not x then
+			x, z, far = f.x, f.z, 0
+			y = spGetGroundHeight(x, z)
+		end
+		for i = 1, 8 do
+			local angle = i * pi / 4
+			points[i] = { x + far * sin(angle), z + far * cos(angle) }
+		end
+		local h = f.highlight
+		if h and gameFrame - h.frame < overlay.highlightSeconds * framesPerSecond then
+			points[#points + 1] = { h.x, h.z }
+		end
 	end
+	local context = {}
 	for unitID in pairs(f.units) do
 		local info = unitInfo.cache[unitID]
 		local location = getSeenLocation(unitID) or info and info.location
-		if location and length(location[1] - x, location[3] - z) <= foci.frameReach then
+		local d = location and length(location[1] - x, location[3] - z)
+		if d and d <= foci.frameReach then
 			points[#points + 1] = { location[1], location[3] }
+		elseif d and d <= foci.contextReach then
+			context[#context + 1] = { location[1], location[3] }
 		end
 	end
-	local h = f.highlight
-	if h and gameFrame - h.frame < overlay.highlightSeconds * framesPerSecond then
-		points[#points + 1] = { h.x, h.z }
-	end
-	return { x, y, z }, { vx, 0, vz }, points
+	return { x, y, z }, { vx, 0, vz }, points, context
 end
 
 -- Once a second: move onto its units, merge, score, then start a new bin and let foci with nothing
 -- left go. Events pull a focus towards where they happen as they come in; here it settles on the
--- units in them, which the camera frames and the ring goes round, so they all agree on where it is.
+-- middle of the units in them (the camera and the ring keep to the heaviest group of those).
 function foci.update()
 	local unitFrames = foci.unitSeconds * framesPerSecond
 	for _, f in ipairs(foci.list) do
-		local x, z = foci.around(f)
+		local _, _, _, _, x, z = foci.around(f)
 		if x then
 			f.x, f.z = bound(x, 0, mapSizeX), bound(z, 0, mapSizeZ)
 		end
@@ -1075,7 +1158,11 @@ function foci.order(f, unitID, team, name, from, to)
 		o = { team = team, units = {}, names = {} }
 		f.order = o
 	end
-	o.frame, o.from, o.to, o.unitID = gameFrame, { from[1], from[3] }, { to[1], to[3] }, unitID
+	-- The arrow stays with the unit it is from while the squad gets its orders
+	o.frame = gameFrame
+	if not o.unitID or o.unitID == unitID then
+		o.from, o.to, o.unitID = { from[1], from[3] }, { to[1], to[3] }, unitID
+	end
 	if not o.units[unitID] then
 		o.units[unitID], o.names[name] = true, (o.names[name] or 0) + 1
 	end
@@ -1533,13 +1620,13 @@ function overlay.ring(x, z, radius, n, project, y)
 	return points
 end
 
--- A function giving where a world point is on screen for a camera pose { look, dist, pitch, yaw }
+-- A function giving where a world point is on screen for a camera pose { look, dist, pitch, yaw, fov }
 -- of the rig in updateCamera, like spWorldToScreenCoords does for the camera as it is
 function overlay.projector(pose, vsx, vsy)
 	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(pose.pitch, pose.yaw)
 	local look, dist = pose.look, pose.dist
 	local px, py, pz = look[1] - dist * fx, look[2] - dist * fy, look[3] - dist * fz
-	local focal = vsy / 2 / tan(rad(defaultFov) / 2)
+	local focal = vsy / 2 / tan(rad(pose.fov or defaultFov) / 2)
 	return function(x, y, z)
 		local dx, dy, dz = x - px, y - py, z - pz
 		local depth = max(1, dx * fx + dy * fy + dz * fz)
@@ -1643,7 +1730,8 @@ end
 -- after that, and only moves when it is in the way or for a clear gain: a new shot keeps it where
 -- it is on screen if that will do.
 function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
-	local reach, margin = vsy * 0.06, vsy * 0.02
+	-- Off the subject by at least reach, more when zoomed in as the units are bigger on screen
+	local reach, margin = vsy * 0.08 * (camera.settled and camera.settled.zoom or 1), vsy * 0.02
 	local xMax, yMax = max(10, vsx - w - 10), max(10, vsy - h - 10)
 	local fresh = overlay.placedFor ~= overlay.focus
 	local box, offset = overlay.box, overlay.offset
@@ -2095,10 +2183,12 @@ function overlay.draw()
 	local onLeft, below = bx + w / 2 < ax, by + h / 2 < ay
 	local ex, cy = onLeft and bx + w - t or bx, below and by + h or by
 	local cx, my = ex + t / 2, below and cy - t / 2 or cy + t / 2
-	local px, py, gap = ax, ay, size * 1.8
+	-- Gaps short of the units grow with the lens's zoom, as the units do on screen
+	local zoom = camera and camera.zoom or 1
+	local px, py, gap = ax, ay, size * 1.8 * zoom
 	-- Towards the middle of the ring, or of the one unit named, stopping where it first crosses the
-	-- ring or the unit's selection shape (just outside that). If it doesn't cross, the callout is on
-	-- it already: no pointer, rather than one into the middle.
+	-- ring or the unit's selection shape (a little outside that). If it doesn't cross, the callout is
+	-- on it already: no pointer, rather than one into the middle.
 	local only = next(overlay.subjects)
 	local outline = ring
 	if not ring and only and not next(overlay.subjects, only) and spGetUnitDefID(only) then
@@ -2106,7 +2196,7 @@ function overlay.draw()
 	end
 	if outline then
 		local first = overlay.crossing(outline, cx, my, ax, ay)
-		px, py, gap = cx + (ax - cx) * first, my + (ay - my) * first, ring and 0 or size * 0.3
+		px, py, gap = cx + (ax - cx) * first, my + (ay - my) * first, ring and 0 or size * 0.6 * zoom
 	end
 	local reach = length(px - cx, py - my)
 	-- A little see-through, like the ring
@@ -2247,6 +2337,10 @@ local function statsFlush(userOverride)
 	if overlay.ringed and overlay.ringX then
 		spEcho(string.format('rc-ring,%.0f,%.0f,%.0f', overlay.ringX, overlay.ringZ, overlay.radius))
 	end
+	-- The lens zoomed in for a close shot (see closeUp)
+	if camera and camera.zoom > 1.05 then
+		spEcho(string.format('rc-zoom,%.2f', camera.zoom))
+	end
 end
 
 local function statsTrackYaw(dt, oldRy, newRy, isCut)
@@ -2367,6 +2461,66 @@ local function frameBox(corners, y, yaw, pitch, fill)
 	return lx, lz, d
 end
 
+-- How far to move the look-at point (x, z) from look so that less of the view is off the map,
+-- keeping the ground points corners on screen (unzoomed; a zoom of z moves it by this over z,
+-- which keeps look where it was on screen). From the view's corners within edgeFill of the screen:
+-- how far each is off the map, along the screen's sides and towards its top, as it looks on
+-- screen. Far ground looks smaller, so a corner far off the map near the horizon is only a sliver
+-- of the screen, and moving the shot to show it all would push its middle up to the top. At most
+-- edgeOffset of the way from the middle of the screen to its edge, and as far as corners still fit.
+local function edgeShift(look, dist, pitch, yaw, corners)
+	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(pitch, yaw)
+	local ax, az = sin(yaw), cos(yaw)
+	local vsx, vsy = spGetViewGeometry()
+	local tanV = tan(rad(defaultFov / 2)) * edgeFill
+	local tanH = tanV * vsx / vsy
+	local lx, ly, lz = look[1], look[2], look[3]
+	local px, py, pz = lx - dist * fx, ly - dist * fy, lz - dist * fz
+	-- How far the ground moves on screen at a corner, against at the look-at point: across, it
+	-- shrinks with depth; ahead, also as the ground there is seen more side on
+	local down = max(0.1, -fy)
+	-- The view on the ground about look, across (a) and ahead (b), and moves to bring its corners
+	-- onto the map, either way
+	local aMin, aMax, bMin, bMax = -huge, huge, -huge, huge
+	local aLow, aHigh, bLow, bHigh = 0, 0, 0, 0
+	for _, su in ipairs({ -1, 1 }) do
+		for _, sv in ipairs({ -1, 1 }) do
+			local dx = fx + rx * su * tanH + ux * sv * tanV
+			local dy = fy + uy * sv * tanV
+			local dz = fz + rz * su * tanH + uz * sv * tanV
+			-- Towards the horizon, as far as a few times the distance. (The ray is 1 forward, so t
+			-- is also the corner's depth.)
+			local t = dy < -1e-3 and min((ly - py) / dy, 4 * dist) or 4 * dist
+			local x, z = px + dx * t, pz + dz * t
+			local a, b = (x - lx) * rx + (z - lz) * rz, (x - lx) * ax + (z - lz) * az
+			if su < 0 then aMin = max(aMin, a) else aMax = min(aMax, a) end
+			if sv < 0 then bMin = max(bMin, b) else bMax = min(bMax, b) end
+			local ox = max(0, -x) - max(0, x - mapSizeX)
+			local oz = max(0, -z) - max(0, z - mapSizeZ)
+			local oa = (ox * rx + oz * rz) * dist / t
+			local ob = (ox * ax + oz * az) * dist / t * max(0, 1 + sv * tanV * cos(pitch) / fy)
+			aLow, aHigh, bLow, bHigh = min(aLow, oa), max(aHigh, oa), min(bLow, ob), max(bHigh, ob)
+		end
+	end
+	-- Off both sides: split the difference
+	local function either(low, high)
+		return (low < 0 and high > 0) and (low + high) / 2 or low + high
+	end
+	local sa, sb = either(aLow, aHigh), either(bLow, bHigh)
+	local wa, wb = edgeOffset * dist * tanH / edgeFill, edgeOffset * dist * tanV / edgeFill / down
+	sa, sb = bound(sa, -wa, wa), bound(sb, -wb, wb)
+	-- As far as the corners still fit
+	local cMin, cMax, dMin, dMax = huge, -huge, huge, -huge
+	for _, corner in ipairs(corners) do
+		local x, z = corner[1] - lx, corner[2] - lz
+		local a, b = x * rx + z * rz, x * ax + z * az
+		cMin, cMax, dMin, dMax = min(cMin, a), max(cMax, a), min(dMin, b), max(dMax, b)
+	end
+	sa = cMax - aMax <= cMin - aMin and bound(sa, cMax - aMax, cMin - aMin) or 0
+	sb = dMax - bMax <= dMin - bMin and bound(sb, dMax - bMax, dMin - bMin) or 0
+	return sa * rx + sb * ax, sa * rz + sb * az
+end
+
 -- Score the view the rig would have at this yaw (see orbitConfig.headingWeights). Returns the
 -- total, and the score of the view alone without heading preferences.
 local function scoreHeading(c, yaw)
@@ -2374,7 +2528,8 @@ local function scoreHeading(c, yaw)
 	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(c.pitch, yaw)
 	local px, py, pz = lx - c.dist * fx, ly - c.dist * fy, lz - c.dist * fz
 	local vsx, vsy = spGetViewGeometry()
-	local tanV = tan(rad(c.fov / 2))
+	-- As seen without the zoom: a heading is judged by what is around the shot
+	local tanV = tan(rad(defaultFov / 2))
 	local tanH = tanV * vsx / vsy
 
 	-- Cast a grid of rays onto the plane of the look-at point
@@ -2458,8 +2613,9 @@ local function initCamera(cx, cy, cz)
 	local lx, lz = mapSizeX / 2, mapSizeZ / 2
 	return {
 		-- Rig state
-		look = { lx, spGetGroundHeight(lx, lz), lz }, lookv = { 0, 0, 0 },
+		look = { lx, spGetGroundHeight(lx, lz), lz }, lookv = { 0, 0, 0 }, shift = { 0, 0 }, shiftv = { 0, 0 },
 		dist = calcCamRange(camDiagMin, defaultFov), distv = 0,
+		zoom = 1, zoomv = 0, tzoom = 1, zoomFrame = 0, closeEnd = -huge,
 		pitch = defaultRx, pitchv = 0,
 		yaw = defaultRy, yawv = 0, tyaw = defaultRy,
 		-- Pose last sent to the engine
@@ -3157,11 +3313,40 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	end
 end
 
+-- The zoom the shot on show wants, when its units would fit zoomed in fit times; opening when it
+-- is a new shot, close when the camera is close now (see closeUp). Something hotter nearby stops it
+-- going close, but doesn't bring it out: the camera will likely go there anyway. Something about to
+-- happen nearby does, to show it coming. Also why it wants no zoom.
+function closeUp.wanted(c, fit, opening, close)
+	local f = shown
+	if f.wide or not f.heat or f.heat <= 0 then
+		return 1, 'none'
+	elseif fit < (close and closeUp.leaveZoom or closeUp.enterZoom) then
+		-- Including what is arriving, and a scene being taken into frame
+		return 1, 'fit'
+	end
+	local why = not close and opening and (overlay.kind == 'fight' and 'opening'
+		or gameFrame < c.closeEnd + closeUp.restSeconds * framesPerSecond and 'rest')
+	for _, other in ipairs(foci.list) do
+		if other ~= f and other.heat and length(other.x - f.x, other.z - f.z) <= closeUp.range then
+			if other.imminent and gameFrame - other.imminent <= 1.5 * framesPerSecond
+			    and other.heat >= closeUp.imminentShare * f.heat then
+				return 1, 'nearby'
+			end
+			why = why or not close and other.heat >= closeUp.rivalShare * f.heat and 'hotter'
+		end
+	end
+	if why then
+		return 1, why
+	end
+	return min(fit, closeUp.maxZoom)
+end
+
 local function updateCamera(dt, userCameraOverride)
 	if not shown then
 		return
 	end
-	local tlocation, tvelocity, points = foci.frame(shown)
+	local tlocation, tvelocity, points, context = foci.frame(shown, overlay.focus == shown and overlay.subjects)
 	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
 	for _, p in ipairs(points) do
 		xMin, xMax, zMin, zMax = min(xMin, p[1]), max(xMax, p[1]), min(zMin, p[2]), max(zMax, p[2])
@@ -3173,8 +3358,7 @@ local function updateCamera(dt, userCameraOverride)
 
 	-- Apply damping to location if relatively close, to avoid overly twitchy camera
 	if distance(display.location, tlocation) < trackDampRange then
-		-- Move 60% of the way there per second
-		local new = 0.6 * dt
+		local new = trackDampRate * dt
 		local function damp(old, target)
 			return (1 - new) * old + new * target
 		end
@@ -3191,10 +3375,11 @@ local function updateCamera(dt, userCameraOverride)
 	local c = camera
 	local rotate = options.camera_rotation.value
 
-	-- Where the camera should look: the event, nudged by its velocity and kept off the map edge
+	-- Where the camera should look: the event, ahead along its velocity by as much as the smoothing
+	-- leaves it behind (velocity / trackDampRate when moving steadily), kept off the map edge
 	local ex, ey, ez = unpack(display.location)
-	local exv, eyv, ezv = unpack(display.velocity)
-	ex, ey, ez = ex + exv, ey + eyv, ez + ezv
+	local exv, _, ezv = unpack(display.velocity)
+	ex, ez = ex + exv * framesPerSecond / trackDampRate, ez + ezv * framesPerSecond / trackDampRate
 	ex, ez = bound(ex, mapEdgeBorder, mapSizeX - mapEdgeBorder), bound(ez, mapEdgeBorder, mapSizeZ - mapEdgeBorder)
 	-- Frame the tracked box, at least display.diag across, by distance rather than zoom so the FOV
 	-- stays constant. frameBox centres it as projected.
@@ -3223,6 +3408,10 @@ local function updateCamera(dt, userCameraOverride)
 	end
 	local lx, lz, tdist = frameBox(corners, ey, c.yaw, tpitch, display.fill)
 	local tlook = { bound(lx, mapEdgeBorder, mapSizeX - mapEdgeBorder), ey, bound(lz, mapEdgeBorder, mapSizeZ - mapEdgeBorder) }
+	local tshift = { 0, 0 }
+	if not display.isWide then
+		tshift[1], tshift[2] = edgeShift(tlook, tdist, tpitch, c.yaw, corners)
+	end
 
 	-- Cut when a pan would take too long. A critically damped spring at capped speed takes roughly
 	-- 2x its smooth time plus the distance at full speed.
@@ -3244,12 +3433,16 @@ local function updateCamera(dt, userCameraOverride)
 		-- A cut is a new scene to the viewer: the callout starts where it best fits there
 		overlay.box = nil
 		c.look, c.lookv = tlook, { 0, 0, 0 }
+		c.shift, c.shiftv = tshift, { 0, 0 }
 		c.dist, c.distv = tdist, 0
 		c.pitch, c.pitchv = tpitch, 0
 		-- Face north again after a cut, so the viewer doesn't lose their bearings
 		c.yaw, c.yawv, c.tyaw, c.yawSmooth = defaultRy, 0, defaultRy, yawSmoothTime
 	else
 		smoothDampVec(c.look, tlook, c.lookv, lookSmoothTime, dt, lookMaxSpeed)
+		for i = 1, 2 do
+			c.shift[i], c.shiftv[i] = smoothDamp(c.shift[i], tshift[i], c.shiftv[i], lookSmoothTime, dt)
+		end
 		local arc = min(tdist * panArcMax, remaining * panArcRise)
 		c.dist, c.distv = smoothDamp(c.dist, tdist + arc, c.distv, distSmoothTime, dt)
 		c.pitch, c.pitchv = smoothDamp(c.pitch, tpitch, c.pitchv, pitchSmoothTime, dt)
@@ -3265,13 +3458,77 @@ local function updateCamera(dt, userCameraOverride)
 	end
 	c.cutNext = false
 
+	-- Zoom in on a close shot (see closeUp), judged from where the shot is headed: how far it could
+	-- zoom with the units it frames filling the same share of the screen, and the rest of its units
+	-- nearby still on it, a little in from the edge. Off centre by the edge shift, which keeps its
+	-- place on screen as it zooms, so there is less room on that side.
+	local fit, tx, tz, thalf = huge, tlocation[1], tlocation[3], tdiag / (2 * sqrt(2))
+	local sa, sb = tshift[2] * sy - tshift[1] * cy, tshift[1] * sy + tshift[2] * cy
+	local function room(dx, dz, limit)
+		local a, b = dz * sy - dx * cy, dx * sy + dz * cy
+		local function along(p, s)
+			return math.abs(p) < 1 and huge or (limit + (p > 0 and s or -s)) / math.abs(p)
+		end
+		return min(along(a, sa), along(b, sb))
+	end
+	for _, point in ipairs(points) do
+		fit = min(fit, room(point[1] - tx, point[2] - tz, thalf))
+	end
+	for _, point in ipairs(context or {}) do
+		fit = min(fit, room(point[1] - tx, point[2] - tz, 0.9 * thalf / display.fill))
+	end
+	local opening = shown ~= c.zoomShot
+	-- A cut ends a close-up: the next shot is a new scene
+	if isCut and c.tzoom > 1 then
+		c.tzoom, c.closeEnd = 1, gameFrame
+	end
+	local want, why = closeUp.wanted(c, fit, opening, c.tzoom > 1)
+	if DEBUG and gameFrame % framesPerSecond == 0 and c.wantLogged ~= gameFrame then
+		c.wantLogged = gameFrame
+		spEcho(string.format('rc-want,%d,%.2f,%.2f,%s,%.0f,%.0f', shown.id, fit, want, why or '', tshift[1], tshift[2]))
+	end
+	local quick, was = false, c.tzoom
+	if opening or isCut then
+		c.zoomShot, c.tzoom, c.zoomFrame, c.wantFrame = shown, want, gameFrame, nil
+	elseif c.tzoom > 1 and c.tzoom > fit * closeUp.tooTight then
+		c.tzoom, c.zoomFrame, c.wantFrame, quick = max(1, min(want, fit)), gameFrame, nil, true
+	elseif math.abs(want - c.tzoom) > 0.1 then
+		c.wantFrame = c.wantFrame or gameFrame
+		if gameFrame - c.wantFrame >= (want > c.tzoom and closeUp.enterSeconds or closeUp.leaveSeconds) * framesPerSecond
+		    and gameFrame - c.zoomFrame >= closeUp.holdSeconds * framesPerSecond then
+			c.tzoom, c.zoomFrame, c.wantFrame = want, gameFrame, nil
+		end
+	else
+		c.wantFrame = nil
+	end
+	local tzoom = c.tzoom
+	if was > 1 and tzoom == 1 then
+		c.closeEnd = gameFrame
+	end
+	if DEBUG and c.zoomFrame == gameFrame and c.loggedZoom ~= gameFrame then
+		c.loggedZoom = gameFrame
+		spEcho(string.format('rc-zoomto,%d,%s,%.2f,%s,%.2f', shown.id, overlay.kind or 'nil', tzoom,
+			opening and (isCut and 'cut' or 'pan') or quick and 'tight' or 'decided', fit))
+	end
+	if isCut then
+		c.zoom, c.zoomv = tzoom, 0
+	else
+		c.zoomQuick = quick or c.zoomQuick and c.zoom > tzoom + 0.01
+		c.zoom, c.zoomv = smoothDamp(c.zoom, tzoom, c.zoomv, c.zoomQuick and closeUp.quickSmooth or closeUp.smooth, dt)
+	end
+	local function zoomFov(zoom)
+		return 2 * deg(math.atan(tan(rad(defaultFov / 2)) / zoom))
+	end
+
 	-- Where the camera is headed, for placing the callout. An orbit takes many seconds, so for
 	-- that it is the heading now.
 	local orbiting = c.yawSmooth == orbitConfig.smoothTime
-	c.settled = { look = tlook, dist = tdist, pitch = tpitch, yaw = (not rotate or display.isWide) and defaultRy or orbiting and c.yaw or c.tyaw }
+	c.settled = { look = { tlook[1] + tshift[1] / tzoom, tlook[2], tlook[3] + tshift[2] / tzoom }, dist = tdist, pitch = tpitch, yaw = (not rotate or display.isWide) and defaultRy or orbiting and c.yaw or c.tyaw,
+		fov = zoomFov(tzoom), zoom = tzoom }
 
-	-- Camera pose from the rig: behind the look-at point along the yaw, raised by the pitch
-	local lx, ly, lz = unpack(c.look)
+	-- Camera pose from the rig: behind the look-at point along the yaw, raised by the pitch. Off the
+	-- look-at point by the edge shift, less as it zooms, so the look-at point keeps its place on screen.
+	local lx, ly, lz = c.look[1] + c.shift[1] / c.zoom, c.look[2], c.look[3] + c.shift[2] / c.zoom
 	local d2 = c.dist * cos(c.pitch)
 	local rx, ry = c.pitch, c.yaw
 	-- HACK: Translation seems to apply 1 render frame later than rotation, so on a cut send the new
@@ -3286,7 +3543,7 @@ local function updateCamera(dt, userCameraOverride)
 	c.wasCut = isCut
 
 	c.x, c.y, c.z = lx - d2 * sin(c.yaw), ly - c.dist * sin(c.pitch), lz - d2 * cos(c.yaw)
-	c.rx, c.ry, c.fov = rx, ry, defaultFov
+	c.rx, c.ry, c.fov = rx, ry, zoomFov(c.zoom)
 	c.reticle = { xMin, zMin, xMax, zMax }
 
 	if userCameraOverride then
