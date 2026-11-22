@@ -214,69 +214,15 @@ local function getUnitLocation(unitID)
 	return x and y and z and { x, y, z }
 end
 
+-- Where a unit is seen. Nil while it is hidden: various units (e.g. puppies) use a noDraw hack
+-- combined with location displacement.
+local function getSeenLocation(unitID)
+	return not spGetUnitNoDraw(unitID) and getUnitLocation(unitID) or nil
+end
+
 local function getUnitVelocity(unitID)
 	local xv, yv, zv = spGetUnitVelocity(unitID)
 	return xv and yv and zv and { xv, yv, zv }
-end
-
--- LINKED LIST CLASS
-
--- capacity of 0 = unlimited
-LinkedList = { capacity = 0, size = 0, head = nil, _tail = nil }
-
-function LinkedList:new(o)
-	o = o or {}
-	setmetatable(o, self)
-	self.__index = self
-
-	return o
-end
-
-function LinkedList:add(e)
-	local tail, head = self._tail, self.head
-	if not tail and not head then
-		self._tail = e
-		self.head = e
-		self.size = 1
-	else
-		head.next = e
-		e.prev = head
-		self.head = e
-		if self.capacity > 0 and self.capacity == self.size then
-			tail.next.prev = nil
-			self._tail = tail.next
-		else
-			self.size = self.size + 1
-		end
-	end
-end
-
-function LinkedList:remove(e)
-	local prev, next = e.prev, e.next
-	if e == self.head then
-		self.head = prev
-	end
-	if e == self._tail then
-		self._tail = next
-	end
-	if prev then
-		prev.next = next
-	end
-	if next then
-		next.prev = prev
-	end
-	e.prev, e.next = nil, nil
-	self.size = self.size - 1
-
-	return prev, next
-end
-
-function LinkedList:clear()
-	-- We do it this way to unlink all elements as well
-	local e = self.head
-	while e ~= nil do
-		e, _ = self:remove(e)
-	end
 end
 
 -- UNIT INFO CACHE
@@ -570,7 +516,6 @@ local shotLockBoost = 2
 -- A unit can be counted as stunned again after this long
 local stunFrames = 10 * framesPerSecond
 local mapEdgeBorder = worldGridSize * 0.5
-local keepTrackingRange = worldGridSize * 2
 
 -- A shot counts as framed once its tracking box is on screen and its centre is in the middle half.
 local framedCentre = 0.25
@@ -627,8 +572,6 @@ local foci = {
 	cursorRange = 512, cursorBoost = 1.5,
 	-- A focus this hot and this close to the shot is taken into frame for a few seconds
 	asideHeat = 1000, asideRange = worldGridSize * 2.5, asideFrames = 3 * framesPerSecond,
-	-- The camera frames at most this many of a focus's units
-	trackUnits = 40,
 	-- Moments that are news in themselves: losing a commander or something costing highlightMetal,
 	-- a capture costing captureHighlightMetal, or finishing something costing builtHighlightMetal.
 	-- One adds its metal to the score, halving every highlightHalfLife seconds and ignoring passe.
@@ -739,7 +682,7 @@ function foci.add(metric, allyTeam, metal, x, z, unitID, otherID)
 	return f
 end
 
--- A unit is in on a focus, and framed with it (see trackFocus), as of now. How: 'core' when it was in
+-- A unit is in on a focus, and framed with it (see foci.frame), as of now. How: 'core' when it was in
 -- what happened there, or close by; 'staked' when it is what a stake there is about; 'edge' when it
 -- is on its way or shooting in from afar. The focus goes where its core units are, failing those its
 -- staked ones (see foci.around).
@@ -897,7 +840,7 @@ function foci.around(f)
 	for _, how in ipairs({ 'core', 'staked', 'units' }) do
 		for unitID, frame in pairs(f[how]) do
 			local info = unitInfo.cache[unitID]
-			local live = getUnitLocation(unitID)
+			local live = getSeenLocation(unitID)
 			local location = live or info and info.location
 			local weight = max(0, 1 - (gameFrame - frame) / unitFrames)
 			if location and weight > 0 then
@@ -934,12 +877,21 @@ end
 -- What the camera frames for a focus, from where its units are now: where to look (its middle, see
 -- foci.around), how that is moving, and the points that must be in shot: round most of the units it
 -- is about (inside its ring, which has a margin), the rest of its units within frameReach of the
--- middle (the trouble on its way, a shooter further off) and a fresh highlight's spot. Nil when
--- none of its units are left.
+-- middle (the trouble on its way, a shooter further off) and a fresh highlight's spot. With none of
+-- its units left, its spot. A wide shot frames its corners.
 function foci.frame(f)
+	if f.wide then
+		local look, points = { 0, 0, 0 }, {}
+		for i, c in ipairs(f.corners) do
+			look = { look[1] + c[1] / #f.corners, look[2] + c[2] / #f.corners, look[3] + c[3] / #f.corners }
+			points[i] = { c[1], c[3] }
+		end
+		return look, { 0, 0, 0 }, points
+	end
 	local x, z, far, y, vx, vz = foci.around(f)
 	if not x then
-		return nil
+		x, z, far, vx, vz = f.x, f.z, 0, 0, 0
+		y = spGetGroundHeight(x, z)
 	end
 	local points, r = {}, far
 	for i = 1, 8 do
@@ -948,7 +900,7 @@ function foci.frame(f)
 	end
 	for unitID in pairs(f.units) do
 		local info = unitInfo.cache[unitID]
-		local location = getUnitLocation(unitID) or info and info.location
+		local location = getSeenLocation(unitID) or info and info.location
 		if location and length(location[1] - x, location[3] - z) <= foci.frameReach then
 			points[#points + 1] = { location[1], location[3] }
 		end
@@ -1766,10 +1718,12 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		local function avoid(x, z)
 			points[#points + 1] = { project(x, spGetGroundHeight(x, z), z) }
 		end
-		local trackInfo = display.tracking.head
-		while trackInfo do
-			avoid(trackInfo.location[1], trackInfo.location[3])
-			trackInfo = trackInfo.prev
+		for unitID in pairs(overlay.focus.units) do
+			local info = unitInfo.cache[unitID]
+			local location = getSeenLocation(unitID) or info and info.location
+			if location then
+				avoid(location[1], location[3])
+			end
 		end
 		local from, to = overlay.arrowFrom, overlay.arrowTo
 		for i = 0, from and 6 or -1 do
@@ -2514,36 +2468,6 @@ local function initCamera(cx, cy, cz)
 	}
 end
 
--- Track the focus's units, or a wide shot's corners. The camera drops units in order once they
--- spread too far (see updateCamera), so they go nearest the centre first, and a fresh highlight's
--- spot before them all.
-local function trackFocus(f)
-	display.tracking:clear()
-	if f.wide then
-		for i, corner in ipairs(f.corners) do
-			display.tracking:add({ unitID = -i, location = corner, keepPrevious = true })
-		end
-		return
-	end
-	local items = {}
-	for unitID in pairs(f.units) do
-		local info = unitInfo.cache[unitID]
-		local location = getUnitLocation(unitID) or info and info.location
-		if location then
-			items[#items + 1] = { unitID, location, length(location[1] - f.x, location[3] - f.z) }
-		end
-	end
-	table.sort(items, function(a, b) return a[3] > b[3] end)
-	for i = max(1, #items - foci.trackUnits + 1), #items do
-		display.tracking:add({ unitID = items[i][1], location = items[i][2] })
-	end
-	local h = f.highlight
-	if h and gameFrame - h.frame < overlay.highlightSeconds * framesPerSecond or not display.tracking.head then
-		local x, z = h and h.x or f.x, h and h.z or f.z
-		display.tracking:add({ unitID = -1, location = { x, spGetGroundHeight(x, z), z } })
-	end
-end
-
 local function showFocus(f)
 	local wide = f.wide or false
 	display.camAngle, display.isWide, display.fill = wide and lullConfig.pitch or defaultRx, wide, wide and lullConfig.fill or frameFill
@@ -2552,7 +2476,6 @@ local function showFocus(f)
 		f.frame, f.decay = gameFrame, lullConfig.shownDecaySeconds
 	end
 	shown = f
-	trackFocus(f)
 	overlay.show(f)
 	f.shownType = wide and 'lull' or overlay.kind or 'focus'
 	display.shotFrame = gameFrame
@@ -2977,7 +2900,6 @@ function widget:Initialize()
 		camType = camTypeTracking,
 		fill = frameFill,
 		shotFrame = 0,
-		tracking = LinkedList:new(),
 		velocity = { 0, 0, 0 }
 	}
 	if STATS then
@@ -3004,8 +2926,7 @@ function widget:GameFrame(frame)
 	foci.update()
 	lull.update()
 
-	-- Cut to whatever beats the shot on show by enough. Otherwise the shot keeps up with the units
-	-- joining and leaving its focus.
+	-- Cut to whatever beats the shot on show by enough
 	local best = lull.candidate ~= shown and lull.candidate or nil
 	for _, f in ipairs(foci.list) do
 		if f ~= shown and (not best or f.score > best.score) then
@@ -3014,8 +2935,6 @@ function widget:GameFrame(frame)
 	end
 	if best and best.score > 0 and beats(best) then
 		showFocus(best)
-	elseif shown and not shown.wide then
-		trackFocus(shown)
 	end
 	foci.aside()
 	overlay.update()
@@ -3239,64 +3158,14 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 end
 
 local function updateCamera(dt, userCameraOverride)
-	local xSum, ySum, zSum, xvSum, yvSum, zvSum, trackedLocationCount = 0, 0, 0, 0, 0, 0, 0
-	local points = {}
-	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
-	-- A focus on show is framed as it says (see foci.frame); a wide shot by its tracked corners
-	local look, velocity, framed
-	if shown and not shown.wide then
-		look, velocity, framed = foci.frame(shown)
-	end
-	for _, p in ipairs(framed or {}) do
-		xMin, xMax, zMin, zMax = min(xMin, p[1]), max(xMax, p[1]), min(zMin, p[2]), max(zMax, p[2])
-		trackedLocationCount = trackedLocationCount + 1
-		points[trackedLocationCount] = p
-	end
-	local trackInfo, keepPrevious = not look and display.tracking.head, false
-	while trackInfo do
-		local xv, yv, zv = 0, 0, 0
-		if not trackInfo.isDead then
-			-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
-			local noDraw = spGetUnitNoDraw(trackInfo.unitID)
-			local location = getUnitLocation(trackInfo.unitID)
-			local uxv, uyv, uzv = spGetUnitVelocity(trackInfo.unitID)
-			if not location or not uxv then
-				trackInfo.isDead = true
-			elseif not noDraw then
-				xv, yv, zv = uxv, uyv, uzv
-				trackInfo.location = location
-			end
-		end
-
-		local x, y, z = unpack(trackInfo.location)
-		
-		-- Accumulate tracking info if not too distant
-		local nxMin, nxMax, nzMin, nzMax = min(xMin, x), max(xMax, x), min(zMin, z), max(zMax, z)
-		if keepPrevious or length(nxMax - nxMin, nzMax - nzMin) <= keepTrackingRange then
-			xMin, xMax, zMin, zMax = nxMin, nxMax, nzMin, nzMax
-			xSum, ySum, zSum = xSum + x, ySum + y, zSum + z
-			xvSum, yvSum, zvSum = xvSum + xv, yvSum + yv, zvSum + zv
-			trackedLocationCount = trackedLocationCount + 1
-			points[trackedLocationCount] = { x, z }
-			keepPrevious = trackInfo.keepPrevious
-			trackInfo = trackInfo.prev
-		else
-			-- Chop off the rest of the tracking infos
-			while trackInfo do
-				trackInfo, _ = display.tracking:remove(trackInfo)
-			end
-		end
-	end
-
-	if trackedLocationCount == 0 then
-		-- Shouldn't happen, but avoid dividing by zero.
+	if not shown then
 		return
 	end
-
-	-- Update the location being displayed
-	local n = trackedLocationCount
-	local tlocation = look or { xSum / n, ySum / n, zSum / n }
-	local tvelocity = velocity or { xvSum / n, yvSum / n, zvSum / n }
+	local tlocation, tvelocity, points = foci.frame(shown)
+	local xMin, xMax, zMin, zMax = huge, -huge, huge, -huge
+	for _, p in ipairs(points) do
+		xMin, xMax, zMin, zMax = min(xMin, p[1]), max(xMax, p[1]), min(zMin, p[2]), max(zMax, p[2])
+	end
 	local tdiag = distance({ xMin, 0, zMin }, { xMax, 0, zMax })
 	-- Smoothly grade from camDiagMin to the target diag when the latter is 2x the former
 	tdiag = tdiag + max(0, camDiagMin - tdiag * 0.5)
