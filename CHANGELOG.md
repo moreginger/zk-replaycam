@@ -43,6 +43,7 @@
 - Sides keep one order in fight headlines, kill tallies and the metal value board: as they started on the map, west to east, or north to south when they started further apart that way
 - Contact: an armed unit closing to weapon range of an enemy it can hit (air or ground) heats the focus where it will hit, by the metal it could destroy there in a second, more the sooner it gets there, up to 6s ahead. While a unit on show is due in range within 3s, a challenger needs 1.5x more to cut away, so a raid isn't left just before it strikes
 - The pointer to a unit in the air, jumping or flying, stops at its selection shape where the unit is, not on the ground below, so it no longer disappears
+- Headed runs can record at a set frame rate (`FPS`) and quality (`QUANT`), and draw the game frame (`SYNC=1`) so `scripts/stack-videos.py` can stack two recordings in step by game time, to compare versions side by side
 
 ## [0.2.1] - 2023-04-02
 
