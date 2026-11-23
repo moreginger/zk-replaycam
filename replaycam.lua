@@ -164,10 +164,15 @@ end
 -- Critically damped spring (Game Programming Gems 4, 1.10). Gets ~90% of the way in 2x smoothTime
 -- whatever the distance, without overshoot. maxSpeed (optional) caps the speed of the approach.
 -- Returns the new value and velocity.
-local function smoothDamp(current, target, velocity, smoothTime, dt, maxSpeed)
+-- The spring's stiffness, and how much of what is left it keeps over dt
+local function springStep(smoothTime, dt)
 	local omega = 2 / smoothTime
 	local x = omega * dt
-	local e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
+	return omega, 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
+end
+
+local function smoothDamp(current, target, velocity, smoothTime, dt, maxSpeed)
+	local omega, e = springStep(smoothTime, dt)
 	local change = current - target
 	if maxSpeed then
 		local maxChange = maxSpeed * smoothTime
@@ -179,20 +184,14 @@ end
 
 -- smoothDamp for 3-vectors, capping the speed along the direction of travel. Updates in place.
 local function smoothDampVec(current, target, velocity, smoothTime, dt, maxSpeed)
-	local omega = 2 / smoothTime
-	local x = omega * dt
-	local e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
-	local c1, c2, c3 = current[1] - target[1], current[2] - target[2], current[3] - target[3]
-	local cl = length(c1, c2, c3)
+	local omega, e = springStep(smoothTime, dt)
+	local cl = length(current[1] - target[1], current[2] - target[2], current[3] - target[3])
 	local maxChange = maxSpeed * smoothTime
-	if cl > maxChange then
-		local f = maxChange / cl
-		c1, c2, c3 = c1 * f, c2 * f, c3 * f
-	end
-	local change = { c1, c2, c3 }
+	local k = cl > maxChange and maxChange / cl or 1
 	for i = 1, 3 do
-		local temp = (velocity[i] + omega * change[i]) * dt
-		current[i] = current[i] - change[i] + (change[i] + temp) * e
+		local change = (current[i] - target[i]) * k
+		local temp = (velocity[i] + omega * change) * dt
+		current[i] = current[i] - change + (change + temp) * e
 		velocity[i] = (velocity[i] - omega * temp) * e
 	end
 end
@@ -205,6 +204,31 @@ end
 local function cameraAxes(pitch, yaw)
 	local cp, sp, cy, sy = cos(pitch), sin(pitch), cos(yaw), sin(yaw)
 	return sy * cp, sp, cy * cp, -cy, sy, -sy * sp, cp, -cy * sp
+end
+
+-- Tangents of half the lens's view up and across, unzoomed, times share (of the screen, from its
+-- middle; all of it by default)
+local function viewTans(share)
+	local vsx, vsy = spGetViewGeometry()
+	local tanV = tan(rad(defaultFov / 2)) * (share or 1)
+	return tanV, tanV * vsx / vsy
+end
+
+-- The direction through the screen u across and v up from its middle, for a camera with axes (see
+-- cameraAxes) and u, v the tangents of the angles off its middle
+local function screenRay(axes, u, v)
+	local fx, fy, fz, rx, rz, ux, uy, uz = unpack(axes)
+	return fx + rx * u + ux * v, fy + uy * v, fz + rz * u + uz * v
+end
+
+-- A ground offset (dx, dz) as across the view (to the right) and along it (ahead), for a camera
+-- facing yaw, with cy, sy its cosine and sine; and back again
+local function toView(dx, dz, cy, sy)
+	return dz * sy - dx * cy, dx * sy + dz * cy
+end
+
+local function fromView(a, b, cy, sy)
+	return b * sy - a * cy, a * sy + b * cy
 end
 
 -- SPRING UTILS
@@ -307,25 +331,16 @@ function UnitInfoCache:_unitStats(unitDefID)
 	return unpack(cacheObject)
 end
 
+-- Returns whether the unit is still there and its position known. A hidden unit (see
+-- getSeenLocation) keeps where it was last seen.
 function UnitInfoCache:_updatePosition(unitID, cacheObject)
-	local location = getUnitLocation(unitID)
-	local velocity = getUnitVelocity(unitID)
-	if not location or not velocity then
+	if not spGetUnitPosition(unitID) then
 		return false
+	elseif spGetUnitNoDraw(unitID) then
+		return cacheObject.location ~= nil
 	end
-
-	local noDraw = spGetUnitNoDraw(unitID)
-	if noDraw then
-		-- Various units (e.g. puppies) use a noDraw hack combined with location displacement
-		-- Don't update or ping in this state. Return true unless we have nothing cached
-		return cacheObject.location and cacheObject.velocity
-	end
-
-	cacheObject.location = location
-	cacheObject.velocity = velocity
-
-
-	return true
+	cacheObject.location, cacheObject.velocity = getUnitLocation(unitID), getUnitVelocity(unitID)
+	return cacheObject.velocity ~= nil
 end
 
 function UnitInfoCache:watch(unitID, allyTeam, unitDefID)
@@ -371,6 +386,7 @@ function UnitInfoCache:forget(unitID)
 	if self.cache[unitID] then
 		-- Don't remove immediately as we may need to get information for event display
 		self.cache[unitID].removeAfterFrame = gameFrame + framesPerSecond * 30
+		self.cache[unitID].diedFrame = gameFrame
 	end
 end
 
@@ -592,8 +608,12 @@ local foci = {
 	-- A unit due in range within imminentSeconds holds its focus on show: a challenger needs
 	-- imminentBoost times more to cut away just before the action
 	imminentSeconds = 3, imminentBoost = 1.5,
-	-- A unit is framed with its focus for this long after it was last involved, or once dead, deadSeconds
-	unitSeconds = 8, deadSeconds = 2,
+	-- A unit is framed with its focus for this long after it was last involved, fading over that time,
+	-- or once dead, fading over deadSeconds. It comes to count fully over joinSeconds when it joins or
+	-- is in on it again, so the shot and ring ease out to it (see foci.weight).
+	unitSeconds = 8, deadSeconds = 2, joinSeconds = 1,
+	-- The group picked as heaviest (see foci.around) holds until another is this much heavier
+	groupMargin = 1.25,
 	-- A unit's orders count once in this long
 	orderSeconds = 8,
 	-- Passe: seconds watched, rising by 1/s while the camera is within passeRange and falling by
@@ -621,7 +641,8 @@ local foci = {
 function foci.new(x, z)
 	foci.lastId = foci.lastId + 1
 	local f = { id = foci.lastId, x = x, z = z, mass = 0, heat = 0, pending = 0, score = 0, watched = 0,
-		bins = {}, totals = {}, units = {}, core = {}, staked = {}, players = {}, born = gameFrame }
+		bins = {}, totals = {}, units = {}, core = {}, staked = {},
+		joined = { units = {}, core = {}, staked = {} }, players = {}, born = gameFrame }
 	foci.list[#foci.list + 1] = f
 	return f
 end
@@ -712,15 +733,48 @@ function foci.add(metric, allyTeam, metal, x, z, unitID, otherID)
 	return f
 end
 
+-- How much a unit d from the middle of a group counts in it: fully within coreRange, fading to
+-- nothing at twice that, so a unit straying from the group or coming back doesn't make it jump
+function foci.closeness(d)
+	return bound(2 - d / foci.coreRange, 0, 1)
+end
+
+-- How much a unit counts in a focus's units of a kind ('units', 'core' or 'staked'; see
+-- foci.enlist), from 1 down to 0 (see unitSeconds, deadSeconds and joinSeconds)
+function foci.weight(f, unitID, how)
+	local frame = f[how][unitID]
+	if not frame then
+		return 0
+	end
+	local weight = max(0, 1 - (gameFrame - frame) / (foci.unitSeconds * framesPerSecond))
+	local info = unitInfo.cache[unitID]
+	if info and info.diedFrame then
+		weight = weight * max(0, 1 - (gameFrame - info.diedFrame) / (foci.deadSeconds * framesPerSecond))
+	end
+	return weight * min(1, (gameFrame - (f.joined[how][unitID] or -huge)) / (foci.joinSeconds * framesPerSecond))
+end
+
+-- Where a unit is now, or failing that where it was last seen (hidden while it jumps, or dead)
+function foci.where(unitID)
+	local info = unitInfo.cache[unitID]
+	return getSeenLocation(unitID) or info and info.location
+end
+
 -- A unit is in on a focus, and framed with it (see foci.frame), as of now. How: 'core' when it was in
 -- what happened there, or close by; 'staked' when it is what a stake there is about; 'edge' when it
 -- is on its way or shooting in from afar. The focus goes where its core units are, failing those its
 -- staked ones (see foci.around).
 function foci.enlist(f, unitID, how)
-	f.units[unitID] = gameFrame
-	if how ~= 'edge' then
-		f[how][unitID] = gameFrame
+	-- It rises from what it counts for now, as each kind (see foci.weight)
+	local function join(kind)
+		f.joined[kind][unitID] = gameFrame - foci.weight(f, unitID, kind) * foci.joinSeconds * framesPerSecond
+		f[kind][unitID] = gameFrame
 	end
+	join('units')
+	if how ~= 'edge' then
+		join(how)
+	end
+	f.aroundFrame = nil
 end
 
 -- A moment that is news in itself (see highlightMetal): { kind, metal, location, ... }. It replaces
@@ -810,13 +864,18 @@ function foci.absorb(keep, gone)
 		keep.z = (keep.z * keep.mass + gone.z * gone.mass) / mass
 	end
 	keep.mass, keep.pending, keep.heat = mass, keep.pending + gone.pending, keep.heat + gone.heat
+	keep.aroundFrame = nil
 	for slot, bin in pairs(gone.bins) do
 		keep.bins[slot] = keep.bins[slot] or {}
 		addSides(keep.bins[slot], bin)
 	end
 	addSides(keep.totals, gone.totals)
+	-- Units new to keep ease in, as they are new to its shot
 	for _, how in ipairs({ 'units', 'core', 'staked' }) do
 		for unitID, frame in pairs(gone[how]) do
+			if not keep[how][unitID] then
+				keep.joined[how][unitID] = gameFrame
+			end
 			keep[how][unitID] = max(keep[how][unitID] or 0, frame)
 		end
 	end
@@ -862,21 +921,32 @@ end
 -- The middle of a focus's core units (see foci.enlist), each counting less the longer since it was
 -- in on it that way, and how far out from there most of them (three quarters by that count) are.
 -- Failing core units, its staked ones, and failing those, any. When they are in more than one
--- group (units within coreRange of one of them), the middle of the heaviest, rather than the empty
--- ground between them. A dead unit counts where it was last seen, for deadSeconds: the action has
--- moved on. Also their height, and the middle of all of them, which is where the focus itself
--- sits. Nil when none of its units are left.
+-- group, the middle of the heaviest, rather than the empty ground between them. A dead unit counts
+-- where it was last seen, for deadSeconds: the action has moved on. Also their height, and the
+-- middle of all of them, which is where the focus itself sits. Nil when none of its units are left.
+-- Nothing in it jumps as units join, leave or move about, as the shot and the ring follow it: each
+-- unit eases in as it joins and fades as it is left out (see joinSeconds, unitSeconds), counts in a
+-- group less as it strays from it (see foci.closeness), and the ring goes out past three quarters
+-- of their weight read off a smooth curve, not to whichever unit that lands on. Worked out once a
+-- game frame, as units only move then; which group is heaviest is picked once a second, as finding
+-- it takes every pair of units, and it holds until another is clearly heavier (groupMargin).
 function foci.around(f)
+	local m = f.aroundFrame == gameFrame and f.aroundCache
+	if not m then
+		m = { foci.locate(f) }
+		f.aroundFrame, f.aroundCache = gameFrame, m
+	end
+	return m[1], m[2], m[3], m[4], m[5], m[6]
+end
+
+function foci.locate(f)
 	local units, total, x, y, z = {}, 0, 0, 0, 0
 	for _, how in ipairs({ 'core', 'staked', 'units' }) do
-		for unitID, frame in pairs(f[how]) do
-			local info = unitInfo.cache[unitID]
-			local live = getSeenLocation(unitID)
-			local location = live or info and info.location
-			local seconds = (live or not info or not info.removeAfterFrame) and foci.unitSeconds or foci.deadSeconds
-			local weight = max(0, 1 - (gameFrame - frame) / (seconds * framesPerSecond))
+		for unitID in pairs(f[how]) do
+			local location = foci.where(unitID)
+			local weight = foci.weight(f, unitID, how)
 			if location and weight > 0 then
-				units[#units + 1] = { location, weight }
+				units[#units + 1] = { location, weight, id = unitID }
 				total, x, y, z = total + weight, x + weight * location[1], y + weight * location[2], z + weight * location[3]
 			end
 		end
@@ -888,43 +958,62 @@ function foci.around(f)
 		return nil
 	end
 	local mx, mz = x / total, z / total
-	local best, most = nil, 0
-	for _, a in ipairs(units) do
+	-- The heaviest group, as the unit with most weight round it: the one picked this second if it is
+	-- still there, and otherwise that one unless another is clearly heavier
+	local function around(a)
 		local weight = 0
 		for _, b in ipairs(units) do
-			if length(a[1][1] - b[1][1], a[1][3] - b[1][3]) <= foci.coreRange then
-				weight = weight + b[2]
+			weight = weight + b[2] * foci.closeness(length(a[1][1] - b[1][1], a[1][3] - b[1][3]))
+		end
+		return weight
+	end
+	local best, most, kept, keptWeight = nil, 0, nil, 0
+	for _, unit in ipairs(units) do
+		if unit.id == f.seed then
+			kept = unit
+		end
+	end
+	if kept and gameFrame - f.seedFrame < framesPerSecond then
+		best = kept
+	else
+		for _, a in ipairs(units) do
+			local weight = around(a)
+			if weight > most then
+				best, most = a, weight
+			end
+			if a == kept then
+				keptWeight = weight
 			end
 		end
-		if weight > most then
-			best, most = a, weight
+		if kept and keptWeight * foci.groupMargin >= most then
+			best = kept
 		end
+		f.seed, f.seedFrame = best.id, gameFrame
 	end
 	total, x, y, z = 0, 0, 0, 0
 	for _, unit in ipairs(units) do
-		local location, weight = unit[1], unit[2]
-		if length(location[1] - best[1][1], location[3] - best[1][3]) <= foci.coreRange then
-			total, x, y, z = total + weight, x + weight * location[1], y + weight * location[2], z + weight * location[3]
-		end
+		local location = unit[1]
+		local weight = unit[2] * foci.closeness(length(location[1] - best[1][1], location[3] - best[1][3]))
+		total, x, y, z = total + weight, x + weight * location[1], y + weight * location[2], z + weight * location[3]
 	end
 	x, y, z = x / total, y / total, z / total
-	-- How far out from there most of its units are, leaving out another group's
-	local near = {}
+	-- How far out from there most of its units are, leaving out another group's: where the weight
+	-- inside, rising smoothly from the middle out through each unit, reaches three quarters
 	total = 0
 	for _, unit in ipairs(units) do
 		unit[3] = length(unit[1][1] - x, unit[1][3] - z)
-		if unit[3] <= 2 * foci.coreRange then
-			near[#near + 1], total = unit, total + unit[2]
-		end
+		unit[4] = unit[2] * foci.closeness(unit[3])
+		total = total + unit[4]
 	end
-	units = near
 	table.sort(units, function(a, b) return a[3] < b[3] end)
-	local far, sum = 0, 0
+	local far, d, inside = 0, 0, 0
 	for _, unit in ipairs(units) do
-		far, sum = unit[3], sum + unit[2]
-		if sum >= 0.75 * total then
+		local now = inside + unit[4]
+		if now >= 0.75 * total and unit[4] > 0 then
+			far = d + (unit[3] - d) * (0.75 * total - inside) / unit[4]
 			break
 		end
+		far, d, inside = unit[3], unit[3], now
 	end
 	return x, z, far, y, mx, mz
 end
@@ -981,8 +1070,7 @@ function foci.frame(f, subjects)
 	end
 	local context = {}
 	for unitID in pairs(f.units) do
-		local info = unitInfo.cache[unitID]
-		local location = getSeenLocation(unitID) or info and info.location
+		local location = foci.where(unitID)
 		local d = location and length(location[1] - x, location[3] - z)
 		if d and d <= foci.frameReach then
 			points[#points + 1] = { location[1], location[3] }
@@ -1031,15 +1119,10 @@ function foci.update()
 		end
 		f.score = score + foci.highlightBonus(f)
 		best = max(best, f.score)
-		for unitID, frame in pairs(f.units) do
-			if gameFrame - frame > unitFrames then
-				f.units[unitID] = nil
-			end
-		end
-		for _, how in ipairs({ 'core', 'staked' }) do
+		for _, how in ipairs({ 'units', 'core', 'staked' }) do
 			for unitID, frame in pairs(f[how]) do
 				if gameFrame - frame > unitFrames then
-					f[how][unitID] = nil
+					f[how][unitID], f.joined[how][unitID] = nil, nil
 				end
 			end
 		end
@@ -1711,8 +1794,12 @@ function overlay.drawWorld()
 	gl.Color(1, 1, 1, 1)
 end
 
--- The game's own windows on screen, as { left, bottom, right, top }, so callouts can keep off them
-function overlay.scanUI(vsx, vsy)
+-- The game's own windows on screen, as { left, bottom, right, top }, so callouts can keep off them.
+-- Looked for again every few seconds.
+function overlay.windows(vsx, vsy)
+	if overlay.uiFrame and gameFrame - overlay.uiFrame < 3 * framesPerSecond then
+		return overlay.ui
+	end
 	local windows = {}
 	-- Other widgets' windows can go away under us
 	pcall(function()
@@ -1724,6 +1811,7 @@ function overlay.scanUI(vsx, vsy)
 			end
 		end
 	end)
+	overlay.ui, overlay.uiFrame = windows, gameFrame
 	return windows
 end
 
@@ -1800,9 +1888,7 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 	end
 	if fresh or arriving or gameFrame - overlay.placedFrame >= framesPerSecond then
 		overlay.placedFor, overlay.placedFrame = overlay.focus, gameFrame
-		if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
-			overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
-		end
+		local windows = overlay.windows(vsx, vsy)
 
 		-- Where it is off the subject; for a new shot, off the new subject from where it is on screen
 		local current = fresh and box and fromOffset(box[1] - ax, box[2] - ay, nowAcross, nowUp) or offset
@@ -1817,8 +1903,7 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 			points[#points + 1] = { project(x, spGetGroundHeight(x, z), z) }
 		end
 		for unitID in pairs(overlay.focus.units) do
-			local info = unitInfo.cache[unitID]
-			local location = getSeenLocation(unitID) or info and info.location
+			local location = foci.where(unitID)
 			if location then
 				avoid(location[1], location[3])
 			end
@@ -1897,7 +1982,7 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 			end
 			-- A scene's middle wanders on screen as the camera follows its units, so keep well clear
 			local room = reach * 1.5
-			for _, window in ipairs(overlay.ui) do
+			for _, window in ipairs(windows) do
 				if bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
 					total, blocked = total + 20, true
 				elseif bx < window[3] + room and bx + w > window[1] - room and by < window[4] + room and by + h > window[2] - room then
@@ -2063,14 +2148,12 @@ function overlay.drawWorth(vsx, vsy, size)
 	local h = row * (1 + (paired and 1 or #sides)) + pad + (paired and pad or 0)
 
 	-- Top centre, below any of the game's windows in the way
-	if not overlay.uiFrame or gameFrame - overlay.uiFrame >= 3 * framesPerSecond then
-		overlay.ui, overlay.uiFrame = overlay.scanUI(vsx, vsy), gameFrame
-	end
+	local windows = overlay.windows(vsx, vsy)
 	local bx, by = (vsx - w) / 2, vsy - h - 10
 	local moved = true
 	while moved and by > 10 do
 		moved = false
-		for _, window in ipairs(overlay.ui) do
+		for _, window in ipairs(windows) do
 			if bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
 				by, moved = window[2] - h - 10, true
 			end
@@ -2423,9 +2506,7 @@ end
 local function frameBox(corners, y, yaw, pitch, fill)
 	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(pitch, yaw)
 	local sp, cy, sy = fy, -rx, rz
-	local vsx, vsy = spGetViewGeometry()
-	local tanV = tan(rad(defaultFov / 2))
-	local tanH = tanV * vsx / vsy
+	local tanV, tanH = viewTans()
 
 	-- Projected extents of the box from distance d back from look-at point (lx, lz)
 	local function extents(lx, lz, d)
@@ -2465,8 +2546,8 @@ local function frameBox(corners, y, yaw, pitch, fill)
 		-- along the ground in the direction it faces
 		local uMin, uMax, vMin, vMax = extents(lx, lz, d)
 		local du, dv = (uMin + uMax) / 2, (vMin + vMax) / 2
-		local side, ahead = du * d * tanH, dv * d * tanV / max(0.1, -sp)
-		lx, lz = lx + side * rx + ahead * sy, lz + side * rz + ahead * cy
+		local dx, dz = fromView(du * d * tanH, dv * d * tanV / max(0.1, -sp), cy, sy)
+		lx, lz = lx + dx, lz + dz
 	end
 	return lx, lz, d
 end
@@ -2479,11 +2560,9 @@ end
 -- of the screen, and moving the shot to show it all would push its middle up to the top. At most
 -- edgeOffset of the way from the middle of the screen to its edge, and as far as corners still fit.
 local function edgeShift(look, dist, pitch, yaw, corners)
-	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(pitch, yaw)
-	local ax, az = sin(yaw), cos(yaw)
-	local vsx, vsy = spGetViewGeometry()
-	local tanV = tan(rad(defaultFov / 2)) * edgeFill
-	local tanH = tanV * vsx / vsy
+	local axes = { cameraAxes(pitch, yaw) }
+	local fx, fy, fz, cy, sy = axes[1], axes[2], axes[3], cos(yaw), sin(yaw)
+	local tanV, tanH = viewTans(edgeFill)
 	local lx, ly, lz = look[1], look[2], look[3]
 	local px, py, pz = lx - dist * fx, ly - dist * fy, lz - dist * fz
 	-- How far the ground moves on screen at a corner, against at the look-at point: across, it
@@ -2495,20 +2574,18 @@ local function edgeShift(look, dist, pitch, yaw, corners)
 	local aLow, aHigh, bLow, bHigh = 0, 0, 0, 0
 	for _, su in ipairs({ -1, 1 }) do
 		for _, sv in ipairs({ -1, 1 }) do
-			local dx = fx + rx * su * tanH + ux * sv * tanV
-			local dy = fy + uy * sv * tanV
-			local dz = fz + rz * su * tanH + uz * sv * tanV
+			local dx, dy, dz = screenRay(axes, su * tanH, sv * tanV)
 			-- Towards the horizon, as far as a few times the distance. (The ray is 1 forward, so t
 			-- is also the corner's depth.)
 			local t = dy < -1e-3 and min((ly - py) / dy, 4 * dist) or 4 * dist
 			local x, z = px + dx * t, pz + dz * t
-			local a, b = (x - lx) * rx + (z - lz) * rz, (x - lx) * ax + (z - lz) * az
+			local a, b = toView(x - lx, z - lz, cy, sy)
 			if su < 0 then aMin = max(aMin, a) else aMax = min(aMax, a) end
 			if sv < 0 then bMin = max(bMin, b) else bMax = min(bMax, b) end
 			local ox = max(0, -x) - max(0, x - mapSizeX)
 			local oz = max(0, -z) - max(0, z - mapSizeZ)
-			local oa = (ox * rx + oz * rz) * dist / t
-			local ob = (ox * ax + oz * az) * dist / t * max(0, 1 + sv * tanV * cos(pitch) / fy)
+			local oa, ob = toView(ox, oz, cy, sy)
+			oa, ob = oa * dist / t, ob * dist / t * max(0, 1 + sv * tanV * cos(pitch) / fy)
 			aLow, aHigh, bLow, bHigh = min(aLow, oa), max(aHigh, oa), min(bLow, ob), max(bHigh, ob)
 		end
 	end
@@ -2522,33 +2599,29 @@ local function edgeShift(look, dist, pitch, yaw, corners)
 	-- As far as the corners still fit
 	local cMin, cMax, dMin, dMax = huge, -huge, huge, -huge
 	for _, corner in ipairs(corners) do
-		local x, z = corner[1] - lx, corner[2] - lz
-		local a, b = x * rx + z * rz, x * ax + z * az
+		local a, b = toView(corner[1] - lx, corner[2] - lz, cy, sy)
 		cMin, cMax, dMin, dMax = min(cMin, a), max(cMax, a), min(dMin, b), max(dMax, b)
 	end
 	sa = cMax - aMax <= cMin - aMin and bound(sa, cMax - aMax, cMin - aMin) or 0
 	sb = dMax - bMax <= dMin - bMin and bound(sb, dMax - bMax, dMin - bMin) or 0
-	return sa * rx + sb * ax, sa * rz + sb * az
+	return fromView(sa, sb, cy, sy)
 end
 
 -- Score the view the rig would have at this yaw (see orbitConfig.headingWeights). Returns the
 -- total, and the score of the view alone without heading preferences.
 local function scoreHeading(c, yaw)
 	local lx, ly, lz = unpack(c.look)
-	local fx, fy, fz, rx, rz, ux, uy, uz = cameraAxes(c.pitch, yaw)
+	local axes = { cameraAxes(c.pitch, yaw) }
+	local fx, fy, fz = axes[1], axes[2], axes[3]
 	local px, py, pz = lx - c.dist * fx, ly - c.dist * fy, lz - c.dist * fz
-	local vsx, vsy = spGetViewGeometry()
 	-- As seen without the zoom: a heading is judged by what is around the shot
-	local tanV = tan(rad(defaultFov / 2))
-	local tanH = tanV * vsx / vsy
+	local tanV, tanH = viewTans()
 
 	-- Cast a grid of rays onto the plane of the look-at point
 	local activity, offMap, n = 0, 0, 0
 	for _, su in ipairs(orbitConfig.headingSamples) do
 		for _, sv in ipairs(orbitConfig.headingSamples) do
-			local dx = fx + rx * su * tanH + ux * sv * tanV
-			local dy = fy + uy * sv * tanV
-			local dz = fz + rz * su * tanH + uz * sv * tanV
+			local dx, dy, dz = screenRay(axes, su * tanH, sv * tanV)
 			n = n + 1
 			if dy >= -1e-3 then
 				offMap = offMap + 1
@@ -2683,13 +2756,6 @@ local function beats(f)
 	return f.score > score * boost
 end
 
-function lull.addDamage(unitID, unitDefID, damage)
-	local value, maxHealth = statsUnitValue(unitID, unitDefID)
-	if value and maxHealth and maxHealth > 0 then
-		lull.damage.now = lull.damage.now + value * min(damage, maxHealth) / maxHealth
-	end
-end
-
 -- A wide shot framing the foci with most going on, or the whole map if nothing is (e.g. at the
 -- start of the game). It scores score, fading over decaySeconds.
 function lull.wide(score)
@@ -2759,6 +2825,16 @@ function lull.update()
 	end
 end
 
+-- The map grid's cell gx across and gz down (from 0), kept on the map
+function scenes.cell(gx, gz)
+	return 1 + bound(gx, 0, mapGridX - 1) + bound(gz, 0, mapGridZ - 1) * mapGridX
+end
+
+-- The middle of a cell
+function scenes.cellMiddle(cell)
+	return ((cell - 1) % mapGridX + 0.5) * worldGridSize, (floor((cell - 1) / mapGridX) + 0.5) * worldGridSize
+end
+
 -- Spread amount over the four cells nearest (x, z), by closeness to their centres, so that scores
 -- don't jump as units cross cell edges. With best, keep the largest amount per cell instead of adding.
 function scenes.spread(cells, x, z, amount, best)
@@ -2767,7 +2843,7 @@ function scenes.spread(cells, x, z, amount, best)
 	for ix = 0, 1 do
 		for iz = 0, 1 do
 			local weight = (1 - math.abs(fx - gx - ix)) * (1 - math.abs(fz - gz - iz))
-			local cell = 1 + bound(gx + ix, 0, mapGridX - 1) + bound(gz + iz, 0, mapGridZ - 1) * mapGridX
+			local cell = scenes.cell(gx + ix, gz + iz)
 			if best then
 				cells[cell] = max(cells[cell] or 0, amount * weight)
 			else
@@ -2780,7 +2856,7 @@ end
 -- How much is going on at (x, z), for choosing headings (see scoreHeading): 1, plus units there
 -- (see scenes.observe) and the heat of foci there
 function scenes.activityAt(x, z)
-	local cell = 1 + bound(floor(x / worldGridSize), 0, mapGridX - 1) + bound(floor(z / worldGridSize), 0, mapGridZ - 1) * mapGridX
+	local cell = scenes.cell(floor(x / worldGridSize), floor(z / worldGridSize))
 	return 1 + (scenes.activity[cell] or 0) + (foci.cells[cell] or 0) / foci.cellHeatScale
 end
 
@@ -2879,7 +2955,7 @@ function scenes.around(stake, x, z)
 	end
 	for ix, sx in pairs(spans(x, mapGridX)) do
 		for iz, sz in pairs(spans(z, mapGridZ)) do
-			total = total + (stake[ix + (iz - 1) * mapGridX] or 0) * sx * sz
+			total = total + (stake[scenes.cell(ix - 1, iz - 1)] or 0) * sx * sz
 		end
 	end
 	return total
@@ -2920,7 +2996,7 @@ function scenes.update()
 		local base = cfg.baseline[cell] or 0
 		rise[cell] = s > base and s - base or nil
 		-- What the camera is on stops being news much sooner
-		local x, z = ((cell - 1) % mapGridX + 0.5) * worldGridSize, (floor((cell - 1) / mapGridX) + 0.5) * worldGridSize
+		local x, z = scenes.cellMiddle(cell)
 		local watched = not display.isWide and max(math.abs(x - wx), math.abs(z - wz)) <= cfg.watchedRange
 		base = base + (s - base) / (watched and cfg.watchedSeconds or cfg.baselineSeconds)
 		cfg.baseline[cell] = base >= 1 and base or nil
@@ -2933,7 +3009,7 @@ function scenes.update()
 		local total, xSum, zSum = 0, 0, 0
 		for ix = max(1, gx - 1), min(mapGridX, gx + 1) do
 			for iz = max(1, gz - 1), min(mapGridZ, gz + 1) do
-				local r = rise[ix + (iz - 1) * mapGridX] or 0
+				local r = rise[scenes.cell(ix - 1, iz - 1)] or 0
 				total, xSum, zSum = total + r, xSum + r * (ix - 0.5), zSum + r * (iz - 0.5)
 			end
 		end
@@ -3217,13 +3293,14 @@ function widget:UnitDamaged(unitID, unitDefID, _, damage, paralyzer, _, _, attac
 	if STATS then
 		statsAddDamage(unitID, unitDefID, damage)
 	end
-	lull.addDamage(unitID, unitDefID, damage)
+	local value = foci.damageValue(unitID, unitDefID, damage, paralyzer)
+	lull.damage.now = lull.damage.now + value
 	if not location or not info then
 		return
 	end
 	-- Damage nobody can be blamed for, such as fire burning on after whoever lit it has died, lava or
 	-- a shell landing after its gun is gone, is mostly not the fight itself
-	local value = foci.damageValue(unitID, unitDefID, damage, paralyzer) * (attackerID and 1 or unattributedDamageFactor)
+	value = value * (attackerID and 1 or unattributedDamageFactor)
 	local f = foci.add('damage', info.allyTeam, value, location[1], location[3], unitID, attackerID)
 	if f and attackerTeam and teamInfo[attackerTeam] then
 		foci.record(f, 'dealt', teamInfo[attackerTeam].allyTeam, value)
@@ -3408,14 +3485,14 @@ local function updateCamera(dt, userCameraOverride)
 		display.asideFrame = gameFrame
 	end
 	for _, point in ipairs(points) do
-		local dx, dz = point[1] - ex, point[2] - ez
-		local a, b = dz * sy - dx * cy, dx * sy + dz * cy
+		local a, b = toView(point[1] - ex, point[2] - ez, cy, sy)
 		aMin, aMax, bMin, bMax = min(aMin, a), max(aMax, a), min(bMin, b), max(bMax, b)
 	end
 	local corners = {}
 	for _, a in ipairs({ aMin, aMax }) do
 		for _, b in ipairs({ bMin, bMax }) do
-			corners[#corners + 1] = { ex - a * cy + b * sy, ez + a * sy + b * cy }
+			local dx, dz = fromView(a, b, cy, sy)
+			corners[#corners + 1] = { ex + dx, ez + dz }
 		end
 	end
 	local lx, lz, tdist = frameBox(corners, ey, c.yaw, tpitch, display.fill)
@@ -3475,9 +3552,9 @@ local function updateCamera(dt, userCameraOverride)
 	-- nearby still on it, a little in from the edge. Off centre by the edge shift, which keeps its
 	-- place on screen as it zooms, so there is less room on that side.
 	local fit, tx, tz, thalf = huge, tlocation[1], tlocation[3], tdiag / (2 * sqrt(2))
-	local sa, sb = tshift[2] * sy - tshift[1] * cy, tshift[1] * sy + tshift[2] * cy
+	local sa, sb = toView(tshift[1], tshift[2], cy, sy)
 	local function room(dx, dz, limit)
-		local a, b = dz * sy - dx * cy, dx * sy + dz * cy
+		local a, b = toView(dx, dz, cy, sy)
 		local function along(p, s)
 			return math.abs(p) < 1 and huge or (limit + (p > 0 and s or -s)) / math.abs(p)
 		end
