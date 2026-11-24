@@ -3619,12 +3619,11 @@ local function updateCamera(dt, userCameraOverride)
 	-- look-at point by the edge shift, less as it zooms, so the look-at point keeps its place on screen.
 	local lx, ly, lz = c.look[1] + c.shift[1] / c.zoom, c.look[2], c.look[3] + c.shift[2] / c.zoom
 	local d2 = c.dist * cos(c.pitch)
-	local rx, ry = c.pitch, c.yaw
-	-- HACK: Translation seems to apply 1 render frame later than rotation, so on a cut send the new
-	-- position with the old rotation, and the new rotation next frame.
-	if isCut then
-		rx, ry = c.rx, c.ry
-	end
+	-- The engine draws the position sent a frame late but the rotation straight away, so send each
+	-- rotation a frame late too, or every frame pairs the last position with this rotation (and a cut
+	-- shows the new position with the old rotation for a frame). Each frame then shows one pose.
+	local rx, ry = c.nextRx or c.pitch, c.nextRy or c.yaw
+	c.nextRx, c.nextRy = c.pitch, c.yaw
 
 	if STATS then
 		statsTrackYaw(dt, c.ry, ry, isCut or c.wasCut)
