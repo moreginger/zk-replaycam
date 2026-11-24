@@ -19,6 +19,8 @@ parser.add_argument('scenario', nargs='?', default='raid', choices=['raid', 'bom
                     help='recall turns the raid around halfway, so no scene should fire')
 parser.add_argument('--crowd', type=int, default=0, help='extra units milling about, to measure cost')
 parser.add_argument('--log', help='write the widget output here as an infolog')
+parser.add_argument('--dts', help='draw frame dts in ms, comma separated and cycled (default one per game frame)')
+parser.add_argument('--trace', help='write the camera state at each draw frame here (CSV)')
 parser.add_argument('--verbose', action='store_true', help='print everything the widget logs')
 parser.add_argument('--widget', default=os.path.join(here, '..', 'replaycam.lua'))
 args = parser.parse_args()
@@ -26,6 +28,10 @@ args = parser.parse_args()
 os.environ.update(WIDGET=args.widget, SCENARIO=args.scenario, CROWD=str(args.crowd))
 if args.log:
     os.environ['LOG'] = args.log
+if args.dts:
+    os.environ['DTS'] = args.dts
+if args.trace:
+    os.environ['TRACE'] = args.trace
 if args.verbose:
     os.environ['VERBOSE'] = '1'
 

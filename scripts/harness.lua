@@ -161,6 +161,14 @@ local firstScene, arrived, slowest, total, ticks = nil, nil, 0, 0, 0
 -- is less). Measured at its middle, so a change of size counts too. Each new callout (after none or
 -- the board) starts afresh.
 local was, travel, jumps, steady, framesShown = nil, 0, 0, 0, 0
+-- DTS: comma separated draw frame dts in ms, cycled, to check the camera against uneven frame pacing.
+-- TRACE: a file for the camera state at each draw frame.
+local dts, draws, drawClock = nil, 0, 0
+if os.getenv('DTS') then
+	dts = {}
+	for ms in os.getenv('DTS'):gmatch('[^,]+') do dts[#dts + 1] = tonumber(ms) / 1000 end
+end
+local trace = os.getenv('TRACE') and io.open(os.getenv('TRACE'), 'w')
 for f = 1, 90 * 30 do
 	frame = f
 	for _, id in ipairs(attackers) do
@@ -203,10 +211,18 @@ for f = 1, 90 * 30 do
 		local t = os.clock() - t0
 		slowest, total, ticks = math.max(slowest, t), total + t, ticks + 1
 	end
-	widget:Update(1 / 30)
-	widget:DrawWorldPreUnit()
-	box, board = nil, false
-	widget:DrawScreen()
+	-- Draw frames: one per game frame, or (DTS) as many as fit, with their dts cycling through DTS
+	while drawClock < f / 30 do
+		local dt = dts and dts[(draws % #dts) + 1] or 1 / 30
+		draws, drawClock = draws + 1, drawClock + dt
+		widget:Update(dt)
+		if trace then
+			trace:write(string.format('%.5f,%d,%.3f,%.3f,%.3f,%.6f,%.6f,%.4f\n', drawClock, f, cam.px, cam.py, cam.pz, cam.rx or 0, cam.ry or 0, cam.fov or 0))
+		end
+		widget:DrawWorldPreUnit()
+		box, board = nil, false
+		widget:DrawScreen()
+	end
 	local at = box and not board and { (box[1] + box[3]) / 2, (box[2] + box[4]) / 2 }
 	framesShown = framesShown + (at and 1 or 0)
 	if at and was then
