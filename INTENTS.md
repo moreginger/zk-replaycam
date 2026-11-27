@@ -14,6 +14,11 @@ numbers are where the code stands now (see `replaycam.lua`), not fixed rules.
 - News breaks through: losing a commander or a costly unit, a capture, a big build.
 - Spread attention: a place counts for less the longer the camera has been near it, unless a
   fight there is still going.
+- Fair share: over minutes, each area gets screen time in proportion to what is lost, taken or
+  built there. An area owed time (summed over its neighbours, so a split front counts as one) scores
+  higher; one over-watched scores lower. Quiet places lie dormant for 5 minutes, keeping what they
+  are owed, so a fight returning there picks it up again.
+- Builds count from when they start, not only when finished; a big one starting is news.
 
 ## Be decisive
 
@@ -47,6 +52,7 @@ numbers are where the code stands now (see `replaycam.lua`), not fixed rules.
 - Hold for 3s before changing topic or naming other units; a fight's sides and a highlight change
   it at once.
 - Name the right thing: the costliest recent build, fading with age, never a stale one.
+  Never say something is being made once it is finished: say it was built.
 - Name players and teams correctly, in their colours; sides in a fixed order (as they started on
   the map).
 - Don't cover the action: sit where the fewest units are, off the game's windows, with pointers

@@ -136,6 +136,11 @@ local function length(x, y, z)
 	return sqrt(x * x + y * y + (z and z * z or 0))
 end
 
+-- Whether (dx, dz) is no longer than range, without a square root
+local function within(dx, dz, range)
+	return dx * dx + dz * dz <= range * range
+end
+
 -- Calculate x, y, z distance between two { x, y, z } points.
 local function distance(p1, p2)
 	local x, y, z = p1[1], p1[2], p1[3]
@@ -601,7 +606,8 @@ local foci = {
 	-- Heat is metal times these. A kill counts as damage and again as a death, so kills count
 	-- double. Also kept, for the callout only: kills by the killer's side and dealt (damage) by
 	-- the attacker's side; the rest are by the side that lost or did it.
-	weights = { damage = 1, destroyed = 1, captured = 1.5, building = 0.25, built = 0.5, stake = 0.35, contact = 1, orders = 0.1 },
+	weights = { damage = 1, destroyed = 1, captured = 1.5, started = 1, building = 0.5, built = 1, stake = 0.35, contact = 1,
+		orders = 0.1 },
 	-- Contact: an armed unit closing on something of the enemy's it can hit, due in range within
 	-- contactSeconds, adds the metal it could destroy there in a second, less the further off
 	contactSeconds = 6,
@@ -620,12 +626,25 @@ local foci = {
 	-- 1/s otherwise. It halves the score at passeMid, sparing heat from the last freshSeconds so a
 	-- fight still going on holds the camera.
 	passeRange = 512, passeMid = 10, passeSlope = 0.4, freshSeconds = 2,
+	-- Fair share: each second a focus is owed its share of all that happens (by owedWeights: what was
+	-- lost, taken or built, not what threatens), and pays its share (by heat) of each second the foci
+	-- within passeRange of the camera are watched. Its score doubles for every owedDoubling seconds
+	-- owed round it (see foci.owedNear), or halves for each overpaid, between owedMin and owedMax;
+	-- what each is owed fades over owedForgetSeconds. So a second fight or a build site gets its turn
+	-- in time, and the place on show gives way the longer it holds.
+	owedDoubling = 20, owedMin = -40, owedMax = 30, owedRange = 1024, owedForgetSeconds = 300,
+	owedWeights = { damage = 1, destroyed = 1, captured = 1.5, started = 1, building = 1, built = 1 },
+	-- A focus with nothing left (or pushed out by the cap) lies dormant for dormantSeconds, keeping
+	-- what it is owed and its history: something new within dormantRange wakes it, or a focus that
+	-- comes within dormantRange takes it in. Dormant foci are kept sorted by x, for lookups.
+	dormantSeconds = 300, dormantRange = 768, dormant = {},
 	-- An allied cursor this close multiplies the score by this
 	cursorRange = 512, cursorBoost = 1.5,
 	-- A focus this hot and this close to the shot is taken into frame for a few seconds
 	asideHeat = 1000, asideRange = worldGridSize * 2.5, asideFrames = 3 * framesPerSecond,
 	-- Moments that are news in themselves: losing a commander or something costing highlightMetal,
-	-- a capture costing captureHighlightMetal, or finishing something costing builtHighlightMetal.
+	-- a capture costing captureHighlightMetal, or starting or finishing something costing
+	-- builtHighlightMetal.
 	-- One adds its metal to the score, halving every highlightHalfLife seconds and ignoring passe.
 	highlightMetal = 750, captureHighlightMetal = 300, builtHighlightMetal = 1500, highlightHalfLife = 3,
 	-- A unit morphed (or a commander upgraded) from another counts as this share of its cost: the
@@ -640,7 +659,7 @@ local foci = {
 
 function foci.new(x, z)
 	foci.lastId = foci.lastId + 1
-	local f = { id = foci.lastId, x = x, z = z, mass = 0, heat = 0, pending = 0, score = 0, watched = 0,
+	local f = { id = foci.lastId, x = x, z = z, mass = 0, heat = 0, pending = 0, score = 0, watched = 0, owed = 0,
 		bins = {}, totals = {}, units = {}, core = {}, staked = {},
 		joined = { units = {}, core = {}, staked = {} }, players = {}, born = gameFrame }
 	foci.list[#foci.list + 1] = f
@@ -658,6 +677,69 @@ function foci.near(x, z, range)
 		end
 	end
 	return best
+end
+
+-- The first dormant focus at or past x (they are sorted by x)
+local function dormantFrom(x)
+	local list = foci.dormant
+	local lo, hi = 1, #list + 1
+	while lo < hi do
+		local mid = floor((lo + hi) / 2)
+		if list[mid].x < x then
+			lo = mid + 1
+		else
+			hi = mid
+		end
+	end
+	return lo
+end
+
+-- The nearest dormant focus within range of (x, z), and its index
+function foci.nearDormant(x, z, range)
+	local list, range2 = foci.dormant, range * range
+	local best, bestI, bestD = nil, nil, range2
+	for i = dormantFrom(x - range), #list do
+		local f = list[i]
+		local dx = f.x - x
+		if dx > range then
+			break
+		end
+		local dz = f.z - z
+		local d = dx * dx + dz * dz
+		if d <= bestD then
+			best, bestI, bestD = f, i, d
+		end
+	end
+	return best, bestI
+end
+
+-- What is owed round a focus: its own, and that of the foci (dormant too) within owedRange, each
+-- counting less the further off, as a fight or a base is often several foci
+function foci.owedNear(f)
+	local range, total = foci.owedRange, f.owed
+	local function add(other)
+		local dx, dz = other.x - f.x, other.z - f.z
+		if other ~= f and within(dx, dz, range) then
+			total = total + other.owed * (1 - length(dx, dz) / range)
+		end
+	end
+	for _, other in ipairs(foci.list) do
+		add(other)
+	end
+	local list = foci.dormant
+	for i = dormantFrom(f.x - range), #list do
+		if list[i].x > f.x + range then
+			break
+		end
+		add(list[i])
+	end
+	return bound(total, foci.owedMin, foci.owedMax)
+end
+
+-- Let a focus lie dormant (see dormantSeconds)
+function foci.sleep(f)
+	f.dormantSince, f.heat, f.fresh, f.score, f.pending = gameFrame, 0, 0, 0, 0
+	table.insert(foci.dormant, dormantFrom(f.x), f)
 end
 
 -- Add metal of a kind to a focus's bins and totals, for a side
@@ -689,6 +771,10 @@ function foci.add(metric, allyTeam, metal, x, z, unitID, otherID)
 	end
 	local weighted = metal * (foci.weights[metric] or 0)
 	local f = foci.near(x, z, foci.joinRange)
+	local woken, wokenI
+	if not f then
+		woken, wokenI = foci.nearDormant(x, z, foci.dormantRange)
+	end
 	if not f then
 		if #foci.list >= foci.cap then
 			local weakest, weakestHeat = nil, huge
@@ -701,9 +787,20 @@ function foci.add(metric, allyTeam, metal, x, z, unitID, otherID)
 			if not weakest or weighted <= weakestHeat then
 				return
 			end
-			table.remove(foci.list, weakest)
+			foci.sleep(table.remove(foci.list, weakest))
+			-- Its place in the dormant list may have moved
+			if woken then
+				woken, wokenI = foci.nearDormant(x, z, foci.dormantRange)
+			end
 		end
-		f = foci.new(x, z)
+		if woken then
+			table.remove(foci.dormant, wokenI)
+			woken.dormantSince = nil
+			foci.list[#foci.list + 1] = woken
+			f = woken
+		else
+			f = foci.new(x, z)
+		end
 	end
 	foci.record(f, metric, allyTeam, metal)
 	if weighted > 0 then
@@ -811,7 +908,8 @@ end
 
 -- Weighted metal over the bins, newest (the one filling) first, older ones worth less. Also returns
 -- the part from the last freshSeconds.
-function foci.heatOf(f)
+function foci.heatOf(f, weights)
+	weights = weights or foci.weights
 	local heat, fresh, w = 0, 0, 1
 	for age = 0, foci.bins - 1 do
 		if age == foci.freshSeconds then
@@ -820,7 +918,7 @@ function foci.heatOf(f)
 		local bin = f.bins[(foci.slot - 1 - age) % foci.bins + 1]
 		if bin then
 			for metric, m in pairs(bin) do
-				local weight = foci.weights[metric]
+				local weight = weights[metric]
 				if weight then
 					for _, v in pairs(m) do
 						heat = heat + v * weight * w
@@ -883,6 +981,7 @@ function foci.absorb(keep, gone)
 		keep.players[team] = (keep.players[team] or 0) + v
 	end
 	keep.watched, keep.born = max(keep.watched, gone.watched), min(keep.born, gone.born)
+	keep.owed = bound(keep.owed + gone.owed, foci.owedMin, foci.owedMax)
 	keep.imminent = max(keep.imminent or 0, gone.imminent or 0)
 	if gone.highlight and foci.highlightBonus(gone) > foci.highlightBonus(keep) then
 		keep.highlight = gone.highlight
@@ -903,7 +1002,7 @@ function foci.merge()
 		local a = list[i]
 		for j = 1, i - 1 do
 			local b = list[j]
-			if a and length(a.x - b.x, a.z - b.z) <= foci.mergeRange then
+			if within(a.x - b.x, a.z - b.z, foci.mergeRange) then
 				local keepA = a == shown or b ~= shown and a.mass > b.mass
 				if keepA then
 					foci.absorb(a, b)
@@ -1093,6 +1192,24 @@ function foci.update()
 		end
 	end
 	foci.merge()
+	-- Take in dormant foci nearby, and let those dormant too long go
+	for _, f in ipairs(foci.list) do
+		local d, i = foci.nearDormant(f.x, f.z, foci.dormantRange)
+		if d then
+			table.remove(foci.dormant, i)
+			foci.absorb(f, d)
+		end
+	end
+	local forget = 1 - 1 / foci.owedForgetSeconds
+	local dormantFrames = foci.dormantSeconds * framesPerSecond
+	for i = #foci.dormant, 1, -1 do
+		local d = foci.dormant[i]
+		if gameFrame - d.dormantSince > dormantFrames then
+			table.remove(foci.dormant, i)
+		else
+			d.owed = d.owed * forget
+		end
+	end
 	local wx, _, wz = unpack(display.location)
 	local cursors = {}
 	for _, acp in pairs(WG.alliedCursorsPos or {}) do
@@ -1100,19 +1217,40 @@ function foci.update()
 			cursors[#cursors + 1] = acp
 		end
 	end
-	local best = 0
+	local best, totalDue = 0, 0
 	for _, f in ipairs(foci.list) do
-		local fresh
-		f.heat, fresh = foci.heatOf(f)
+		f.heat, f.fresh = foci.heatOf(f)
+		f.due = foci.heatOf(f, foci.owedWeights)
+		totalDue = totalDue + f.due
 		f.pending, f.mass = 0, f.mass * foci.binDecay
 		for team, v in pairs(f.players) do
 			f.players[team] = v >= 1 and v * foci.binDecay or nil
 		end
-		local watched = not display.isWide and length(f.x - wx, f.z - wz) <= foci.passeRange
+	end
+	-- A second watched is paid once, by the foci in view, by heat (evenly if none has any)
+	local watchedHeat, watchedCount = 0, 0
+	for _, f in ipairs(foci.list) do
+		f.inView = not display.isWide and within(f.x - wx, f.z - wz, foci.passeRange)
+		if f.inView then
+			watchedHeat, watchedCount = watchedHeat + f.heat, watchedCount + 1
+		end
+	end
+	for _, f in ipairs(foci.list) do
+		local watched = f.inView
 		f.watched = watched and f.watched + 1 or max(0, f.watched - 1)
+		local paid = not watched and 0 or watchedHeat > 0 and f.heat / watchedHeat or 1 / watchedCount
+		f.owed = bound(f.owed * forget + (totalDue > 0 and f.due / totalDue or 0) - paid,
+			foci.owedMin, foci.owedMax)
+	end
+	for _, f in ipairs(foci.list) do
+		f.owedNear = foci.owedNear(f)
+	end
+	for _, f in ipairs(foci.list) do
+		local fresh = f.fresh
 		local score = fresh + (f.heat - fresh) * (1 - logistic(foci.passeSlope * (f.watched - foci.passeMid)))
+		score = score * 2 ^ (f.owedNear / foci.owedDoubling)
 		for _, c in ipairs(cursors) do
-			if length(c[1] - f.x, c[2] - f.z) <= foci.cursorRange then
+			if within(c[1] - f.x, c[2] - f.z, foci.cursorRange) then
 				score = score * foci.cursorBoost
 				break
 			end
@@ -1141,8 +1279,8 @@ function foci.update()
 		table.sort(sorted, function(a, b) return a.score > b.score end)
 		for i = 1, min(4, #sorted) do
 			local f = sorted[i]
-			spEcho(string.format('rc-focus,%d,%.0f,%.0f,%.0f,%.0f,%d,%s,%d', f.id, f.x, f.z, f.heat, f.score, f.watched,
-				foci.kind(f, 6) or 'none', #foci.list))
+			spEcho(string.format('rc-focus,%d,%.0f,%.0f,%.0f,%.0f,%d,%s,%d,%.1f,%d', f.id, f.x, f.z, f.heat, f.score,
+				f.watched, foci.kind(f, 6) or 'none', #foci.list, f.owedNear, #foci.dormant))
 		end
 	end
 
@@ -1151,7 +1289,7 @@ function foci.update()
 		local f = foci.list[i]
 		f.bins[foci.slot] = nil
 		if not next(f.bins) and f ~= shown then
-			table.remove(foci.list, i)
+			foci.sleep(table.remove(foci.list, i))
 		end
 	end
 end
@@ -1258,7 +1396,7 @@ function foci.aside()
 	local wx, _, wz = unpack(display.location)
 	local best
 	for _, f in ipairs(foci.list) do
-		if f ~= shown and f.heat >= foci.asideHeat and length(f.x - wx, f.z - wz) <= foci.asideRange
+		if f ~= shown and f.heat >= foci.asideHeat and within(f.x - wx, f.z - wz, foci.asideRange)
 		    and (not best or f.heat > best.heat) then
 			best = f
 		end
@@ -1412,6 +1550,7 @@ end
 -- The camera has a new shot: the callout is about its focus from now on
 function overlay.show(f)
 	overlay.focus, overlay.kind, overlay.pending, overlay.headline, overlay.detail = f, nil, nil, nil, nil
+	overlay.making = nil
 	overlay.said, overlay.saidFrame = nil, nil
 	overlay.subjects, overlay.tally, overlay.ringed = {}, {}, false
 	overlay.arrowFrom, overlay.arrowTo, overlay.left, overlay.closing = nil, nil, nil, nil
@@ -1449,14 +1588,14 @@ function overlay.about(f)
 		end
 		-- Otherwise whatever there is most of, weighted as for heat
 		local best, bestValue = nil, 0
-		for _, metric in ipairs({ 'stake', 'contact', 'building', 'built', 'orders' }) do
+		for _, metric in ipairs({ 'stake', 'contact', 'started', 'building', 'built', 'orders' }) do
 			local value = foci.recent(f, metric, window) * foci.weights[metric]
 			if value > bestValue then
 				best, bestValue = metric, value
 			end
 		end
 		if best then
-			return (best == 'stake' or best == 'contact') and 'fight' or best, lost
+			return (best == 'stake' or best == 'contact') and 'fight' or best == 'started' and 'building' or best, lost
 		elseif total > 0 then
 			return 'fight', lost
 		end
@@ -1584,7 +1723,18 @@ function overlay.update()
 	-- breaks out: the trouble has arrived
 	local kind, lost = overlay.about(f)
 	local fresh = false
-	if kind and kind ~= overlay.kind then
+	-- A build named as under way that is finished (or gone) is old news at once: say what was built
+	local making = overlay.kind == 'building' and overlay.making
+	local info = making and unitInfo.cache[making]
+	local ended = making and not (info and info.unfinished and not info.removeAfterFrame)
+	if ended then
+		local b = f.lastBuilt
+		kind = b and b.unitID == making and 'built' or kind
+		overlay.making = nil
+	end
+	if ended and kind then
+		overlay.kind, overlay.pending, fresh = kind, nil, true
+	elseif kind and kind ~= overlay.kind then
 		if not overlay.kind or kind == 'highlight' or overlay.kind == 'highlight' or kind == 'fight'
 		    or kind == overlay.pending and gameFrame - overlay.pendingFrame >= overlay.holdSeconds * framesPerSecond
 		    and gameFrame - (overlay.saidFrame or 0) >= overlay.holdSeconds * framesPerSecond then
@@ -1610,6 +1760,7 @@ function overlay.update()
 			spEcho(string.format('rc-callout,%s,%d,%s', overlay.kind, f.id, headline))
 		end
 		overlay.headline, overlay.detail, overlay.color, overlay.subjects, overlay.ringed = headline, detail, color, subjects, ringed
+		overlay.making = overlay.kind == 'building' and next(subjects) or nil
 		if overlay.kind ~= 'orders' then
 			overlay.arrowFrom, overlay.arrowTo = nil, nil
 		end
@@ -2968,7 +3119,7 @@ function scenes.subjects(x, z, side)
 	for _, unitID in ipairs(spGetUnitsInCylinder(x, z, scenes.threatRadius)) do
 		local location, _, _, _, isStatic, weaponImportance = unitInfo:get(unitID)
 		local info = unitInfo.cache[unitID]
-		if location and length(location[1] - x, location[3] - z) <= scenes.radius then
+		if location and within(location[1] - x, location[3] - z, scenes.radius) then
 			(isStatic and statics or mobiles)[unitID] = location
 		elseif location and not isStatic and (weaponImportance or 0) > 0 and info.allyTeam ~= side then
 			threats[unitID] = location
@@ -3258,14 +3409,30 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
 	end
 
 	local allyTeam = teamInfo[unitTeam].allyTeam
-	unitInfo:watch(unitID, allyTeam, unitDefID)
+	local location, _, _, name = unitInfo:watch(unitID, allyTeam, unitDefID)
 	-- Zero-K's morph flags the unit it makes while making it
 	if spGetGameRulesParam("morphUnitCreating") == 1 then
 		foci.morphed[unitID] = true
 	end
-	if unitInfo.cache[unitID] then
+	-- Something already whole (a commander, or a first factory, which Zero-K finishes before this is
+	-- called) is not unfinished, nor started
+	local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
+	local whole = buildProgress and buildProgress >= 1
+	if unitInfo.cache[unitID] and not whole then
 		-- Not a threat until finished (see scenes), and what goes into it counts (see foci.observe)
 		unitInfo.cache[unitID].unfinished, unitInfo.cache[unitID].builderID = true, builderID
+	end
+	-- Something started (not morphed) counts its cost, and is news if it is big
+	local unitDef = UnitDefs[unitDefID]
+	if not location or foci.morphed[unitID] or unitDef.customParams.dontcount or not buildProgress
+	    or buildProgress >= 1 then
+		return
+	end
+	local metal, x, z = unitDef.metalCost, location[1], location[3]
+	local f = foci.add('started', allyTeam, metal, x, z, unitID, builderID)
+	if f and metal >= foci.builtHighlightMetal then
+		foci.highlight(f, { kind = 'built', metal = metal, name = name, team = unitTeam, unitID = unitID, x = x, z = z,
+			verb = " started" })
 	end
 end
 
@@ -3417,7 +3584,7 @@ function closeUp.wanted(c, fit, opening, close)
 	local why = not close and opening and (overlay.kind == 'fight' and 'opening'
 		or gameFrame < c.closeEnd + closeUp.restSeconds * framesPerSecond and 'rest')
 	for _, other in ipairs(foci.list) do
-		if other ~= f and other.heat and length(other.x - f.x, other.z - f.z) <= closeUp.range then
+		if other ~= f and other.heat and within(other.x - f.x, other.z - f.z, closeUp.range) then
 			if other.imminent and gameFrame - other.imminent <= 1.5 * framesPerSecond
 			    and other.heat >= closeUp.imminentShare * f.heat then
 				return 1, 'nearby'
@@ -3480,7 +3647,7 @@ local function updateCamera(dt, userCameraOverride)
 	local aMin, aMax, bMin, bMax = -half, half, -half, half
 	local aside = display.aside
 	if aside and not display.isWide and gameFrame - aside[3] < foci.asideFrames
-	    and length(aside[1] - ex, aside[2] - ez) <= foci.asideRange then
+	    and within(aside[1] - ex, aside[2] - ez, foci.asideRange) then
 		points[#points + 1] = aside
 		display.asideFrame = gameFrame
 	end
