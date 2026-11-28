@@ -460,14 +460,20 @@ local maxPanSeconds = 1.8
 -- lens, as a documentary or sports camera zooms in, rather than by moving the camera in. Each new
 -- shot, cut or panned to, settles its zoom straight away, except that a fight opens at the usual
 -- framing to set the scene. After that the zoom only changes once the shot has wanted the change
--- for a while, and not within holdSeconds of the last change, so it doesn't go in and out with
--- every jump or flicker of heat nearby: going in as the action starts after enterSeconds, and
--- staying in after it ends for leaveSeconds; but at once if its units no longer fit. A shot can't
--- open close within restSeconds of the last close-up ending, so close-ups don't follow each other
--- shot after shot; a shot can still go close as its action starts.
+-- for a while, and not within holdSeconds of the last change it decided, so it doesn't go in and
+-- out with every jump or flicker of heat nearby: going in after enterSeconds (at once when contact
+-- is imminent, to be close before the shooting starts), and staying in after the action ends for
+-- leaveSeconds; but at once if its units no longer fit. A shot opened within restSeconds of the
+-- last close-up ending stays wide until something changes there (what is said about it, or
+-- contact), so close-ups don't follow each other shot after shot, nor come late for no reason.
+-- How close is earned by importance, as the size of something in frame should match its importance
+-- to the story: what is going on there (heat and highlight) against the typical shot's.
 local closeUp = {
 	-- Zoom (on the field of view) at most this much
 	maxZoom = 1.6,
+	-- No zoom at minShare of the typical shot's importance (keepShare once close), all of maxZoom at
+	-- fullShare; less than minPush isn't worth it. Typical is a running mean over typicalSeconds.
+	minShare = 0.6, keepShare = 0.4, fullShare = 1.5, minPush = 1.1, typicalSeconds = 60,
 	-- Close when the shot's units would still fit zoomed in enterZoom; once close, until leaveZoom
 	enterZoom = 1.4, leaveZoom = 1.15,
 	-- Not while another focus hotter than the shot is within range of it, or one with imminentShare
@@ -2849,7 +2855,7 @@ local function initCamera(cx, cy, cz)
 		-- Rig state
 		look = { lx, spGetGroundHeight(lx, lz), lz }, lookv = { 0, 0, 0 }, shift = { 0, 0 }, shiftv = { 0, 0 },
 		dist = calcCamRange(camDiagMin, defaultFov), distv = 0,
-		zoom = 1, zoomv = 0, tzoom = 1, zoomFrame = 0, closeEnd = -huge,
+		zoom = 1, zoomv = 0, tzoom = 1, zoomFrame = 0, holdFrame = -huge, closeEnd = -huge,
 		pitch = defaultRx, pitchv = 0,
 		yaw = defaultRy, yawv = 0, tyaw = defaultRy,
 		-- Pose last sent to the engine
@@ -2896,7 +2902,7 @@ local function beats(f)
 		boost = switchBoostNear + (switchBoostFar - switchBoostNear) * transitionCost({ f.x, spGetGroundHeight(f.x, f.z), f.z })
 	end
 	-- Contacts are refreshed once a second per unit
-	if shown.imminent and gameFrame - shown.imminent <= 1.5 * framesPerSecond then
+	if closeUp.imminent(shown) then
 		boost = boost * foci.imminentBoost
 	end
 	local score = shown.score
@@ -3569,24 +3575,53 @@ function widget:UnitTaken(unitID, unitDefID, oldTeam, newTeam)
 	end
 end
 
+-- Contact is about to happen at focus f
+function closeUp.imminent(f)
+	return f.imminent and gameFrame - f.imminent <= 1.5 * framesPerSecond
+end
+
 -- The zoom the shot on show wants, when its units would fit zoomed in fit times; opening when it
 -- is a new shot, close when the camera is close now (see closeUp). Something hotter nearby stops it
 -- going close, but doesn't bring it out: the camera will likely go there anyway. Something about to
 -- happen nearby does, to show it coming. Also why it wants no zoom.
 function closeUp.wanted(c, fit, opening, close)
 	local f = shown
+	if opening then
+		c.rested = nil
+	end
 	if f.wide or not f.heat or f.heat <= 0 then
 		return 1, 'none'
+	end
+	local importance = f.heat + foci.highlightBonus(f)
+	closeUp.typical = closeUp.typical
+		and closeUp.typical + (importance - closeUp.typical) / (closeUp.typicalSeconds * framesPerSecond)
+		or importance
+	local low = close and closeUp.keepShare or closeUp.minShare
+	local earned = 1 + (closeUp.maxZoom - 1)
+		* bound((importance / closeUp.typical - low) / (closeUp.fullShare - low), 0, 1)
+	if earned < closeUp.minPush then
+		return 1, 'routine'
 	elseif fit < (close and closeUp.leaveZoom or closeUp.enterZoom) then
 		-- Including what is arriving, and a scene being taken into frame
 		return 1, 'fit'
 	end
 	local why = not close and opening and (overlay.kind == 'fight' and 'opening'
 		or gameFrame < c.closeEnd + closeUp.restSeconds * framesPerSecond and 'rest')
+	-- What is said about the shot, once the callout has caught up with it
+	local kind = overlay.focus == f and overlay.kind
+	if opening then
+		c.rested, c.restKind = why == 'rest' and f or nil, kind
+	elseif c.rested == f and not close then
+		c.restKind = c.restKind or kind
+		if (not kind or kind == c.restKind) and not closeUp.imminent(f) then
+			why = 'rest'
+		else
+			c.rested = nil
+		end
+	end
 	for _, other in ipairs(foci.list) do
 		if other ~= f and other.heat and within(other.x - f.x, other.z - f.z, closeUp.range) then
-			if other.imminent and gameFrame - other.imminent <= 1.5 * framesPerSecond
-			    and other.heat >= closeUp.imminentShare * f.heat then
+			if closeUp.imminent(other) and other.heat >= closeUp.imminentShare * f.heat then
 				return 1, 'nearby'
 			end
 			why = why or not close and other.heat >= closeUp.rivalShare * f.heat and 'hotter'
@@ -3595,7 +3630,8 @@ function closeUp.wanted(c, fit, opening, close)
 	if why then
 		return 1, why
 	end
-	return min(fit, closeUp.maxZoom)
+	-- Once close, importance fading doesn't ease it out bit by bit: it stays until it is routine
+	return min(fit, close and max(earned, c.tzoom) or earned)
 end
 
 local function updateCamera(dt, userCameraOverride)
@@ -3747,12 +3783,13 @@ local function updateCamera(dt, userCameraOverride)
 	if opening or isCut then
 		c.zoomShot, c.tzoom, c.zoomFrame, c.wantFrame = shown, want, gameFrame, nil
 	elseif c.tzoom > 1 and c.tzoom > fit * closeUp.tooTight then
-		c.tzoom, c.zoomFrame, c.wantFrame, quick = max(1, min(want, fit)), gameFrame, nil, true
+		c.tzoom, c.zoomFrame, c.holdFrame, c.wantFrame, quick = max(1, min(want, fit)), gameFrame, gameFrame, nil, true
 	elseif math.abs(want - c.tzoom) > 0.1 then
 		c.wantFrame = c.wantFrame or gameFrame
-		if gameFrame - c.wantFrame >= (want > c.tzoom and closeUp.enterSeconds or closeUp.leaveSeconds) * framesPerSecond
-		    and gameFrame - c.zoomFrame >= closeUp.holdSeconds * framesPerSecond then
-			c.tzoom, c.zoomFrame, c.wantFrame = want, gameFrame, nil
+		local wait = want < c.tzoom and closeUp.leaveSeconds or closeUp.imminent(shown) and 0 or closeUp.enterSeconds
+		if gameFrame - c.wantFrame >= wait * framesPerSecond
+		    and gameFrame - c.holdFrame >= closeUp.holdSeconds * framesPerSecond then
+			c.tzoom, c.zoomFrame, c.holdFrame, c.wantFrame = want, gameFrame, gameFrame, nil
 		end
 	else
 		c.wantFrame = nil

@@ -6,7 +6,7 @@
 #   run-replay-headed.sh replay.sdfz out-dir [widget.lua] [max-seconds]
 #
 # out-dir gets infolog.txt and the screenshots, named by game frame. WIDTH and HEIGHT set the window.
-# The window is also recorded at FPS frames a second (default 10) to VIDEO_DIR (default
+# The window is also recorded at FPS frames a second (default 30) to VIDEO_DIR (default
 # ~/Downloads/replaycam), as <date>_<map>_<VIDEO_NAME>.mp4; VIDEO_NAME defaults to the name of
 # out-dir. VIDEO=0 skips it. QUANT sets the x264 quality: lower is better and bigger (default 34).
 # SYNC=1 draws the game frame in the bottom left corner (rc_frameclock.lua), for stack-videos.py.
@@ -71,8 +71,8 @@ if [ "${VIDEO:-1}" != 0 ] && command -v gst-launch-1.0 > /dev/null; then
 		# Frames stamped as they are grabbed, then dropped or repeated to make FPS a second. No B-frames,
 		# which matroska keeps no decode times for, so the mp4 would come out too long.
 		gst-launch-1.0 -q -e ximagesrc xid="$xid" use-damage=false show-pointer=false do-timestamp=true \
-			! videorate ! video/x-raw,framerate=${FPS:-10}/1 ! videoconvert ! video/x-raw,format=I420 \
-			! x264enc speed-preset=veryfast pass=qual quantizer=${QUANT:-34} key-int-max=$((${FPS:-10} * 5)) bframes=0 \
+			! videorate ! video/x-raw,framerate=${FPS:-30}/1 ! videoconvert ! video/x-raw,format=I420 \
+			! x264enc speed-preset=veryfast pass=qual quantizer=${QUANT:-34} key-int-max=$((${FPS:-30} * 5)) bframes=0 \
 			! h264parse ! matroskamux ! filesink location="$dir/video.mkv" > "$dir/video.log" 2>&1 &
 		recorder_pid=$!
 	else

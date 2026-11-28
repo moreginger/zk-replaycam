@@ -117,13 +117,13 @@ scripts/run-replay-headed.sh replays/some-replay.sdfz runs/headed/mychange "" 30
 - The last argument stops it after that many seconds; the first few minutes are often enough.
 - The window opens on your desktop, with your graphics settings and no sound. It needs more memory than a headless run, so run one at a time with Zero-K closed.
 - With `DEBUG` on, `rc-place` lines in its `infolog.txt` say when and why the callout was moved.
-- It also records the window at 10 fps with GStreamer, to `~/Downloads/replaycam/<date>_<map>_<name>.mp4`, where the name is the output folder's unless `VIDEO_NAME` gives one. `VIDEO_DIR` puts it elsewhere and `VIDEO=0` turns it off. `FPS` sets the frame rate and `QUANT` the quality (x264, lower is better and bigger; 34 by default, 20 looks good at 30 fps).
+- It also records the window at 30 fps with GStreamer, to `~/Downloads/replaycam/<date>_<map>_<name>.mp4`, where the name is the output folder's unless `VIDEO_NAME` gives one. `VIDEO_DIR` puts it elsewhere and `VIDEO=0` turns it off. `FPS` sets the frame rate and `QUANT` the quality (x264, lower is better and bigger; 34 by default, 20 looks good at 30 fps).
 
 To compare two versions side by side, record each with `SYNC=1`, which draws the game frame as a strip of squares in the bottom left corner, then stack the videos. Frames are matched by game frame, so different start-up times and engine stalls don't put them out of step, and the strip is cropped off:
 
 ```bash
-SYNC=1 FPS=30 QUANT=20 VIDEO_NAME=new scripts/run-replay-headed.sh replays/some-replay.sdfz runs/headed/new new.lua 600
-SYNC=1 FPS=30 QUANT=20 VIDEO_NAME=old scripts/run-replay-headed.sh replays/some-replay.sdfz runs/headed/old old.lua 600
+SYNC=1 QUANT=20 VIDEO_NAME=new scripts/run-replay-headed.sh replays/some-replay.sdfz runs/headed/new new.lua 600
+SYNC=1 QUANT=20 VIDEO_NAME=old scripts/run-replay-headed.sh replays/some-replay.sdfz runs/headed/old old.lua 600
 scripts/stack-videos.py out.mp4 ~/Downloads/replaycam/<date>_<map>_new.mp4 "New" ~/Downloads/replaycam/<date>_<map>_old.mp4 "Old"
 ```
 
