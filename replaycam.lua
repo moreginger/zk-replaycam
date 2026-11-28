@@ -106,6 +106,9 @@ local userInactiveSecondsThreshold = 2
 
 -- Callout and ground markings for the shot (see OVERLAY)
 local overlay = { tally = {}, allyColor = {} }
+-- For STATS: how far the callout moved on screen since the last flush, in all and within a shot,
+-- the frames it was drawn and moved, and where it was last drawn
+overlay.stats = { travel = 0, holdTravel = 0, frames = 0, moving = 0 }
 
 i18nPrefix = 'actiontrackingcamera_'
 options_path = 'Settings/Spectating/Action Tracking Camera'
@@ -1817,10 +1820,26 @@ function overlay.centre()
 	end
 end
 
--- The selection shape Zero-K draws round a unit (see its gui_selectedunits_gl4.lua) on screen: a
--- square of its footprint for a building, turned with it, otherwise a circle across the footprint's
--- diagonal, at the unit's height (y) so one in the air, jumping or flying, still has it round it
-function overlay.outline(unitID, x, y, z)
+-- How far a building reaches each way from its middle (elmos): its footprint, or its baseplate on
+-- the ground where that is wider, as for an airplane plant's pads. Kept per unit type.
+overlay.halves = {}
+function overlay.halfSize(ud)
+	local half = overlay.halves[ud]
+	if not half then
+		local scale = tonumber(ud.customParams and ud.customParams.selection_scale) or 1
+		local hx, hz = 4 * (ud.xsize or 2) * scale, 4 * (ud.zsize or 2) * scale
+		half = { max(hx, (ud.buildingDecalSizeX or 0) * 8), max(hz, (ud.buildingDecalSizeY or 0) * 8) }
+		overlay.halves[ud] = half
+	end
+	return half[1], half[2]
+end
+
+-- The selection shape Zero-K draws round a unit (see its gui_selectedunits_gl4.lua) on screen, or as
+-- project (see overlay.projector) puts it: a square of its footprint for a building, turned with
+-- it, otherwise a circle across the footprint's diagonal, at the unit's height (y) so one in the
+-- air, jumping or flying, still has it round it. Whole takes in a building's baseplate too.
+function overlay.outline(unitID, x, y, z, project, whole)
+	project = project or spWorldToScreenCoords
 	local ud = UnitDefs[spGetUnitDefID(unitID)]
 	local xs, zs = ud.xsize or 2, ud.zsize or 2
 	local scale = tonumber(ud.customParams and ud.customParams.selection_scale) or 1
@@ -1830,13 +1849,39 @@ function overlay.outline(unitID, x, y, z)
 		local a = (spGetUnitHeading(unitID) or 0) * 2 * pi / 65536
 		local c, s = cos(a), sin(a)
 		local hx, hz = 4 * xs * scale, 4 * zs * scale
+		if whole then
+			hx, hz = overlay.halfSize(ud)
+		end
 		for _, k in ipairs({ { -1, 1 }, { 1, 1 }, { 1, -1 }, { -1, -1 } }) do
 			local px, pz = k[1] * hx, k[2] * hz
-			points[#points + 1] = { spWorldToScreenCoords(x + px * c + pz * s, y, z - px * s + pz * c) }
+			points[#points + 1] = { project(x + px * c + pz * s, y, z - px * s + pz * c) }
 		end
 		return points
 	end
-	return overlay.ring(x, z, 4 * sqrt(xs * xs + zs * zs) * scale, 16, nil, y)
+	return overlay.ring(x, z, 4 * sqrt(xs * xs + zs * zs) * scale, 16, project, y)
+end
+
+-- What a unit named alone stands for on screen: the building it is in or on, as a unit being made
+-- in a factory, or else itself. Looked for again once a second.
+function overlay.holder(unitID, x, z)
+	local held = overlay.held
+	if held and held.unitID == unitID and gameFrame - held.frame < framesPerSecond then
+		return held.holder
+	end
+	local best, bestSize = unitID, 0
+	for _, id in ipairs(spGetUnitsInCylinder(x, z, 200)) do
+		local ud = id ~= unitID and UnitDefs[spGetUnitDefID(id) or -1]
+		if ud and ud.isImmobile then
+			local hx, hz = overlay.halfSize(ud)
+			local ux, _, uz = spGetUnitPosition(id)
+			local half = max(hx, hz)
+			if ux and math.abs(x - ux) <= half and math.abs(z - uz) <= half and hx * hz > bestSize then
+				best, bestSize = id, hx * hz
+			end
+		end
+	end
+	overlay.held = { unitID = unitID, frame = gameFrame, holder = best }
+	return best
 end
 
 -- How far along from (x1, y1) to (x2, y2) it first crosses the outline through points, or 0
@@ -1951,25 +1996,94 @@ function overlay.drawWorld()
 	gl.Color(1, 1, 1, 1)
 end
 
--- The game's own windows on screen, as { left, bottom, right, top }, so callouts can keep off them.
--- Looked for again every few seconds.
+-- Whether a Chili control draws anything itself, rather than only holding others: text that is
+-- there and not faded out, something with a background that can be seen, or anything else (buttons,
+-- images, bars)
+overlay.holders = { control = true, stackpanel = true, layoutpanel = true, scrollpanel = true, grid = true, object = true }
+function overlay.draws(c)
+	local class = c.classname or ''
+	if overlay.holders[class] then
+		return false
+	elseif class == 'label' or class == 'textbox' then
+		local text, color = c.caption or c.text, c.font and c.font.color
+		return text ~= nil and text ~= '' and not (color and (color[4] or 1) < 0.1)
+	end
+	local color = (class == 'window' or class == 'screen') and c.color or c.backgroundColor
+	return not (color and (color[4] or 1) < 0.05)
+end
+
+-- Where a control and what is in it draw on screen, added to box { left, top, right, bottom } in
+-- Chili's coordinates (from the top). Hidden controls aren't among their parent's children.
+function overlay.drawnIn(c, box, depth)
+	if depth > 12 or c.visible == false or c.hidden then
+		return
+	end
+	local w, h = c.width or 0, c.height or 0
+	if w > 2 and h > 2 and overlay.draws(c) then
+		local x, y = c:LocalToScreen(0, 0)
+		box[1], box[2], box[3], box[4] = min(box[1], x), min(box[2], y), max(box[3], x + w), max(box[4], y + h)
+	end
+	for _, child in ipairs(c.children or {}) do
+		if type(child) == 'table' then
+			overlay.drawnIn(child, box, depth + 1)
+		end
+	end
+end
+
+-- The game's own windows on screen, as { left, bottom, right, top }, so callouts can keep off them:
+-- the part of each that draws something. A window that draws nothing now, like an empty chat or a
+-- command panel hidden while spectating, is soft: it may show something at any time, so it is
+-- better avoided, but it isn't in the way. Looked for again every second, as chat comes and goes.
 function overlay.windows(vsx, vsy)
-	if overlay.uiFrame and gameFrame - overlay.uiFrame < 3 * framesPerSecond then
+	if overlay.uiFrame and gameFrame - overlay.uiFrame < framesPerSecond then
 		return overlay.ui
 	end
 	local windows = {}
-	-- Other widgets' windows can go away under us
-	pcall(function()
-		for _, window in ipairs(WG.Chili.Screen0.children) do
-			local x, y, w, h = window.x, window.y, window.width, window.height
+	local screen = WG.Chili and WG.Chili.Screen0
+	-- Chili's coordinates are scaled with the interface
+	local scale = screen and screen.width and screen.width > 0 and vsx / screen.width or 1
+	for _, window in ipairs(screen and screen.children or {}) do
+		-- Other widgets' windows can go away under us
+		pcall(function()
+			local x, y, w, h = window.x * scale, window.y * scale, window.width * scale, window.height * scale
 			-- Not the invisible full screen holders
-			if w > 20 and h > 20 and w * h < vsx * vsy * 0.4 then
-				windows[#windows + 1] = { x, vsy - y - h, x + w, vsy - y }
+			if w <= 20 or h <= 20 or w * h >= vsx * vsy * 0.4 then
+				return
 			end
+			local box = { huge, huge, -huge, -huge }
+			overlay.drawnIn(window, box, 0)
+			local x1, y1 = max(x, box[1] * scale), max(y, box[2] * scale)
+			local x2, y2 = min(x + w, box[3] * scale), min(y + h, box[4] * scale)
+			if x2 > x1 and y2 > y1 then
+				windows[#windows + 1] = { x1, vsy - y2, x2, vsy - y1, name = window.name }
+			else
+				windows[#windows + 1] = { x, vsy - y - h, x + w, vsy - y, name = window.name, soft = true }
+			end
+		end)
+	end
+	if STATS then
+		-- Which windows the callout keeps off, when they change: soft ones marked ~
+		local parts = {}
+		for _, window in ipairs(windows) do
+			parts[#parts + 1] = string.format('%s%s:%.0f:%.0f:%.0f:%.0f', window.soft and '~' or '',
+				(tostring(window.name or '?'):gsub('[,:]', '_')), window[1], window[2], window[3], window[4])
 		end
-	end)
+		local list = table.concat(parts, ',')
+		if list ~= overlay.windowsLogged then
+			overlay.windowsLogged = list
+			spEcho('rc-windows,' .. list)
+		end
+	end
 	overlay.ui, overlay.uiFrame = windows, gameFrame
 	return windows
+end
+
+-- How far (x, y) is from the line from (x1, y1) to (x2, y2)
+function overlay.toSegment(x, y, x1, y1, x2, y2)
+	local dx, dy = x2 - x1, y2 - y1
+	local len2 = dx * dx + dy * dy
+	local t = len2 > 0 and bound(((x - x1) * dx + (y - y1) * dy) / len2, 0, 1) or 0
+	return length(x - x1 - t * dx, y - y1 - t * dy)
 end
 
 -- How far the subject at (ax, ay) is out from the corner of a w by h callout at (bx, by) that the
@@ -1981,12 +2095,17 @@ function overlay.pointerOut(bx, by, w, h, ax, ay)
 end
 
 -- Where to put a w by h callout for a subject at world point world, now at (ax, ay) on screen,
--- clear of a scene's ring round it if ringed. It is looked at again for each shot and once a second
+-- clear of its shape: a scene's ring, or the unit named and what it is in, as shape(project) gives
+-- its outline on screen (see overlay.projector). It is looked at again for each shot and once a second
 -- after that, and only moves when it is in the way or for a clear gain: a new shot keeps it where
 -- it is on screen if that will do.
-function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
+-- Seconds after a move before the callout moves again for a better place alone
+overlay.moveSeconds = 6
+function overlay.place(world, ax, ay, w, h, vsx, vsy, shape)
 	-- Off the subject by at least reach, more when zoomed in as the units are bigger on screen
 	local reach, margin = vsy * 0.08 * (camera.settled and camera.settled.zoom or 1), vsy * 0.02
+	-- Room it would like round it: from windows and the screen's edges, and from units
+	local clear, buffer = vsy * 0.12, vsy * 0.04
 	local xMax, yMax = max(10, vsx - w - 10), max(10, vsy - h - 10)
 	local fresh = overlay.placedFor ~= overlay.focus
 	local box, offset = overlay.box, overlay.offset
@@ -2006,7 +2125,7 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 	end
 	local function fromOffset(ox, oy, across, up)
 		local sx, sy = ox + w / 2 < 0 and -1 or 1, oy + h / 2 < 0 and -1 or 1
-		if ringed then
+		if shape then
 			return { sx, (sx > 0 and ox or ox + w) / across, sy, (sy > 0 and oy or oy + h) / up, ring = true }
 		end
 		return { sx, sx > 0 and ox or -ox - w, sy, sy > 0 and oy or -oy - h }
@@ -2020,8 +2139,8 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		return across, up
 	end
 	local nowAcross, nowUp = 0, 0
-	if ringed then
-		nowAcross, nowUp = extent(ringed, ax, ay)
+	if shape then
+		nowAcross, nowUp = extent(shape(), ax, ay)
 	end
 	-- Where the callout is drawn grows the same way
 	if box and (box.w ~= w or box.h ~= h) then
@@ -2050,21 +2169,29 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		-- Where it is off the subject; for a new shot, off the new subject from where it is on screen
 		local current = fresh and box and fromOffset(box[1] - ax, box[2] - ay, nowAcross, nowUp) or offset
 		local ax, ay = sax, say
-		-- Things worth not covering: the units in shot, the move arrow and a scene's ring
+		-- Things worth not covering: the units in shot, the move arrow and the subject's shape
 		local points, across, up = {}, 0, 0
-		if ringed then
-			points = overlay.ring(world[1], world[3], overlay.radius, 16, project)
+		if shape then
+			points = shape(project)
 			across, up = extent(points, ax, ay)
 		end
 		local function avoid(x, z)
 			points[#points + 1] = { project(x, spGetGroundHeight(x, z), z) }
 		end
+		-- Where the action is on screen: round the focus's units, with some room
+		local zx1, zy1, zx2, zy2 = huge, huge, -huge, -huge
+		local firstUnit = #points + 1
 		for unitID in pairs(overlay.focus.units) do
 			local location = foci.where(unitID)
 			if location then
 				avoid(location[1], location[3])
+				local p = points[#points]
+				zx1, zy1, zx2, zy2 = min(zx1, p[1]), min(zy1, p[2]), max(zx2, p[1]), max(zy2, p[2])
 			end
 		end
+		local lastUnit = #points
+		local zoneRoom = vsy * 0.1
+		zx1, zy1, zx2, zy2 = zx1 - zoneRoom, zy1 - zoneRoom, zx2 + zoneRoom, zy2 + zoneRoom
 		local from, to = overlay.arrowFrom, overlay.arrowTo
 		for i = 0, from and 6 or -1 do
 			avoid(from[1] + (to[1] - from[1]) * i / 6, from[2] + (to[2] - from[2]) * i / 6)
@@ -2084,8 +2211,13 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 				local _, isStatic, weaponImportance = unitInfo:_unitStats(unitDefID)
 				local px, py = project(x, y, z)
 				local unitDef = UnitDefs[unitDefID]
-				-- A building's footprint can be wider than its radius
-				local rx, ry = project(x + max(unitDef.radius or 20, (unitDef.xsize or 0) * 4), y, z)
+				-- A building's footprint, or its baseplate, can be wider than its radius
+				local half = unitDef.radius or 20
+				if isStatic then
+					local hx, hz = overlay.halfSize(unitDef)
+					half = max(half, hx, hz)
+				end
+				local rx, ry = project(x + half, y, z)
 				local r = max(4, length(rx - px, ry - py))
 				if px > -r and px < vsx + r and py > -r and py < vsy + r then
 					local weight = (not isStatic or (weaponImportance or 0) > 0) and 0.5 or 0.6
@@ -2102,8 +2234,43 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 
 		-- What putting the callout's corner at (ox, oy) from the subject costs, once kept on screen.
 		-- Worst is landing on the subject or in its ring, then on the game's own windows, then
-		-- covering things, a pointer that reads badly, a long pointer and being on the side the action
-		-- is. Also returns whether it is one of the first two.
+		-- covering things or the ground round the action, a pointer that reads badly or crosses
+		-- things, a long pointer and being on the side the action is. Also returns whether it is one
+		-- of the first two.
+		-- The others in a coarse grid on screen, so that each place tried only looks at those near it:
+		-- each in every cell it reaches into, and visited once per look
+		local cell, grid, stamp = vsy * 0.1, {}, 0
+		local function cellsOf(x1, y1, x2, y2, each)
+			for gx = max(-1, floor(x1 / cell)), min(floor(vsx / cell) + 1, floor(x2 / cell)) do
+				for gy = max(-1, floor(y1 / cell)), min(floor(vsy / cell) + 1, floor(y2 / cell)) do
+					each(gx * 4096 + gy)
+				end
+			end
+		end
+		for _, other in ipairs(others) do
+			local x, y, r = other[1], other[2], other[3]
+			cellsOf(x - r, y - r, x + r, y + r, function(key)
+				local list = grid[key]
+				if not list then
+					list = {}
+					grid[key] = list
+				end
+				list[#list + 1] = other
+			end)
+		end
+		-- Each of the others that might reach into the rectangle from (x1, y1) to (x2, y2)
+		local function othersIn(x1, y1, x2, y2, visit)
+			stamp = stamp + 1
+			cellsOf(x1, y1, x2, y2, function(key)
+				for _, other in ipairs(grid[key] or {}) do
+					if other.stamp ~= stamp then
+						other.stamp = stamp
+						visit(other)
+					end
+				end
+			end)
+		end
+
 		local function cost(ox, oy)
 			local bx, by = bound(ax + ox, 10, xMax), bound(ay + oy, 10, yMax)
 			local nx, ny = bound(ax, bx, bx + w) - ax, bound(ay, by, by + h) - ay
@@ -2130,31 +2297,73 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 				local e = length(ux / across, uy / max(1, up))
 				seen = e > 1 and d * (1 - 1 / e) or 0
 			end
+			-- Somewhat further out is fine when it keeps the callout off the action, but not so far that
+			-- it reads as about something else
 			local long = seen / vsy
-			local total, blocked = (onSubject and 50 or near and 3 or 0) + 3 * long + 10 * max(0, long - 0.2), onSubject
+			local total, blocked = (onSubject and 50 or near and 3 or 0) + 2.5 * long + 10 * max(0, long - 0.22), onSubject
 			if ux <= 0 or uy <= 0 then
-				total = total + 2
+				total = total + 2.5
 			else
-				total = total + 1.5 * max(0, math.abs(atan2(uy, ux) - pi / 4) - pi / 12) / (pi / 6)
+				total = total + 2.25 * max(0, math.abs(atan2(uy, ux) - pi / 4) - pi / 12) / (pi / 6)
 			end
-			-- A scene's middle wanders on screen as the camera follows its units, so keep well clear
-			local room = reach * 1.5
+			-- Room round it, so that it isn't soon in the way as the camera and units move: from the
+			-- game's windows, and from the edges of the screen, which also keeps it more central. Less
+			-- room costs more the less there is.
 			for _, window in ipairs(windows) do
-				if bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
+				local gx = max(0, window[1] - bx - w, bx - window[3])
+				local gy = max(0, window[2] - by - h, by - window[4])
+				if window.soft then
+					-- Nothing there now, but there may be soon
+					total = total + (gx == 0 and gy == 0 and 0.5 or 0)
+				elseif gx == 0 and gy == 0 then
 					total, blocked = total + 20, true
-				elseif bx < window[3] + room and bx + w > window[1] - room and by < window[4] + room and by + h > window[2] - room then
-					total = total + 3
+				else
+					total = total + 4 * max(0, 1 - length(gx, gy) / clear) ^ 2
 				end
 			end
+			local edge = min(bx, vsx - bx - w, by, vsy - by - h)
+			total = total + 3 * max(0, 1 - edge / clear) ^ 2
+			-- Over the ground round the action, by how much of the callout is
+			local zone = max(0, min(bx + w, zx2) - max(bx, zx1)) * max(0, min(by + h, zy2) - max(by, zy1)) / (w * h)
+			total = total + 3 * zone
+			-- The pointer: from the corner nearest the subject to the ring, or to the subject
+			local px1, py1 = bx + w / 2 < ax and bx + w or bx, by + h / 2 < ay and by + h or by
+			local px2, py2 = ax, ay
+			if across > 0 then
+				local e = length((px1 - ax) / across, (py1 - ay) / max(1, up))
+				if e > 1 then
+					px2, py2 = ax + (px1 - ax) / e, ay + (py1 - ay) / e
+				end
+			end
+			-- What it crosses, a line hiding less than the callout does; not the subject's own units
+			-- where it ends
+			local crossed = 0
+			othersIn(min(px1, px2) - 2, min(py1, py2) - 2, max(px1, px2) + 2, max(py1, py2) + 2, function(other)
+				if overlay.toSegment(other[1], other[2], px1, py1, px2, py2) < other[3] + 2 then
+					crossed = crossed + other[4] * 0.5
+				end
+			end)
+			for i = firstUnit, lastUnit do
+				local point = points[i]
+				if overlay.toSegment(point[1], point[2], px1, py1, px2, py2) < unit
+				    and length(point[1] - px2, point[2] - py2) > reach * 0.5 then
+					crossed = crossed + 0.5
+				end
+			end
+			total = total + min(crossed, 5)
 			local covered = 0
-			for _, other in ipairs(others) do
+			othersIn(bx - buffer - margin, by - buffer - margin, bx + w + buffer + margin, by + h + buffer + margin, function(other)
 				local x, y, r = other[1], other[2], other[3]
 				local cw = min(x + r, bx + w + margin) - max(x - r, bx - margin)
 				local ch = min(y + r, by + h + margin) - max(y - r, by - margin)
 				if cw > 0 and ch > 0 then
 					covered = covered + other[4] * min(1, cw * ch / (4 * r * r))
+				else
+					-- Close by: likely to be under it soon
+					local gap = length(max(0, bx - x - r, x - r - bx - w), max(0, by - y - r, y - r - by - h))
+					covered = covered + other[4] * 0.25 * max(0, 1 - gap / buffer)
 				end
-			end
+			end)
 			-- A crowd is still better covered than a window
 			total = total + min(covered, 10)
 			for _, point in ipairs(points) do
@@ -2173,14 +2382,16 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		local function try(ox, oy)
 			-- Other things being nearly equal, the side it is already on
 			local sameSide = curX and (ox + w / 2 < 0) == (curX + w / 2 < 0) and (oy + h / 2 < 0) == (curY + h / 2 < 0)
-			local total = cost(ox, oy) - (sameSide and 0.5 or 0)
+			-- and the shorter way there: a move the eye has to follow far costs more
+			local travel = curX and length(ox - curX, oy - curY) / vsy or 0
+			local total = cost(ox, oy) - (sameSide and 0.5 or 0) + 1.5 * travel
 			if not best or total < bestCost then
 				best, bestCost = fromOffset(ox, oy, across, up), total
 			end
 		end
 		-- Out on each diagonal: close by first, then further for when the fight is all around the
 		-- subject, and flatter or steeper to fit the space
-		for _, far in ipairs({ 1, 2, 3, 4.5 }) do
+		for _, far in ipairs({ 1, 2, 3, 4.5, 6 }) do
 			local out = (across > 0 and reach * 1.6 or reach) * far
 			for sx = 1, -1, -2 do
 				for sy = 1, -1, -2 do
@@ -2216,8 +2427,12 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		if current then
 			currentCost, blocked = cost(curX, curY)
 		end
-		if blocked or currentCost >= bestCost + ((fresh or arriving) and 2 or 4) then
-			overlay.offset, overlay.settling = best, true
+		-- Moving for a better place, rather than a new shot or being in the way, needs a clear gain and
+		-- for the last move to have had time to be read
+		local settled = gameFrame - (overlay.movedFrame or -huge) >= overlay.moveSeconds * framesPerSecond
+		if blocked or (fresh or arriving) and currentCost >= bestCost + 2
+		    or settled and currentCost >= bestCost + 5 then
+			overlay.offset, overlay.settling, overlay.movedFrame = best, true, gameFrame
 			if DEBUG then
 				local pose = camera.settled or {}
 				local bx, by = toOffset(best, across, up)
@@ -2236,8 +2451,8 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 	-- on its ring or with its pointer going back across it. Its place is off where the subject will
 	-- be once the camera gets there, so that a pan doesn't drag it along behind and past.
 	local settledAcross, settledUp = nowAcross, nowUp
-	if ringed then
-		settledAcross, settledUp = extent(overlay.ring(world[1], world[3], overlay.radius, 16, project), sax, say)
+	if shape then
+		settledAcross, settledUp = extent(shape(project), sax, say)
 	end
 	local ox, oy = toOffset(overlay.offset, settledAcross, settledUp)
 	local tx, ty = bound(sax + ox, 10, xMax), bound(say + oy, 10, yMax)
@@ -2250,7 +2465,7 @@ function overlay.place(world, ax, ay, w, h, vsx, vsy, ringed)
 		if ux < margin or uy < margin then
 			slack = 0
 		end
-		if ringed then
+		if shape then
 			local nx, ny = bound(ax, box[1], box[1] + w) - ax, bound(ay, box[2], box[2] + h) - ay
 			if (nx / nowAcross) ^ 2 + (ny / nowUp) ^ 2 < 1 then
 				slack = 0
@@ -2311,7 +2526,7 @@ function overlay.drawWorth(vsx, vsy, size)
 	while moved and by > 10 do
 		moved = false
 		for _, window in ipairs(windows) do
-			if bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
+			if not window.soft and bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
 				by, moved = window[2] - h - 10, true
 			end
 		end
@@ -2343,7 +2558,7 @@ function overlay.draw()
 	-- With no callout, the next one starts where it best fits
 	local headline = overlay.headline
 	if not overlay.focus or not options.show_commentary.value or display.isWide or not headline then
-		overlay.box = nil
+		overlay.box, overlay.stats.at = nil, nil
 	end
 	if not overlay.focus or not options.show_commentary.value then
 		return
@@ -2373,7 +2588,7 @@ function overlay.draw()
 	if (ax < 0 or ax > vsx or ay < 0 or ay > vsy) and camera.settled then
 		local sax, say = overlay.projector(camera.settled, vsx, vsy)(sx, sy, sz)
 		if length(sax - ax, say - ay) > vsy * 0.1 then
-			overlay.box = nil
+			overlay.box, overlay.stats.at = nil, nil
 			return
 		end
 	end
@@ -2423,7 +2638,25 @@ function overlay.draw()
 	w = w + pad * 2
 	local h = row * (1 + (detail and 1 or 0) + tallyRows) + pad + tallyRows * pad
 
-	local bx, by = overlay.place({ sx, sy, sz }, ax, ay, w, h, vsx, vsy, ring)
+	-- What the callout keeps clear of: the ring, or the one unit named and the building it is in
+	local only = next(overlay.subjects)
+	local single = not ring and only and not next(overlay.subjects, only) and spGetUnitDefID(only)
+	local shape
+	if ring then
+		shape = function(project)
+			return overlay.ring(sx, sz, overlay.radius, 24, project)
+		end
+	elseif single then
+		local holder = overlay.holder(only, sx, sz)
+		shape = function(project)
+			local x, y, z = spGetUnitPosition(holder)
+			if not x then
+				x, y, z = sx, sy, sz
+			end
+			return overlay.outline(holder, x, y, z, project, true)
+		end
+	end
+	local bx, by = overlay.place({ sx, sy, sz }, ax, ay, w, h, vsx, vsy, shape)
 
 	gl.Color(0, 0, 0, 0.55)
 	gl.Rect(bx, by, bx + w, by + h)
@@ -2439,9 +2672,8 @@ function overlay.draw()
 	-- Towards the middle of the ring, or of the one unit named, stopping where it first crosses the
 	-- ring or the unit's selection shape (a little outside that). If it doesn't cross, the callout is
 	-- on it already: no pointer, rather than one into the middle.
-	local only = next(overlay.subjects)
 	local outline = ring
-	if not ring and only and not next(overlay.subjects, only) and spGetUnitDefID(only) then
+	if single then
 		outline = overlay.outline(only, sx, sy, sz)
 	end
 	if outline then
@@ -2449,6 +2681,17 @@ function overlay.draw()
 		px, py, gap = cx + (ax - cx) * first, my + (ay - my) * first, ring and 0 or size * 0.6 * zoom
 	end
 	local reach = length(px - cx, py - my)
+	if STATS then
+		local s, mx, my2 = overlay.stats, bx + w / 2, by + h / 2
+		if s.at then
+			local d = length(mx - s.at[1], my2 - s.at[2])
+			s.travel, s.moving = s.travel + d, s.moving + (d > 0.5 and 1 or 0)
+			s.holdTravel = s.holdTravel + (s.atFocus == overlay.focus and d or 0)
+		end
+		s.at, s.atFocus, s.frames = { mx, my2 }, overlay.focus, s.frames + 1
+		s.box, s.pointer = { bx, by, w, h }, reach > max(1, gap * 1.5) and reach or 0
+		s.line = s.pointer > 0 and { cx, my, px, py } or nil
+	end
 	-- A little see-through, like the ring
 	gl.Color(color[1], color[2], color[3], overlay.lineAlpha)
 	gl.Rect(ex, by, ex + t, by + h)
@@ -2553,28 +2796,33 @@ local function statsFlush(userOverride)
 	local _, mid = spTraceScreenRay(floor(vsx / 2), floor(vsy / 2), true, false, false)
 	local planeY = mid and mid[2] or spGetGroundHeight(cx, cz)
 	local maxDist = length(mapSizeX, mapSizeZ)
-	local corners = {}
-	for _, c in ipairs({ { 0, 0 }, { vsx - 1, 0 }, { vsx - 1, vsy - 1 }, { 0, vsy - 1 } }) do
-		local hitType, pos = spTraceScreenRay(c[1], c[2], true, false, false)
-		local x, z
-		if hitType == 'ground' and pos then
-			x, z = pos[1], pos[3]
-		else
-			-- GetPixelDir takes y from the top of the screen
-			local dx, dy, dz = spGetPixelDir(c[1], vsy - 1 - c[2])
-			local t = (dy < -1e-3) and (planeY - cy) / dy or huge
-			local hd = length(dx, 0, dz)
-			if t * hd > maxDist then
-				t = hd > 0 and maxDist / hd or 0
+	-- Where screen rectangle's corners land on the ground, as "x,z,x,z,..."
+	local function footprint(x1, y1, x2, y2)
+		local corners = {}
+		for _, c in ipairs({ { x1, y1 }, { x2, y1 }, { x2, y2 }, { x1, y2 } }) do
+			local sx, sy = bound(floor(c[1]), 0, vsx - 1), bound(floor(c[2]), 0, vsy - 1)
+			local hitType, pos = spTraceScreenRay(sx, sy, true, false, false)
+			local x, z
+			if hitType == 'ground' and pos then
+				x, z = pos[1], pos[3]
+			else
+				-- GetPixelDir takes y from the top of the screen
+				local dx, dy, dz = spGetPixelDir(sx, vsy - 1 - sy)
+				local t = (dy < -1e-3) and (planeY - cy) / dy or huge
+				local hd = length(dx, 0, dz)
+				if t * hd > maxDist then
+					t = hd > 0 and maxDist / hd or 0
+				end
+				x, z = cx + dx * t, cz + dz * t
 			end
-			x, z = cx + dx * t, cz + dz * t
+			corners[#corners + 1] = string.format('%.0f,%.0f', x, z)
 		end
-		corners[#corners + 1] = string.format('%.0f,%.0f', x, z)
+		return table.concat(corners, ',')
 	end
 	spEcho(string.format('rc-cam,%.0f,%.0f,%.0f,%s,%d,%s,%d,%s,%.3f,%.1f',
 		cx, cy, cz, display.camType or 'nil',
 		shown and shown.id or -1, shown and shown.shownType or 'nil',
-		userOverride and 1 or 0, table.concat(corners, ','),
+		userOverride and 1 or 0, footprint(0, 0, vsx - 1, vsy - 1),
 		camera and camera.ry or 0, deg(statsMaxYawRate)))
 	statsMaxYawRate = 0
 	-- The shot took in a nearby scene in the last second
@@ -2591,6 +2839,89 @@ local function statsFlush(userOverride)
 	if camera and camera.zoom > 1.05 then
 		spEcho(string.format('rc-zoom,%.2f', camera.zoom))
 	end
+
+	-- The callout, if drawn this second: how far it moved, where it was last drawn and what it
+	-- covered (rc-box), and what it would have covered docked at its size in a corner of the screen
+	-- or the bottom middle instead (rc-dock), with each one's ground footprint, so that stats can
+	-- check deaths against them as against the view.
+	local s = overlay.stats
+	if s.frames > 0 and s.box and overlay.focus then
+		local units, focusN, otherN = {}, 0, 0
+		for _, unitID in ipairs(spGetVisibleUnits() or {}) do
+			local x, y, z = spGetUnitPosition(unitID)
+			if x then
+				local px, py = spWorldToScreenCoords(x, y, z)
+				if px >= 0 and px <= vsx and py >= 0 and py <= vsy then
+					local inFocus = overlay.focus.units[unitID] ~= nil
+					units[#units + 1] = { px, py, inFocus }
+					focusN, otherN = focusN + (inFocus and 1 or 0), otherN + (inFocus and 0 or 1)
+				end
+			end
+		end
+		local windows = overlay.windows(vsx, vsy)
+		-- Where the action is on screen: round the focus's units, with some room
+		local zx1, zy1, zx2, zy2 = huge, huge, -huge, -huge
+		for _, u in ipairs(units) do
+			if u[3] then
+				zx1, zy1, zx2, zy2 = min(zx1, u[1]), min(zy1, u[2]), max(zx2, u[1]), max(zy2, u[2])
+			end
+		end
+		local room = vsy * 0.1
+		zx1, zy1, zx2, zy2 = zx1 - room, zy1 - room, zx2 + room, zy2 + room
+		-- The focus's units and the others under a w by h rectangle at (bx, by), whether it is on
+		-- one of the game's windows, and the share of it over the action
+		local function covered(bx, by, w, h)
+			local focusIn, otherIn, onWindow = 0, 0, 0
+			for _, u in ipairs(units) do
+				if u[1] >= bx and u[1] <= bx + w and u[2] >= by and u[2] <= by + h then
+					focusIn, otherIn = focusIn + (u[3] and 1 or 0), otherIn + (u[3] and 0 or 1)
+				end
+			end
+			for _, window in ipairs(windows) do
+				if not window.soft and bx < window[3] and bx + w > window[1] and by < window[4] and by + h > window[2] then
+					onWindow = 1
+				end
+			end
+			local zone = max(0, min(bx + w, zx2) - max(bx, zx1)) * max(0, min(by + h, zy2) - max(by, zy1)) / max(1, w * h)
+			return string.format('%d,%d,%d,%s,%.2f', focusIn, otherIn, onWindow, footprint(bx, by, bx + w, by + h), zone)
+		end
+		-- What the pointer crosses: the focus's units and others near its line, and the share of it
+		-- over the action
+		local lineFocus, lineOther, lineZone = 0, 0, 0
+		local line = s.line
+		if line then
+			for _, u in ipairs(units) do
+				if overlay.toSegment(u[1], u[2], line[1], line[2], line[3], line[4]) < vsy * 0.01 then
+					lineFocus, lineOther = lineFocus + (u[3] and 1 or 0), lineOther + (u[3] and 0 or 1)
+				end
+			end
+			for i = 0, 19 do
+				local x, y = line[1] + (line[3] - line[1]) * (i + 0.5) / 20, line[2] + (line[4] - line[2]) * (i + 0.5) / 20
+				lineZone = lineZone + ((x > zx1 and x < zx2 and y > zy1 and y < zy2) and 0.05 or 0)
+			end
+		end
+		local bx, by, w, h = unpack(s.box)
+		spEcho(string.format('rc-box,%d,%.0f,%.0f,%d,%.0f,%.0f,%.0f,%.0f,%.0f,%d,%d,%s,%d,%d,%.2f', s.frames, s.travel,
+			s.holdTravel, s.moving, bx, by, w, h, s.pointer or 0, focusN, otherN, covered(bx, by, w, h),
+			lineFocus, lineOther, lineZone))
+		local m = 10
+		for _, dock in ipairs({ { 'bl', m, m }, { 'bc', (vsx - w) / 2, m }, { 'br', vsx - w - m, m },
+		                        { 'tl', m, vsy - h - m }, { 'tr', vsx - w - m, vsy - h - m } }) do
+			spEcho(string.format('rc-dock,%s,%.0f,%.0f,%s', dock[1], dock[2], dock[3], covered(dock[2], dock[3], w, h)))
+		end
+	end
+	s.travel, s.holdTravel, s.frames, s.moving = 0, 0, 0, 0
+end
+
+-- Something finished worth logging, as ground truth for whether big builds are seen
+local function statsLogBuilt(unitID, unitDefID, unitTeam)
+	local unitDef = UnitDefs[unitDefID]
+	local x, _, z = spGetUnitPosition(unitID)
+	if not unitDef or unitDef.customParams.dontcount or not x or (unitDef.metalCost or 0) < 100 then
+		return
+	end
+	local allyTeam = teamInfo[unitTeam] and teamInfo[unitTeam].allyTeam or -1
+	spEcho(string.format('rc-built,%s,%.0f,%.0f,%.0f,%d', unitDef.name, x, z, unitDef.metalCost, allyTeam))
 end
 
 local function statsTrackYaw(dt, oldRy, newRy, isCut)
@@ -3525,6 +3856,9 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 		return
 	end
 
+	if STATS and gameFrame > 0 then
+		statsLogBuilt(unitID, unitDefID, unitTeam)
+	end
 	local allyTeam = teamInfo[unitTeam].allyTeam
 	local location, _, _, name = unitInfo:watch(unitID, allyTeam, unitDefID)
 	local unitDef = UnitDefs[unitDefID]

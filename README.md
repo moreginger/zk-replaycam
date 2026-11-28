@@ -55,6 +55,8 @@ python3 scripts/generate-stats.py --compare base.json new.json
 
 An infolog holds every replay watched in one session; `--game -1` keeps just the latest.
 
+Tables are grouped by the principles in [INTENTS.md](INTENTS.md). In a comparison, `games` counts the games that got better and worse by more than 2% each, and a metric only gets a verdict when that agrees with the mean; otherwise it is `mixed`.
+
 Key metrics, weighted by metal value:
 
 - `seen` - the death was inside the camera's ground footprint
@@ -66,6 +68,8 @@ Key metrics, weighted by metal value:
 - `fights` / `setup` / `setup s` - fights are runs of deaths and damage near each other, counted when at least 300 metal is lost. `setup` is the share of them (by metal lost) whose opening spot was framed for at least 2s in the 10s before the first hit, and `setup s` is the mean time it was framed
 - `scnhit` / `scn s` - share of those fights (by metal lost) that a scene event flagged beforehand, and how many seconds ahead. Grades the prediction, whether or not the camera went there
 - `scnprc` - share of scene events followed by action nearby within 10s
+- `fair` - how closely screen time follows the stakes over each 3 minutes: the overlap between where the camera looked and where metal was lost, each counted with its neighbouring 512-elmo cells. 1 is screen time in proportion to the losses everywhere
+- `builds` / `bseen` - things worth 300 metal or more finished, and the share of them (by value) in view within 3s of finishing
 
 Transition metrics (per shot, not value-weighted):
 
@@ -79,7 +83,22 @@ Transition metrics (per shot, not value-weighted):
 - `orb/m` / `drift` - orbits per minute, and the share that were drifts on a long hold rather than to a better heading
 - `orbgn` - median view-score gain of orbits to a better heading (the threshold is `orbitConfig.margin`)
 - `south` - share of time the camera faces more than 90 degrees from north
-- `yaw90` / `yawmx` - 90th percentile and peak of the fastest yaw (deg/s) in each second, ignoring cuts and user control
+- `yaw90` / `yawmx` - 90th percentile and peak of the fastest yaw (deg/s) in each second, ignoring cuts and user control. Only headed runs give real numbers: headless frame times make them several times too high
+
+Callout metrics, from headed runs only (the headless view is too small to place a callout):
+
+- `up` - share of time a callout is drawn
+- `move` / `hmove` - how far it travels on screen, in screen heights per second while drawn: in all, and within a shot (not counting moves to a new shot's subject)
+- `still` - share of drawn frames it didn't move
+- `plc/m` / `btr/m` - times a minute it was given a new place, and how many of those were for a better place rather than a new shot or being in the way (needs `DEBUG`)
+- `hide` / `hdmg` - share of the deaths and damage in view while it was up that were under it (by value), against its ground footprint
+- `cfoc` / `coth` - share of the focus's units, and of the other units on screen, under it
+- `cwin` - share of time it overlaps one of the game's windows (`rc-windows` lines list them; some, like the empty selection panel and the chat area, are see-through)
+- `czone` - share of its area over the action: round the focus's units on screen, with a tenth of the screen height to spare. The unit counts above hardly tell placements apart; this does
+- `ptr` - median pointer length, in screen heights
+- `say/m` / `brief` - headline changes a minute, and the share replaced or cut away from within 3s (needs `DEBUG`)
+
+The summary also has a table of the same coverage for the callout docked at its size in each corner (`bl`, `br`, `tl`, `tr`) or the bottom middle (`bc`) over the same seconds, to compare placement strategies without building them.
 
 ## Running replays unattended
 
@@ -90,6 +109,7 @@ scripts/run-replay.sh replays/some-replay.sdfz run.txt
 python3 scripts/generate-stats.py run.txt -o run.json
 ```
 
+- The command panel is hidden (by `rc_autorun.lua`): it has nothing to show in a replay, and callouts would keep off it.
 - The replay plays at normal speed, so a run takes as long as the game plus about 40s to load. The pregame is fast-forwarded and the engine quits when the game ends.
 - Pass another widget file as the third argument to compare versions on the same replay.
 - Each engine needs about 3.5GB of memory, which limits how many can run side by side.
@@ -131,7 +151,7 @@ A widget only loads if Zero-K has it enabled under its name, so to record a copy
 
 ## Testing offline
 
-`scripts/run-harness.py` runs the widget against a stubbed game, without Zero-K: one side sends raiders or bombers at the other's base. It catches load and runtime errors, and reports when scenes fire, what is shown, how far the callout travels on screen and the cost per game frame. It can't judge how the camera looks.
+`scripts/run-harness.py` runs the widget against a stubbed game, without Zero-K: one side sends raiders or bombers at the other's base. It catches load and runtime errors, and reports when scenes fire, what is shown, how far the callout travels on screen, and the cost per game frame and per draw frame (where the callout is placed; `--crowd 2000` shows the worst case). It can't judge how the camera looks.
 
 ```bash
 python3 scripts/run-harness.py raid --crowd 2000

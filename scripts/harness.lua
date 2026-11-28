@@ -55,10 +55,15 @@ gl = setmetatable({
 }, { __index = function() return function() end end })
 CMD = { ATTACK = 20, FIGHT = 16, MOVE = 10 }
 VFS = { Include = function() return { RAW_MOVE = 31109 } end }
--- Windows for callouts to keep off: a bar along the top, a panel, and a full screen holder to ignore
-WG = { Chili = { Screen0 = { children = {
-	{ x = 0, y = 0, width = 1920, height = 60 }, { x = 1500, y = 700, width = 400, height = 300 },
-	{ x = 0, y = 0, width = 1920, height = 1080 },
+-- Windows for callouts to keep off: a bar along the top, a panel, a full screen holder to ignore, and
+-- a see-through chat window with nothing in it, which is only soft
+local function window(x, y, width, height, color, children)
+	return { classname = 'window', x = x, y = y, width = width, height = height, color = color, children = children or {},
+		LocalToScreen = function(self, lx, ly) return self.x + lx, self.y + ly end }
+end
+WG = { Chili = { Screen0 = { width = 1920, height = 1080, children = {
+	window(0, 0, 1920, 60), window(1500, 700, 400, 300), window(0, 0, 1920, 1080),
+	window(700, 600, 500, 250, { 0, 0, 0, 0 }),
 } } } }
 widgetHandler = { RemoveWidget = function() error('widget removed') end }
 widget = {}
@@ -164,6 +169,8 @@ local was, travel, jumps, steady, framesShown = nil, 0, 0, 0, 0
 -- DTS: comma separated draw frame dts in ms, cycled, to check the camera against uneven frame pacing.
 -- TRACE: a file for the camera state at each draw frame.
 local dts, draws, drawClock = nil, 0, 0
+-- Time spent drawing the overlay, where the callout is placed
+local drawSlowest, drawTotal = 0, 0
 if os.getenv('DTS') then
 	dts = {}
 	for ms in os.getenv('DTS'):gmatch('[^,]+') do dts[#dts + 1] = tonumber(ms) / 1000 end
@@ -221,7 +228,10 @@ for f = 1, 90 * 30 do
 		end
 		widget:DrawWorldPreUnit()
 		box, board = nil, false
+		local d0 = os.clock()
 		widget:DrawScreen()
+		local dt = os.clock() - d0
+		drawSlowest, drawTotal = math.max(drawSlowest, dt), drawTotal + dt
 	end
 	local at = box and not board and { (box[1] + box[3]) / 2, (box[2] + box[4]) / 2 }
 	framesShown = framesShown + (at and 1 or 0)
@@ -254,6 +264,7 @@ print('callout texts: ' .. #drawn)
 print(string.format('callout travel: %.0f px, %d snaps, still %d of %d frames shown', travel, jumps, steady, framesShown))
 if os.getenv('VERBOSE') then print(table.concat(drawn, '\n')) end
 print(string.format('per game frame: mean %.2f ms, worst %.2f ms, %d units', total / ticks * 1000, slowest * 1000, nextId - 1))
+print(string.format('per draw frame: mean %.2f ms, worst %.2f ms', drawTotal / math.max(1, draws) * 1000, drawSlowest * 1000))
 if os.getenv('LOG') then
 	local out = io.open(os.getenv('LOG'), 'w')
 	for _, e in ipairs(echoes) do out:write(string.format('[t=00:00:00.000000][f=%07d] %s\n', e[1], e[2])) end

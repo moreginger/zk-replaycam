@@ -54,6 +54,12 @@ FIGHT_MIN_VALUE = 300       # metal lost for a fight to count as a payoff worth 
 SETUP_WINDOW = (10, 1)      # seconds before a fight starts in which its setup can be shown
 SETUP_MIN_S = 2             # seconds framed in that window for the setup to count as shown
 COMBAT_DEATH = (5, 1, 400)  # a death counts if damage was logged this many seconds before/after, this close
+BUILD_MIN_VALUE = 300       # metal for a finished build to count as news worth seeing
+BUILD_WINDOW = (3, 3)       # seconds before/after a build finishes in which it must be seen once
+FAIR_CELL = 512             # elmos: areas for fair share, each counted with its neighbours
+FAIR_WINDOW_S = 180         # fair share is judged over windows this long
+CALLOUT_MIN_VIEW = 200      # pixels: smaller views (the headless engine's 8x8) say nothing about callouts
+HEADLINE_BRIEF_S = 3        # headlines replaced sooner than this were hard to read
 
 
 # GEOMETRY
@@ -137,6 +143,14 @@ def new_game(name):
         'damage': [],   # [frame, x, z, value]
         'rings': [],    # [frame, x, z, radius]: the overlay's ring, each second it is drawn
         'zooms': [],    # [frame, zoom]: the lens zoomed in for a close shot, each second it is
+        'boxes': [],    # [frame, frames, travel, holdTravel, moving, bx, by, w, h, pointer, focusN, otherN,
+                        #  focusIn, otherIn, onWindow, [[x, z] x4], zone, lineFocus, lineOther, lineZone]:
+                        #  the callout, each second it is drawn
+        'docks': [],    # [frame, name, bx, by, focusIn, otherIn, onWindow, [[x, z] x4], zone]: the callout docked instead
+        'windows': [],  # [frame, [[name, left, bottom, right, top]]]: the game's windows the callout keeps off
+        'built': [],    # [frame, unitDef, x, z, value, allyTeam]: something worth 100 metal or more finished
+        'callouts': [], # [frame, kind, id, headline]: the callout's headline changed (DEBUG)
+        'places': [],   # [frame, reason]: the callout was given a new place off its subject (DEBUG)
     }
 
 
@@ -236,6 +250,26 @@ def parse_rc(game, frame, kind, f):
             game['rings'].append([frame, float(f[0]), float(f[1]), float(f[2])])
         elif kind == 'zoom':
             game['zooms'].append([frame, float(f[0])])
+        elif kind == 'box':
+            corners = [[float(f[i]), float(f[i + 1])] for i in range(14, 22, 2)]
+            # The share over the action was added later
+            zone = float(f[22]) if len(f) > 22 else None
+            # What the pointer crosses was added later: focus units, other units, share over the action
+            line = [int(f[23]), int(f[24]), float(f[25])] if len(f) > 25 else [None, None, None]
+            game['boxes'].append([frame, int(f[0])] + [float(v) for v in f[1:9]] + [int(v) for v in f[9:14]] + [corners, zone] + line)
+        elif kind == 'dock':
+            corners = [[float(f[i]), float(f[i + 1])] for i in range(6, 14, 2)]
+            zone = float(f[14]) if len(f) > 14 else None
+            game['docks'].append([frame, f[0], float(f[1]), float(f[2]), int(f[3]), int(f[4]), int(f[5]), corners, zone])
+        elif kind == 'built':
+            game['built'].append([frame, f[0], float(f[1]), float(f[2]), float(f[3]), int(f[4])])
+        elif kind == 'callout':
+            # Headlines can contain commas
+            game['callouts'].append([frame, f[0], int(f[1]), ','.join(f[2:])])
+        elif kind == 'windows':
+            game['windows'].append([frame, [[w.split(':')[0]] + [float(v) for v in w.split(':')[1:]] for w in f if w]])
+        elif kind == 'place':
+            game['places'].append([frame, f[0]])
     except (ValueError, IndexError):
         print(f'warning: bad rc-{kind} line: {",".join(f)}', file=sys.stderr)
 
@@ -590,6 +624,18 @@ def compute_metrics(game, ref_area):
         metrics['yaw_rate_p90'] = percentile(yaw_rates, 0.9)
         metrics['yaw_rate_max'] = max(yaw_rates)
 
+    # Big builds finished: seen at some point around finishing
+    builds = [b for b in game.get('built', []) if b[4] >= BUILD_MIN_VALUE]
+    if builds:
+        before, after = BUILD_WINDOW
+        metrics['builds'] = len(builds)
+        metrics['builds_seen'] = weighted_mean([
+            (1.0 if any(sees(v2, b[2], b[3]) for v2 in views_between(b[0] - before * FPS, b[0] + after * FPS)) else 0.0, b[4])
+            for b in builds])
+
+    metrics['fair_share'] = fair_share(game, views, graded)
+    metrics.update(callout_metrics(game, views, graded, minutes, lambda frame, x, z: sees(view_at(frame), x, z)))
+
     # Biggest losses the camera never showed, for checking in the replay
     missed = sorted((g for g in graded if not g['ever_seen']), key=lambda g: -g['value'])[:10]
     metrics['missed_highlights'] = [
@@ -600,60 +646,225 @@ def compute_metrics(game, ref_area):
     return metrics
 
 
+def fair_share(game, views, graded):
+    """How closely screen time follows the stakes, over each FAIR_WINDOW_S: the overlap between where
+    the camera looked and where metal was lost (deaths and damage), each spread over neighbouring
+    cells so that a fight on a border counts as one place. 1 is all screen time where the stakes
+    were, in proportion; 0 is none of it. Windows count by their stakes."""
+    def cell(x, z):
+        return int(x // FAIR_CELL), int(z // FAIR_CELL)
+
+    window = FAIR_WINDOW_S * FPS
+    stakes, time = {}, {}
+    for frame, x, z, value in [(g['frame'], g['x'], g['z'], g['value']) for g in graded] + game['damage']:
+        w = stakes.setdefault(frame // window, {})
+        w[cell(x, z)] = w.get(cell(x, z), 0.0) + value
+    for v in views:
+        if not v.override and v.area > 0:
+            w = time.setdefault(v.frame // window, {})
+            w[cell(*v.centre)] = w.get(cell(*v.centre), 0) + 1
+
+    def spread(d):
+        out = {}
+        for (cx, cz), v in d.items():
+            for dx in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    out[(cx + dx, cz + dz)] = out.get((cx + dx, cz + dz), 0.0) + v
+        total = sum(out.values())
+        return {k: v / total for k, v in out.items()} if total > 0 else {}
+
+    pairs = []
+    for w, s in stakes.items():
+        total = sum(s.values())
+        if total > 0:
+            a, b = spread(s), spread(time.get(w, {}))
+            pairs.append((sum(min(v, b.get(k, 0.0)) for k, v in a.items()), total))
+    return weighted_mean(pairs)
+
+
+def callout_metrics(game, views, graded, minutes, seen_at):
+    """How the callout moved and what it covered, from rc-box lines; and what it would have covered
+    docked in a corner or the bottom middle instead, from rc-dock lines. Only for views big enough
+    to say (headed runs). seen_at(frame, x, z) says whether a point was in view then."""
+    view_size = game.get('view_size') or [0, 0]
+    boxes = game.get('boxes', [])
+    if min(view_size) < CALLOUT_MIN_VIEW or not boxes:
+        return {}
+    vsy = view_size[1]
+    m = {'callout_share': len(boxes) / len(views) if views else None}
+    # Motion in screen heights per second, while drawn: in all, and within a shot
+    m['callout_move'] = statistics.mean(b[2] / vsy for b in boxes)
+    m['callout_hold_move'] = statistics.mean(b[3] / vsy for b in boxes)
+    frames = sum(b[1] for b in boxes)
+    m['callout_still'] = 1 - sum(b[4] for b in boxes) / frames if frames else None
+    places = game.get('places', [])
+    if places or game.get('callouts'):
+        m['callout_places_per_min'] = len(places) / minutes
+        m['callout_better_per_min'] = sum(1 for p in places if p[1] == 'better') / minutes
+    m['callout_pointer'] = statistics.median(b[9] / vsy for b in boxes)
+    focus_n, other_n = sum(b[10] for b in boxes), sum(b[11] for b in boxes)
+
+    # Deaths and damage in view while a callout was up, and the share of them under it. Each flush
+    # says where the callout was over the second before it.
+    def rect_rows(rows, poly_at):
+        return [(r[0], poly_at(r)) for r in rows]
+
+    def under(rects):
+        starts = [r[0] for r in rects]
+
+        def at(frame):
+            i = bisect.bisect_left(starts, frame)
+            return rects[i][1] if i < len(rects) and rects[i][0] - frame <= FPS else None
+        return at
+
+    box_at = under(rect_rows(boxes, lambda b: b[15]))
+    events = [(g['frame'], g['x'], g['z'], g['value']) for g in graded if g['seen']]
+    hits = [(f, x, z, v) for f, x, z, v in game['damage'] if seen_at(f, x, z)]
+
+    def hidden(at, rows):
+        up = [(r, at(r[0])) for r in rows]
+        up = [(r, poly) for r, poly in up if poly is not None]
+        total = sum(r[3] for r, _ in up)
+        return sum(r[3] for r, poly in up if point_in_polygon(r[1], r[2], poly)) / total if total > 0 else None
+
+    m['callout_hidden'] = hidden(box_at, events)
+    m['callout_hidden_damage'] = hidden(box_at, hits)
+    m['callout_focus_cover'] = sum(b[12] for b in boxes) / focus_n if focus_n else None
+    m['callout_other_cover'] = sum(b[13] for b in boxes) / other_n if other_n else None
+    m['callout_window'] = sum(1 for b in boxes if b[14]) / len(boxes)
+    zones = [b[16] for b in boxes if b[16] is not None]
+    m['callout_zone'] = statistics.mean(zones) if zones else None
+    lines = [b for b in boxes if b[17] is not None and b[9] > 0]
+    if lines:
+        m['pointer_units'] = statistics.mean(b[17] + b[18] for b in lines)
+        m['pointer_zone'] = statistics.mean(b[19] for b in lines)
+
+    # The same for each dock, against the same seconds
+    docks = {'actual': {'hide': m['callout_hidden'], 'hdmg': m['callout_hidden_damage'],
+                        'focus': m['callout_focus_cover'], 'other': m['callout_other_cover'],
+                        'window': m['callout_window'], 'zone': m['callout_zone']}}
+    by_name = {}
+    for d in game.get('docks', []):
+        by_name.setdefault(d[1], []).append(d)
+    for name, rows in sorted(by_name.items()):
+        # Box frames index the unit counts for the same second
+        counts = {b[0]: (b[10], b[11]) for b in boxes}
+        fn = sum(counts.get(r[0], (0, 0))[0] for r in rows)
+        on = sum(counts.get(r[0], (0, 0))[1] for r in rows)
+        at = under(rect_rows(rows, lambda r: r[7]))
+        docks[name] = {'hide': hidden(at, events), 'hdmg': hidden(at, hits),
+                       'focus': sum(r[4] for r in rows) / fn if fn else None,
+                       'other': sum(r[5] for r in rows) / on if on else None,
+                       'window': sum(1 for r in rows if r[6]) / len(rows),
+                       'zone': statistics.mean(r[8] for r in rows if r[8] is not None) if any(r[8] is not None for r in rows) else None}
+    m['callout_docks'] = docks
+
+    # Headlines: how often they change, and how many were gone before they could be read (replaced,
+    # or the shot changed)
+    callouts = game.get('callouts', [])
+    if callouts:
+        ends = sorted([c[0] for c in callouts] + [s[0] for s in game['shown']])
+        brief = 0
+        for c in callouts:
+            i = bisect.bisect_right(ends, c[0])
+            if i < len(ends) and ends[i] - c[0] < HEADLINE_BRIEF_S * FPS:
+                brief += 1
+        m['headlines_per_min'] = len(callouts) / minutes
+        m['headline_brief_share'] = brief / len(callouts)
+    return m
+
+
 # OUTPUT
 
-# (key, label, format, higher_is_better)
-SUMMARY_COLUMNS = [
-    ('duration_s', 'dur s', '{:.0f}', None),
-    ('deaths', 'deaths', '{:.0f}', None),
-    ('seen_at_death', 'seen', '{:.0%}', True),
-    ('anticipation', 'antic', '{:.2f}', True),
-    ('focus_at_death', 'focus', '{:.2f}', True),
-    ('framing', 'frame', '{:.2f}', True),
-    ('offcentre', 'offctr', '{:.2f}', False),
-    ('lead_s', 'lead s', '{:.1f}', True),
-    ('late_share', 'late', '{:.0%}', False),
-    ('missed_value', 'missed', '{:.0%}', False),
-    ('fights', 'fights', '{:.0f}', None),
-    ('setup_share', 'setup', '{:.0%}', True),
-    ('setup_s', 'setup s', '{:.1f}', True),
-    ('scene_hit', 'scnhit', '{:.0%}', True),
-    ('scene_lead_s', 'scn s', '{:.1f}', True),
-    ('scene_precision', 'scnprc', '{:.0%}', True),
-    ('damage_on_screen', 'dmg', '{:.2f}', True),
-    ('dead_air_s', 'dead s', '{:.0f}', False),
-    ('ally_balance', 'bal', '{:.2f}', True),
-    ('overview_share', 'ovw', '{:.0%}', None),
-    ('lulls_fired_per_min', 'lull/m', '{:.1f}', None),
-    ('mean_focus', 'mfocus', '{:.2f}', None),
-    ('shots_per_min', 'shot/m', '{:.1f}', None),
-    ('shot_s_median', 'shot s', '{:.1f}', None),
-    ('jumps_per_min', 'jump/m', '{:.1f}', False),
-    ('pingpong_per_min', 'ping/m', '{:.2f}', False),
-    ('short_shot_share', 'short', '{:.0%}', False),
-    ('same_spot_cut_share', 'same', '{:.0%}', False),
-    ('far_cuts_per_min', 'far/m', '{:.1f}', False),
-    ('far_cut_hit', 'farhit', '{:.0%}', True),
-    ('extends_per_min', 'ext/m', '{:.1f}', None),
-    ('framed_at_cut_share', 'frm0', '{:.0%}', None),
-    ('frame_s_median', 'frm s', '{:.1f}', False),
-    ('frame_s_p90', 'frm90', '{:.1f}', False),
-    ('unframed_cut_share', 'unfrm', '{:.0%}', False),
-    ('ring_off_share', 'ringof', '{:.0%}', False),
-    ('ring_part_share', 'ringpt', '{:.0%}', False),
-    ('close_share', 'close', '{:.0%}', None),
-    ('close_zoom', 'clzoom', '{:.2f}', None),
-    ('close_deaths', 'cldth', '{:d}', None),
-    ('close_seen', 'clseen', '{:.0%}', True),
-    ('orbits_per_min', 'orb/m', '{:.1f}', None),
-    ('orbit_drift_share', 'drift', '{:.0%}', None),
-    ('orbit_gain_median', 'orbgn', '{:.2f}', None),
-    ('away_from_north_share', 'south', '{:.0%}', None),
-    ('yaw_rate_p90', 'yaw90', '{:.0f}', False),
-    ('yaw_rate_max', 'yawmx', '{:.0f}', False),
-    ('override_share', 'user', '{:.0%}', None),
-    ('invalid_cam_share', 'badcam', '{:.0%}', False),
+# Sections follow INTENTS.md. (key, label, format, higher_is_better)
+SECTIONS = [
+    ('Show what matters', [
+        ('deaths', 'deaths', '{:.0f}', None),
+        ('seen_at_death', 'seen', '{:.0%}', True),
+        ('missed_value', 'missed', '{:.0%}', False),
+        ('damage_on_screen', 'dmg', '{:.2f}', True),
+        ('dead_air_s', 'dead s', '{:.0f}', False),
+        ('ally_balance', 'bal', '{:.2f}', True),
+        ('fair_share', 'fair', '{:.2f}', True),
+        ('builds', 'builds', '{:.0f}', None),
+        ('builds_seen', 'bseen', '{:.0%}', True),
+    ]),
+    ('See it coming, stay for the payoff', [
+        ('anticipation', 'antic', '{:.2f}', True),
+        ('lead_s', 'lead s', '{:.1f}', True),
+        ('late_share', 'late', '{:.0%}', False),
+        ('fights', 'fights', '{:.0f}', None),
+        ('setup_share', 'setup', '{:.0%}', True),
+        ('setup_s', 'setup s', '{:.1f}', True),
+        ('scene_hit', 'scnhit', '{:.0%}', True),
+        ('scene_lead_s', 'scn s', '{:.1f}', True),
+        ('scene_precision', 'scnprc', '{:.0%}', True),
+    ]),
+    ('Keep the viewer oriented', [
+        ('focus_at_death', 'focus', '{:.2f}', True),
+        ('framing', 'frame', '{:.2f}', True),
+        ('offcentre', 'offctr', '{:.2f}', False),
+        ('framed_at_cut_share', 'frm0', '{:.0%}', None),
+        ('frame_s_median', 'frm s', '{:.1f}', False),
+        ('frame_s_p90', 'frm90', '{:.1f}', False),
+        ('unframed_cut_share', 'unfrm', '{:.0%}', False),
+        ('ring_off_share', 'ringof', '{:.0%}', False),
+        ('ring_part_share', 'ringpt', '{:.0%}', False),
+        ('away_from_north_share', 'south', '{:.0%}', None),
+    ]),
+    ('Pace it', [
+        ('shots_per_min', 'shot/m', '{:.1f}', None),
+        ('shot_s_median', 'shot s', '{:.1f}', None),
+        ('pingpong_per_min', 'ping/m', '{:.2f}', False),
+        ('short_shot_share', 'short', '{:.0%}', False),
+        ('same_spot_cut_share', 'same', '{:.0%}', False),
+        ('far_cuts_per_min', 'far/m', '{:.1f}', False),
+        ('far_cut_hit', 'farhit', '{:.0%}', True),
+        ('extends_per_min', 'ext/m', '{:.1f}', None),
+        ('overview_share', 'ovw', '{:.0%}', None),
+        ('lulls_fired_per_min', 'lull/m', '{:.1f}', None),
+        ('mean_focus', 'mfocus', '{:.2f}', None),
+        ('close_share', 'close', '{:.0%}', None),
+        ('close_zoom', 'clzoom', '{:.2f}', None),
+        ('close_deaths', 'cldth', '{:d}', None),
+        ('close_seen', 'clseen', '{:.0%}', True),
+    ]),
+    ('Keep the camera invisible', [
+        ('jumps_per_min', 'jump/m', '{:.1f}', False),
+        ('orbits_per_min', 'orb/m', '{:.1f}', None),
+        ('orbit_drift_share', 'drift', '{:.0%}', None),
+        ('orbit_gain_median', 'orbgn', '{:.2f}', None),
+        ('yaw_rate_p90', 'yaw90', '{:.0f}', False),
+        ('yaw_rate_max', 'yawmx', '{:.0f}', False),
+    ]),
+    ('Commentate (headed runs only)', [
+        ('callout_share', 'up', '{:.0%}', None),
+        ('callout_move', 'move', '{:.2f}', False),
+        ('callout_hold_move', 'hmove', '{:.2f}', False),
+        ('callout_still', 'still', '{:.0%}', True),
+        ('callout_places_per_min', 'plc/m', '{:.1f}', False),
+        ('callout_better_per_min', 'btr/m', '{:.1f}', False),
+        ('callout_hidden', 'hide', '{:.1%}', False),
+        ('callout_hidden_damage', 'hdmg', '{:.1%}', False),
+        ('callout_focus_cover', 'cfoc', '{:.1%}', False),
+        ('callout_other_cover', 'coth', '{:.1%}', False),
+        ('callout_window', 'cwin', '{:.0%}', False),
+        ('callout_zone', 'czone', '{:.0%}', False),
+        ('callout_pointer', 'ptr', '{:.2f}', None),
+        ('pointer_units', 'pcross', '{:.1f}', False),
+        ('pointer_zone', 'pzone', '{:.0%}', False),
+        ('headlines_per_min', 'say/m', '{:.1f}', None),
+        ('headline_brief_share', 'brief', '{:.0%}', False),
+    ]),
+    ('Run', [
+        ('duration_s', 'dur s', '{:.0f}', None),
+        ('override_share', 'user', '{:.0%}', None),
+        ('invalid_cam_share', 'badcam', '{:.0%}', False),
+    ]),
 ]
+SUMMARY_COLUMNS = [c for _, cols in SECTIONS for c in cols]
+# A change on one game smaller than this share of the value is noise
+GAME_NOISE = 0.02
 
 TYPE_COLUMNS = [
     ('events_per_min', 'ev/min', '{:.1f}'),
@@ -697,17 +908,28 @@ def print_summary(games, out=sys.stdout):
     if not games:
         print('No games found.', file=out)
         return
-    cols = [c for c in SUMMARY_COLUMNS if any(g['metrics'].get(c[0]) is not None for g in games)]
-    rows = [[short_name(g)] + [fmt(g['metrics'].get(k), f) for k, _, f, _ in cols] for g in games]
-    if len(games) > 1:
-        mean = mean_metrics(games)
-        rows.append(['MEAN'] + [fmt(mean[k], f) for k, _, f, _ in cols])
-    print_table(['game'] + [c[1] for c in cols], rows, out)
+    mean = mean_metrics(games) if len(games) > 1 else None
+    for title, section in SECTIONS:
+        cols = [c for c in section if any(g['metrics'].get(c[0]) is not None for g in games)]
+        if not cols:
+            continue
+        rows = [[short_name(g)] + [fmt(g['metrics'].get(k), f) for k, _, f, _ in cols] for g in games]
+        if mean:
+            rows.append(['MEAN'] + [fmt(mean[k], f) for k, _, f, _ in cols])
+        print(f'{title}:', file=out)
+        print_table(['game'] + [c[1] for c in cols], rows, out)
 
     if not any(g['metrics'].get('deaths') for g in games):
         print('No rc-* lines found: enable STATS in replaycam.lua for camera metrics.\n', file=out)
 
     for g in games:
+        docks = g['metrics'].get('callout_docks')
+        if docks:
+            print(f'Callout where drawn and docked instead: {short_name(g)}', file=out)
+            print_table(['place', 'hide', 'hdmg', 'cfoc', 'coth', 'cwin', 'czone'],
+                        [[name] + [fmt(d.get(k), f) for k, f in (('hide', '{:.1%}'), ('hdmg', '{:.1%}'), ('focus', '{:.1%}'),
+                                                                  ('other', '{:.1%}'), ('window', '{:.0%}'), ('zone', '{:.0%}'))]
+                         for name, d in docks.items()], out)
         by_type = g['metrics'].get('by_type') or {}
         if by_type:
             print(f'Event types: {short_name(g)}', file=out)
@@ -747,19 +969,33 @@ def compare(base_path, new_path, out=sys.stdout):
 
     mb = mean_metrics([kb[k] for k in common])
     mn = mean_metrics([kn[k] for k in common])
-    rows = []
-    for key, label, f, higher_better in SUMMARY_COLUMNS:
-        if mb[key] is None and mn[key] is None:
-            continue
-        delta, verdict = '-', ''
-        if mb[key] is not None and mn[key] is not None:
-            d = mn[key] - mb[key]
-            delta = ('+' if d >= 0 else '') + f.format(d)
-            if higher_better is not None and abs(d) > 1e-9:
-                verdict = 'better' if (d > 0) == higher_better else 'worse'
-        rows.append([label, key, fmt(mb[key], f), fmt(mn[key], f), delta, verdict])
-    print(f'Comparing {len(common)} game(s): {base_path} -> {new_path}\n', file=out)
-    print_table(['metric', 'key', 'base', 'new', 'delta', ''], rows, out)
+    print(f'Comparing {len(common)} game(s): {base_path} -> {new_path}', file=out)
+    print('games: how many got better and worse by more than noise; a verdict needs the mean and most games to agree\n', file=out)
+    for title, section in SECTIONS:
+        rows = []
+        for key, label, f, higher_better in section:
+            if mb[key] is None and mn[key] is None:
+                continue
+            delta, verdict, games = '-', '', ''
+            if mb[key] is not None and mn[key] is not None:
+                d = mn[key] - mb[key]
+                delta = ('+' if d >= 0 else '') + f.format(d)
+                if higher_better is not None:
+                    up = down = 0
+                    for k in common:
+                        b, n = kb[k]['metrics'].get(key), kn[k]['metrics'].get(key)
+                        if b is not None and n is not None and abs(n - b) > GAME_NOISE * max(abs(b), abs(n), 1e-9):
+                            if (n > b) == higher_better:
+                                up += 1
+                            else:
+                                down += 1
+                    games = f'+{up} -{down}'
+                    if abs(d) > 1e-9 and up + down > 0:
+                        verdict = ('better' if (d > 0) == higher_better else 'worse') if (up > down) == ((d > 0) == higher_better) and up != down else 'mixed'
+            rows.append([label, key, fmt(mb[key], f), fmt(mn[key], f), delta, games, verdict])
+        if rows:
+            print(f'{title}:', file=out)
+            print_table(['metric', 'key', 'base', 'new', 'delta', 'games', ''], rows, out)
 
 
 def main():
@@ -784,7 +1020,8 @@ def main():
     for g in games:
         g['metrics'] = compute_metrics(g, args.ref_area)
         if args.no_timelines:
-            for k in ('cam', 'shown', 'framed', 'orbits', 'lulls', 'extends', 'scenes', 'deaths', 'damage'):
+            for k in ('cam', 'shown', 'framed', 'orbits', 'lulls', 'extends', 'scenes', 'deaths', 'damage',
+                      'rings', 'zooms', 'boxes', 'docks', 'built', 'callouts', 'places', 'windows'):
                 del g[k]
 
     result = {'infolog': args.infolog, 'ref_area': args.ref_area, 'games': games}
