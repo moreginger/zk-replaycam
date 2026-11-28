@@ -518,7 +518,7 @@ local lull = { damage = { now = 0, short = 0, long = 0, peak = 0 }, armed = fals
 -- so only where units are actually going counts, and less the further ahead it is.
 local scenes = {
 	-- Armed units are projected along their velocity to these times (s), with these weights
-	horizon = { 0, 3, 6, 9 }, discount = { 1, 0.6, 0.3, 0.15 },
+	horizon = { 0, 3, 6, 9 }, discount = { 1, 0.75, 0.5, 0.3 },
 	-- Metal an armed unit puts at stake, per metal of its own cost
 	leverage = 2,
 	-- A cell's stake counts by how far it has risen over its average of this many seconds, so a
@@ -614,8 +614,9 @@ local foci = {
 	bins = 16, binDecay = 0.8,
 	-- Heat is metal times these. A kill counts as damage and again as a death, so kills count
 	-- double. Also kept, for the callout only: kills by the killer's side and dealt (damage) by
-	-- the attacker's side; the rest are by the side that lost or did it.
-	weights = { damage = 1, destroyed = 1, captured = 1.5, started = 1, building = 0.5, built = 1, stake = 0.35, contact = 1,
+	-- the attacker's side; the rest are by the side that lost or did it. Trouble on its way (stake,
+	-- contact) counts high enough to draw the camera before the first hit, not after it.
+	weights = { damage = 1, destroyed = 1, captured = 1.5, started = 1, building = 0.5, built = 1, stake = 0.7, contact = 2,
 		orders = 0.1 },
 	-- Contact: an armed unit closing on something of the enemy's it can hit, due in range within
 	-- contactSeconds, adds the metal it could destroy there in a second, less the further off

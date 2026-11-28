@@ -53,6 +53,7 @@ FIGHT_GAP_S = 10            # action this long after a fight's last action start
 FIGHT_MIN_VALUE = 300       # metal lost for a fight to count as a payoff worth setting up
 SETUP_WINDOW = (10, 1)      # seconds before a fight starts in which its setup can be shown
 SETUP_MIN_S = 2             # seconds framed in that window for the setup to count as shown
+SETUP_IN_TIME_S = SETUP_WINDOW[1] + SETUP_MIN_S  # a scene this far ahead flagged the fight in time to set it up
 COMBAT_DEATH = (5, 1, 400)  # a death counts if damage was logged this many seconds before/after, this close
 BUILD_MIN_VALUE = 300       # metal for a finished build to count as news worth seeing
 BUILD_WINDOW = (3, 3)       # seconds before/after a build finishes in which it must be seen once
@@ -468,6 +469,7 @@ def compute_metrics(game, ref_area):
         near = [s for s in scenes[bisect.bisect_left(scene_frames, f0):bisect.bisect_right(scene_frames, f['frame'])]
                 if math.hypot(s[1] - f['x'], s[2] - f['z']) <= CLUSTER_RADIUS]
         f['scene_lead'] = (f['frame'] - near[0][0]) / FPS if near else None
+        f['in_time'] = f['scene_lead'] is not None and f['scene_lead'] >= SETUP_IN_TIME_S
     big_value = sum(f['value'] for f in big)
     metrics['fights'] = len(big)
     if big:
@@ -476,6 +478,11 @@ def compute_metrics(game, ref_area):
     if big and scenes:
         metrics['scene_hit'] = sum(f['value'] for f in big if f['scene_lead'] is not None) / big_value
         metrics['scene_lead_s'] = weighted_mean([(f['scene_lead'], f['value']) for f in big if f['scene_lead'] is not None])
+        # Fights not set up, by why: flagged in time but the camera stayed elsewhere, or flagged too
+        # late (or not at all) to get there
+        missed = [f for f in big if f['setup_s'] < SETUP_MIN_S]
+        metrics['setup_lost'] = sum(f['value'] for f in missed if f['in_time']) / big_value
+        metrics['setup_late'] = sum(f['value'] for f in missed if not f['in_time']) / big_value
         # Share of scene events with action nearby soon after
         metrics['scene_precision'] = sum(1 for s in scenes if any(
             math.hypot(ax - s[1], az - s[2]) <= CLUSTER_RADIUS
@@ -799,6 +806,8 @@ SECTIONS = [
         ('scene_hit', 'scnhit', '{:.0%}', True),
         ('scene_lead_s', 'scn s', '{:.1f}', True),
         ('scene_precision', 'scnprc', '{:.0%}', True),
+        ('setup_lost', 'stlost', '{:.0%}', False),
+        ('setup_late', 'stlate', '{:.0%}', False),
     ]),
     ('Keep the viewer oriented', [
         ('focus_at_death', 'focus', '{:.2f}', True),
@@ -826,7 +835,7 @@ SECTIONS = [
         ('mean_focus', 'mfocus', '{:.2f}', None),
         ('close_share', 'close', '{:.0%}', None),
         ('close_zoom', 'clzoom', '{:.2f}', None),
-        ('close_deaths', 'cldth', '{:d}', None),
+        ('close_deaths', 'cldth', '{:.0f}', None),
         ('close_seen', 'clseen', '{:.0%}', True),
     ]),
     ('Keep the camera invisible', [

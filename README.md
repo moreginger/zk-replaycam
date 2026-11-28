@@ -68,6 +68,7 @@ Key metrics, weighted by metal value:
 - `fights` / `setup` / `setup s` - fights are runs of deaths and damage near each other, counted when at least 300 metal is lost. `setup` is the share of them (by metal lost) whose opening spot was framed for at least 2s in the 10s before the first hit, and `setup s` is the mean time it was framed
 - `scnhit` / `scn s` - share of those fights (by metal lost) that a scene event flagged beforehand, and how many seconds ahead. Grades the prediction, whether or not the camera went there
 - `scnprc` - share of scene events followed by action nearby within 10s
+- `stlost` / `stlate` - why fights weren't set up, as shares of all fights by metal lost. `stlost`: a scene event flagged the fight at least 3s ahead, in time to get there, but the camera stayed elsewhere. `stlate`: no scene event flagged it that early. With `setup` they add up to 100%
 - `fair` - how closely screen time follows the stakes over each 3 minutes: the overlap between where the camera looked and where metal was lost, each counted with its neighbouring 512-elmo cells. 1 is screen time in proportion to the losses everywhere
 - `builds` / `bseen` - things worth 300 metal or more finished, and the share of them (by value) in view within 3s of finishing
 
